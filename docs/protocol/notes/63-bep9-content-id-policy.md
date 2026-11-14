@@ -46,12 +46,16 @@ synthetic AES-wrapped descriptor. It observed:
 A targeted inspection of `CoreApp.create_transport_file_wrapper` at ELF offset `0x651c60`
 found a `create_content_id` option, a call into `_update_torrent`, handling for
 `error while getting content id`, and separate `tfile` and `content_id` return fields.
-This is evidence of a separate content-id acquisition path. `_update_torrent` was not
-fully traced, so it proves neither deterministic public derivation nor arbitrary catalog
-server assignment. The synthetic probe also does not reproduce public catalog registration.
+This is evidence of a separate content-id acquisition path. Note 75 traces it on the
+same 3.2.11 build. The public id is not a local hash of the transport or the broadcaster
+key. The HLS upload path copies `content_id` from the server JSON response. The live BT
+`puttorrent` path returns an XML `id` and stores it as `player_id`. Neither result is a
+proof that today's catalog will accept a registration. The synthetic probe in this note
+does not reproduce public catalog registration.
 
-The earlier broadcaster-key conjecture in [transport-file.md](../transport-file.md) remains
-unestablished. Neither the raw transport SHA-1 nor the swarm infohash may be substituted
+The broadcaster-key conjecture is not how this build assigns a public content id.
+[Note 75](75-public-content-id-lifecycle.md) records the server-assigned paths. Neither
+the raw transport SHA-1 nor the swarm infohash may be substituted
 for the public catalog content id as a general binding rule. No public peer sampling was
 performed for this investigation; it does not establish that BEP-9 never works for public
 content ids.
