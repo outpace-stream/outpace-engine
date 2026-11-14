@@ -43,6 +43,7 @@ class UploadRequestTests(unittest.TestCase):
         )
         self.assertIsNone(upload.content_id_from_upload_json(ignored))
         self.assertIsNone(upload.content_id_from_upload_body(b"not-json"))
+        self.assertIsNone(upload.content_id_from_upload_body(b"\xff"))
 
 
 if __name__ == "__main__":

@@ -55,6 +55,6 @@ def content_id_from_upload_json(payload: object) -> str | None:
 def content_id_from_upload_body(body: bytes) -> str | None:
     try:
         payload = json.loads(body)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return content_id_from_upload_json(payload)

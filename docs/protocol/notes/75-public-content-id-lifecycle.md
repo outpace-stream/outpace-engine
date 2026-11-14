@@ -252,9 +252,10 @@ the resulting `acestream://` link.
 1. The public content id is created by the server and returned to the client.
    The HLS client sends the transport and reads JSON `content_id`. The live BT
    client, on the code path, sends `puttorrent` and reads XML `id`.
-2. It is assigned, then optionally remembered. It is not a deterministic
-   function of the descriptor. The HLS client does not remember it in the
-   file. The live BT client remembers `player_id` in `ts_players`.
+2. The inspected client does not derive the id from the descriptor. The
+   server's assignment algorithm is unknown. The HLS client does not remember
+   the returned id in the file. The live BT client remembers `player_id` in
+   `ts_players`.
 3. The swarm infohash is the selector hash from `transport-file.md`. The
    content id is a different value stored or returned beside it. SHA-1 of the
    wrapped bytes is a third value and is what Outpace uses for its own links.
