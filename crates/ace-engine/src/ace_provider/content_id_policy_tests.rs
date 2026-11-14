@@ -24,6 +24,13 @@ impl Drop for MetadataPeer {
     }
 }
 
+struct RemoveDir<'a>(&'a std::path::Path);
+impl Drop for RemoveDir<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.0);
+    }
+}
+
 async fn metadata_peer(key: [u8; 20], bytes: Vec<u8>) -> (SocketAddrV4, MetadataPeer) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let std::net::SocketAddr::V4(addr) = listener.local_addr().unwrap() else {
@@ -503,11 +510,18 @@ async fn parsed_vod_protection_refuses_before_store_with_public_control() {
         for premium in [1, 2, 0] {
             let bytes = test_support::protection_vod_bytes(premium, disk);
             // Disk-store creation is a durable first-forbidden-boundary sentinel:
-            // even a transient lease would create this directory.
-            let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
-                "../../target/acceptance279-{}-{disk}-{premium}",
-                std::process::id()
+            // even a transient lease would create this directory. Keep it out of
+            // `target/`: the CI rust cache restores that tree, and a reused process
+            // id then makes this pre-check fail before the test creates anything.
+            let cache = std::env::temp_dir().join(format!(
+                "outpace-acceptance279-{}-{disk}-{premium}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_nanos())
+                    .unwrap_or(0)
             ));
+            let _remove_cache = RemoveDir(&cache);
             assert!(!cache.exists());
             let mut p = provider().with_bep9_content_id_fallback(true);
             // Isolate the store boundary: with_cache also starts an independent

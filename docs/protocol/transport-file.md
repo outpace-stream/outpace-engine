@@ -99,22 +99,41 @@ handshakes:
 - `tests/vectors/transport-02.bin` → transport-file hash =
   `ed2c05b3b022e9cc7b7c1ca46d20f10839dc4108`
 
-## content_id — OPEN
+## content_id — server-assigned
 
-The engine can resolve public content ids to descriptors and expose a content id for
-some existing infohashes. Historical observations of stable content ids alongside rotating
-live infohashes motivated a broadcaster-key derivation conjecture; neither that conjecture
-nor a general derivation algorithm has been established. The candidate key hashes examined
-in note 35 did not establish such a binding.
+Public catalog content ids are neither the swarm infohash nor `SHA1` of the wrapped
+transport. Engine 3.2.11 does not derive them from the broadcaster key. The candidate
+key hashes in note 35 remain unmatched, and no local derivation algorithm was recovered.
 
-An offline synthetic probe of engine 3.2.11 found that `TransportFile.dump()` preserves the
-raw wrapped bytes, while `get_hash()`, `get_infohash()` and `get_def().get_hash()` agree on
-a value different from SHA-1 of those bytes. A live `TransportDescriptorBT` has no
-`get_content_id` method; `TorrentDef.get_content_id()` initially returns `None`, and an
-explicitly set synthetic id roundtrips. The engine's transport-creation wrapper has a
-separate content-id acquisition path through `_update_torrent`; that path has not been
-fully traced. These observations establish neither a deterministic public derivation nor
-arbitrary server assignment.
+Two client paths assign or recover an id, and they are not the same protocol:
+
+- **HLS publish and `get-file-info-with-id`.** Confirmed on this build with a local mock
+  and no production catalog. The engine `POST`s base64 of the wrapped transport to
+  `http://api.torrentstream.net/upload/raw`. A publish adds `publish=1` and the swarm
+  infohash. The id is whatever string the JSON response puts in `content_id`. The engine
+  copies that field through. `player_id` and `id` in the same object are ignored. With
+  the network blocked, the same file reports an infohash and no content id. The id is
+  not stored in the transport bytes. See [note 75](notes/75-public-content-id-lifecycle.md).
+- **Live BT registration.** `create_transport_file_wrapper(..., create_content_id=...)`
+  calls `_update_torrent`, which calls `TSService.send_torrent` (`puttorrent`). The
+  response id is the XML tag `id`, saved as `player_id` in the local `ts_players` table
+  keyed by checksum or infohash plus developer, affiliate, and zone ids. That path is
+  recovered from the 3.2.11 binary and its Python bytecode. It was not executed against
+  a mock in note 75, because the live source node exited before it opened a socket.
+
+An offline synthetic probe of the same build found that `TransportFile.dump()` preserves
+the raw wrapped bytes, while `get_hash()`, `get_infohash()` and `get_def().get_hash()`
+agree on a value different from SHA-1 of those bytes. A live `TransportDescriptorBT` has
+no `get_content_id` method. `TorrentDef.get_content_id()` starts as `None`; an explicitly
+set synthetic id roundtrips. That stored value is not evidence that the engine computed it.
+
+A provider content id passed to `TorrentDef.create_live` is a third identifier. The
+stream-node parser accepts `[A-Za-z0-9_-]+` and requires a 32-hex provider key. It is
+not the 40-hex catalog id.
+
+Whether the production catalog accepts an anonymous `upload/raw` or `puttorrent`, and
+whether it will later resolve that id through `/gettorrent`, was not tested. Note 75
+records the client behavior and the remaining server-side gap.
 
 Outpace-originated broadcasts deliberately use `SHA1(raw wrapped transport bytes)` as
 their content id. This convention must not be imposed on public catalog responses.
