@@ -475,7 +475,7 @@ impl AceProvider {
                 &infohash,
             )
         });
-        self.check_vod_disk_space(&store.0, info.total_length)
+        self.check_vod_disk_space(&store.0, info.total_length, info.chunk_length)
             .await?;
         Ok(Box::new(AceVodContent {
             peer_policy: self.peer_policy.clone(),
@@ -497,6 +497,7 @@ impl AceProvider {
         &self,
         store: &Arc<tokio::sync::Mutex<PieceStore>>,
         total: u64,
+        chunk_length: u64,
     ) -> Result<(), ProviderError> {
         let (budget, held) = {
             let guard = store.lock().await;
@@ -511,16 +512,22 @@ impl AceProvider {
                 .await
                 .ok()
                 .flatten();
-        crate::disk_space::check_fit(total, budget, held, available, self.vod_disk_reserve).map_err(
-            |no_space| {
-                crate::alog!(
-                    "[vod] start refused: code=no_space required={} available={}",
-                    no_space.required,
-                    no_space.available
-                );
-                ProviderError::NoSpace(no_space.message())
-            },
+        crate::disk_space::check_fit(
+            total,
+            budget,
+            held,
+            chunk_length,
+            available,
+            self.vod_disk_reserve,
         )
+        .map_err(|no_space| {
+            crate::alog!(
+                "[vod] start refused: code=no_space required={} available={}",
+                no_space.required,
+                no_space.available
+            );
+            ProviderError::NoSpace(no_space.message())
+        })
     }
 
     /// Fetch the VOD transport descriptor for `id` and decode it into a [`VodInfo`]. Accepts a

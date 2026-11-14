@@ -186,7 +186,9 @@ fails instead of deleting anything.
 With `OUTPACE_CACHE_TYPE=disk`, a VOD start first checks the free space on the filesystem that
 holds `OUTPACE_CACHE_DIR`. The download needs the file's size from its descriptor, capped at
 `OUTPACE_SEED_STORE_BYTES` (the store never keeps more than that), minus whatever the cache
-already holds for the same file. It must fit with a margin to spare: the larger of
+already holds for the same file. A store that is already at that cap still needs room for one
+more chunk, because a new chunk is written before an old piece is evicted; only a file that is
+fully cached needs nothing. It must fit with a margin to spare: the larger of
 `OUTPACE_VOD_DISK_RESERVE_BYTES` and 5% of the bytes needed. Otherwise the start is refused with
 `507` and the `no_space` code ([error codes](Playing-Streams#native-error-responses)).
 

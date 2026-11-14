@@ -39,6 +39,9 @@ impl NoSpace {
 ///   the download needs at most `min(total, budget)`.
 /// - `held`: bytes the store already holds for this content (a resumed or seeded file), which
 ///   need no new space.
+/// - `peak`: bytes one write can add before the store evicts (a chunk: the disk backend writes,
+///   then evicts). A store held at its budget still needs this, plus the margin, unless the
+///   whole file is already held and nothing more is written.
 /// - `available`: free bytes on the cache filesystem, or `None` when unknown (unsupported
 ///   platform or a failed query), which always allows the start.
 /// - `reserve`: free space to keep regardless of size; the margin is the larger of this and 5%
@@ -47,13 +50,17 @@ pub fn check_fit(
     total: u64,
     budget: u64,
     held: u64,
+    peak: u64,
     available: Option<u64>,
     reserve: u64,
 ) -> Result<(), NoSpace> {
-    let need = total.min(budget).saturating_sub(held);
     let Some(available) = available else {
         return Ok(());
     };
+    if held >= total {
+        return Ok(());
+    }
+    let need = total.min(budget).saturating_sub(held).max(peak);
     if need == 0 {
         return Ok(());
     }
@@ -159,13 +166,16 @@ mod tests {
 
     #[test]
     fn fits_when_free_space_covers_need_plus_reserve() {
-        assert_eq!(check_fit(GIB, 4 * GIB, 0, Some(2 * GIB), 256 * MIB), Ok(()));
+        assert_eq!(
+            check_fit(GIB, 4 * GIB, 0, 0, Some(2 * GIB), 256 * MIB),
+            Ok(())
+        );
     }
 
     #[test]
     fn refuses_when_the_reserve_floor_does_not_fit() {
         // Need 100 MiB; 5% is 5 MiB, so the 256 MiB reserve is the margin.
-        let err = check_fit(100 * MIB, GIB, 0, Some(300 * MIB), 256 * MIB).unwrap_err();
+        let err = check_fit(100 * MIB, GIB, 0, 0, Some(300 * MIB), 256 * MIB).unwrap_err();
         assert_eq!(err.required, 356 * MIB);
         assert_eq!(err.available, 300 * MIB);
     }
@@ -173,10 +183,10 @@ mod tests {
     #[test]
     fn proportional_margin_wins_for_large_downloads() {
         // Need 20 GiB; 5% (1 GiB) exceeds the 256 MiB reserve.
-        let err = check_fit(20 * GIB, u64::MAX, 0, Some(21 * GIB - 1), 256 * MIB).unwrap_err();
+        let err = check_fit(20 * GIB, u64::MAX, 0, 0, Some(21 * GIB - 1), 256 * MIB).unwrap_err();
         assert_eq!(err.required, 21 * GIB);
         assert_eq!(
-            check_fit(20 * GIB, u64::MAX, 0, Some(21 * GIB), 256 * MIB),
+            check_fit(20 * GIB, u64::MAX, 0, 0, Some(21 * GIB), 256 * MIB),
             Ok(())
         );
     }
@@ -185,10 +195,10 @@ mod tests {
     fn need_is_capped_by_the_store_budget() {
         // A 10 GiB file in a 128 MiB store never needs more than 128 MiB on disk.
         assert_eq!(
-            check_fit(10 * GIB, 128 * MIB, 0, Some(384 * MIB), 256 * MIB),
+            check_fit(10 * GIB, 128 * MIB, 0, 0, Some(384 * MIB), 256 * MIB),
             Ok(())
         );
-        let err = check_fit(10 * GIB, 128 * MIB, 0, Some(383 * MIB), 256 * MIB).unwrap_err();
+        let err = check_fit(10 * GIB, 128 * MIB, 0, 0, Some(383 * MIB), 256 * MIB).unwrap_err();
         assert_eq!(err.required, 384 * MIB);
     }
 
@@ -196,28 +206,55 @@ mod tests {
     fn already_cached_bytes_need_no_new_space() {
         // 900 MiB of a 1 GiB file is held: only 124 MiB plus the reserve is needed.
         assert_eq!(
-            check_fit(GIB, 4 * GIB, 900 * MIB, Some(380 * MIB), 256 * MIB),
+            check_fit(GIB, 4 * GIB, 900 * MIB, 0, Some(380 * MIB), 256 * MIB),
             Ok(())
         );
         // A fully held file starts even on a full disk.
-        assert_eq!(check_fit(GIB, 4 * GIB, GIB, Some(0), 256 * MIB), Ok(()));
-        assert_eq!(check_fit(GIB, 4 * GIB, 2 * GIB, Some(0), 256 * MIB), Ok(()));
+        assert_eq!(check_fit(GIB, 4 * GIB, GIB, 0, Some(0), 256 * MIB), Ok(()));
+        assert_eq!(
+            check_fit(GIB, 4 * GIB, 2 * GIB, 0, Some(0), 256 * MIB),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_store_at_its_budget_still_needs_a_chunk_plus_the_reserve() {
+        // 128 MiB held of a 1 GiB file in a 128 MiB store: each new chunk is written before an
+        // old piece is evicted, so a full disk would fail the very next write.
+        let err = check_fit(GIB, 128 * MIB, 128 * MIB, 16 * 1024, Some(0), 256 * MIB).unwrap_err();
+        assert_eq!(err.required, 16 * 1024 + 256 * MIB);
+        assert_eq!(
+            check_fit(
+                GIB,
+                128 * MIB,
+                128 * MIB,
+                16 * 1024,
+                Some(257 * MIB),
+                256 * MIB
+            ),
+            Ok(())
+        );
+        // The whole file held: nothing is written, so a full disk is fine.
+        assert_eq!(
+            check_fit(GIB, 4 * GIB, GIB, 16 * 1024, Some(0), 256 * MIB),
+            Ok(())
+        );
     }
 
     #[test]
     fn unknown_free_space_allows_the_start() {
-        assert_eq!(check_fit(u64::MAX, u64::MAX, 0, None, u64::MAX), Ok(()));
+        assert_eq!(check_fit(u64::MAX, u64::MAX, 0, 0, None, u64::MAX), Ok(()));
     }
 
     #[test]
     fn zero_reserve_keeps_the_proportional_margin() {
-        assert!(check_fit(100 * MIB, GIB, 0, Some(104 * MIB), 0).is_err());
-        assert_eq!(check_fit(100 * MIB, GIB, 0, Some(105 * MIB), 0), Ok(()));
+        assert!(check_fit(100 * MIB, GIB, 0, 0, Some(104 * MIB), 0).is_err());
+        assert_eq!(check_fit(100 * MIB, GIB, 0, 0, Some(105 * MIB), 0), Ok(()));
     }
 
     #[test]
     fn saturates_instead_of_overflowing() {
-        let err = check_fit(u64::MAX, u64::MAX, 0, Some(GIB), u64::MAX).unwrap_err();
+        let err = check_fit(u64::MAX, u64::MAX, 0, 0, Some(GIB), u64::MAX).unwrap_err();
         assert_eq!(err.required, u64::MAX);
     }
 

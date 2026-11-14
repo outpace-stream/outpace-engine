@@ -137,6 +137,10 @@ impl VodContent for AceVodContent {
         }
         let piece_length = self.info.piece_length;
         let range_guard = self.range_lock.clone().lock_owned().await;
+        // A range that held the lock while we waited may have filled the disk.
+        if self.no_space.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(no_space_mid_download());
+        }
         // The contiguous pieces covering [start, end]. `download_vod_pieces` verifies each whole
         // piece against its SHA-1 hash before emitting it, so trimming its output to the range
         // never yields an unverified byte.
