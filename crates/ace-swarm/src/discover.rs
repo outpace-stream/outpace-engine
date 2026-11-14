@@ -16,6 +16,7 @@ use std::time::Duration;
 const DISCOVERY_PEER_TARGET: usize = 8;
 const TRACKER_PARALLELISM: usize = 4;
 const TRACKER_DEADLINE: Duration = Duration::from_secs(2);
+const PROXIED_TRACKER_DEADLINE: Duration = Duration::from_secs(5);
 /// Maximum unique addresses retained and queued by one incremental discovery run.
 pub const MAX_DISCOVERY_PEERS: usize = 1024;
 
@@ -280,26 +281,30 @@ async fn tracker_exchange<F>(
 where
     F: Future<Output = Vec<SocketAddrV4>>,
 {
-    tokio::time::timeout(TRACKER_DEADLINE, async {
+    // A proxied announce adds the SOCKS5 UDP association and the proxy hop to each round trip.
+    let deadline = if crate::proxy::active().is_some() {
+        PROXIED_TRACKER_DEADLINE
+    } else {
+        TRACKER_DEADLINE
+    };
+    tokio::time::timeout(deadline, async {
         let addresses = resolution.await;
         let Some(addr) = addresses.first() else {
             return Vec::new();
         };
-        announce(
-            *addr,
-            infohash,
-            peer_id,
-            port,
-            200,
-            TransferState {
-                downloaded: 0,
-                left,
-                uploaded: 0,
-            },
-            event,
-        )
-        .await
-        .unwrap_or_default()
+        let transfer = TransferState {
+            downloaded: 0,
+            left,
+            uploaded: 0,
+        };
+        if let Some(peers) =
+            crate::proxy::tracker_announce(*addr, infohash, peer_id, 200, transfer, event).await
+        {
+            return peers;
+        }
+        announce(*addr, infohash, peer_id, port, 200, transfer, event)
+            .await
+            .unwrap_or_default()
     })
     .await
     .unwrap_or_default()

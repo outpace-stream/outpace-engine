@@ -32,13 +32,24 @@ pub async fn get(
     timeout: Duration,
 ) -> Result<Vec<u8>, EngineHttpError> {
     tokio::time::timeout(timeout, async {
-        let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
-        let addr = http_fetch::resolve_addr(host, port, FetchPolicy::default(), cancel)
-            .await
-            .map_err(|_| EngineHttpError::Resolve)?;
-        let mut stream = TcpStream::connect(addr)
-            .await
-            .map_err(|_| EngineHttpError::Connect)?;
+        let mut stream =
+            if crate::proxy::active().is_some() && host.parse::<std::net::IpAddr>().is_err() {
+                // Through the proxy a host name is resolved remotely; the local resolver never
+                // sees it. These are fixed service hosts, not operator or peer input.
+                crate::proxy::connect_host(host, port)
+                    .await
+                    .map_err(|_| EngineHttpError::Connect)?
+            } else {
+                let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+                let addr = http_fetch::resolve_addr(host, port, FetchPolicy::default(), cancel)
+                    .await
+                    .map_err(|_| EngineHttpError::Resolve)?;
+                match crate::proxy::active() {
+                    None => TcpStream::connect(addr).await,
+                    Some(_) => crate::proxy::connect_host(&addr.ip().to_string(), port).await,
+                }
+                .map_err(|_| EngineHttpError::Connect)?
+            };
         let host_header = if port == 80 {
             host.to_owned()
         } else {

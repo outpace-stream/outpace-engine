@@ -526,6 +526,11 @@ config_with_root_redaction! {
     /// Opt-in AceStream engine identity. Off by default, so Outpace keeps its own labels.
     #[serde(skip)]
     pub acestream_identity: AcestreamIdentitySettings,
+    /// Optional outbound SOCKS5 proxy for peer, tracker and catalog connections
+    /// (`OUTPACE_PROXY`, `OUTPACE_PROXY_MODE`). Off by default. Skipped by serde so a
+    /// serialized config cannot carry proxy credentials; `Debug` redacts them.
+    #[serde(skip)]
+    pub proxy: ace_swarm::proxy::ProxySettings,
 }
 
 impl Config {
@@ -586,6 +591,7 @@ impl Default for Config {
             broadcast_sources: BTreeMap::new(),
             allow_non_global_broadcast_source: false,
             acestream_identity: AcestreamIdentitySettings::default(),
+            proxy: Default::default(),
         }
     }
 }

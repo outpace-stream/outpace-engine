@@ -69,6 +69,8 @@ See [Releases and Versions](Releases-and-Versions) for publication status.
 | [`OUTPACE_PREFETCH_PIECES`](Configuration#playback-and-startup-buffering) | automatic | all | Pieces behind the live edge to start at. |
 | [`OUTPACE_PRIVATE_DESCRIPTORS`](Configuration#private-peers-and-descriptors) | unset | 1.0.0 | Local descriptor files, as an alias-to-path JSON object. |
 | [`OUTPACE_PRIVATE_PEERS`](Configuration#private-peers-and-descriptors) | unset | 1.0.0 | Allowlist that switches on private peer mode. |
+| [`OUTPACE_PROXY`](Configuration#outbound-proxy) | unset | edge | SOCKS5 proxy for peer, tracker and catalog connections, `socks5://[user:password@]host:port`. Treat as a secret when it has credentials. |
+| [`OUTPACE_PROXY_MODE`](Configuration#outbound-proxy) | `off` | edge | `off`, `on` or `fallback` (proxy only after a live start finds no peers). |
 | [`OUTPACE_REQUEST_CHECK_INTERVAL_MS`](Configuration#live-recovery-advanced) | `1000` | all | How often outstanding piece requests are checked. |
 | [`OUTPACE_REQUEST_TIMEOUT_MS`](Configuration#live-recovery-advanced) | `1500` | all | Wait for a piece before asking another peer. |
 | [`OUTPACE_RTMP_BIND`](Configuration#network-and-listeners) | `127.0.0.1:1935` | all | RTMP ingest address. The container sets `0.0.0.0:1935`. |

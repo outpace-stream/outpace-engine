@@ -212,6 +212,9 @@ fn broadcast_config(
     if config.peer_policy.is_private() {
         return Err("private_mode_broadcast_cli_requires_inbound_peers");
     }
+    if config.proxy.always_proxied() {
+        return Err("OUTPACE_PROXY_MODE=on cannot broadcast: peers cannot reach the engine");
+    }
     config.enable_inbound = true;
     Ok(config)
 }
@@ -324,6 +327,8 @@ async fn run_play(args: PlayArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut peers = crate::runtime::bootstrap_peers_from_env();
     peers.extend(args.peers);
     crate::private_network::validate_private_config(&config, &peers)?;
+    crate::outbound_proxy::validate_proxy_config(&config)?;
+    ace_swarm::proxy::install(&config.proxy);
     let local_descriptors = config.private_descriptors.load()?;
 
     let identity = std::sync::Arc::new(crate::config::load_or_create_identity(&config.data_dir)?);

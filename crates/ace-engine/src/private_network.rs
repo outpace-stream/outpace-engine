@@ -83,12 +83,14 @@ pub fn apply_private_env(
 
 /// Public status is deliberately narrower than serialized operator configuration.
 pub fn policy_status(policy: &ace_swarm::peer_policy::PeerPolicy) -> serde_json::Value {
-    if policy.is_private() {
+    let mut status = if policy.is_private() {
         serde_json::json!({"mode":"private", "allowed_peer_count":policy.endpoint_count(),
             "inbound_peer_connections":false, "public_discovery":false, "public_advertising":false})
     } else {
         serde_json::json!({"mode":"public", "allowed_peer_count":null})
-    }
+    };
+    status["proxy"] = crate::outbound_proxy::proxy_status();
+    status
 }
 
 #[cfg(test)]

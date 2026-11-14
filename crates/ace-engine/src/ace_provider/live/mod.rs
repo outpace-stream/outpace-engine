@@ -3,6 +3,9 @@ use ace_swarm::live_session::{follow_live, LiveCounters, LiveSeedOptions, LiveSe
 
 const INITIAL_DISCOVERY_BUDGET: Duration = Duration::from_secs(10);
 const EMPTY_DISCOVERY_RETRY_GAP: Duration = Duration::from_secs(1);
+/// `OUTPACE_PROXY_MODE=fallback`: how long a direct start may have candidates but no connected
+/// peer before new connections switch to the proxy.
+const FALLBACK_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 
 pub(super) struct AceSource {
     pub(super) metrics: Option<Arc<crate::live_stats::LiveMetrics>>,
@@ -205,6 +208,24 @@ impl AceProvider {
                 _ = async { if private { std::future::pending::<()>().await; } else { announce_seeder_periodically(announce_info, announce_port).await; } } => {},
             }
         });
+        // `OUTPACE_PROXY_MODE=fallback`: candidates were found, but if none connects within
+        // the window, switch new dials to the proxy. The live loop keeps retrying candidates,
+        // so this start continues through the proxy without a restart. Only spawned while
+        // fallback is still direct; it holds no strong reference to the session.
+        if ace_swarm::proxy::mode() == ace_swarm::proxy::ProxyMode::Fallback
+            && ace_swarm::proxy::active().is_none()
+        {
+            let connected = Arc::downgrade(&peer_count);
+            tokio::spawn(async move {
+                tokio::time::sleep(FALLBACK_CONNECT_WINDOW).await;
+                let unconnected = connected
+                    .upgrade()
+                    .is_some_and(|peers| peers.load(Ordering::Relaxed) == 0);
+                if unconnected && ace_swarm::proxy::engage_fallback() {
+                    crate::alog!("[proxy] no peer connected directly; retrying through the proxy");
+                }
+            });
+        }
         let source = AceSource {
             metrics: Some(metrics),
             sampler: Some(sampler),

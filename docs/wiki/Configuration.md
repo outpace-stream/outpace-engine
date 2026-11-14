@@ -23,7 +23,7 @@ reads.
 - **Units** are in the setting name: `_MS` is milliseconds, `_SECS`/`_SECONDS` is seconds and
   `_BYTES` is bytes. Byte values are plain integers: write `134217728`, not `128MiB`.
 - **Addresses** are numeric socket addresses: `127.0.0.1:6878`, `0.0.0.0:8621`,
-  `[::1]:6878`. Hostnames aren't accepted.
+  `[::1]:6878`. Hostnames aren't accepted. The one exception is the host in `OUTPACE_PROXY`.
 
 ### Exposed defaults
 
@@ -163,7 +163,7 @@ See [Seeding and Peers](Seeding-and-Peers).
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
 | `OUTPACE_ENABLE_SEEDING` | `true` | boolean | all | Answer piece requests from peers you downloaded from. |
-| `OUTPACE_ENABLE_INBOUND` | `true` | boolean | all | Run the peer listener on `OUTPACE_PEER_LISTEN`, serve inbound peers and announce to trackers and the DHT. Set both this and seeding to `0` for download-only. |
+| `OUTPACE_ENABLE_INBOUND` | `true` | boolean | all | Run the peer listener on `OUTPACE_PEER_LISTEN`, serve inbound peers and announce to trackers and the DHT. Set both this and seeding to `0` for download-only. Defaults to off, and can't be `1`, with `OUTPACE_PROXY_MODE=on`. |
 | `OUTPACE_MAX_INBOUND` | `64` | integer (`0` acts as `1`) | all | Inbound connections kept open in total, including ones still handshaking. Extra connections close at once. |
 | `OUTPACE_MAX_INBOUND_PER_STREAM` | `16` | integer, `0` = no per-stream cap | all | Inbound connections admitted per stream. |
 | `OUTPACE_MAX_UNCHOKED` | `8` | integer | all | Peers per stream allowed to download from you at once, plus one rotating "optimistic" slot. `0` still allows the optimistic slot. |
@@ -215,9 +215,21 @@ See [NAT and Port Mapping](NAT-and-Port-Mapping).
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_ENABLE_PORT_MAPPING` | `false` | boolean | all | Ask the gateway to forward the peer port. Only works when Outpace owns the LAN address (bare metal or host networking), and only when inbound serving is on. Failure is logged and isn't fatal. |
+| `OUTPACE_ENABLE_PORT_MAPPING` | `false` | boolean | all | Ask the gateway to forward the peer port. Only works when Outpace owns the LAN address (bare metal or host networking), and only when inbound serving is on. Failure is logged and isn't fatal. Not allowed with `OUTPACE_PROXY_MODE=on`. |
 | `OUTPACE_PORT_MAP_BACKEND` | `auto` | `auto`, `upnp`, `natpmp`, `none` | all | `auto` tries UPnP-IGD, then NAT-PMP. |
 | `OUTPACE_PORT_MAP_EXTERNAL_PORT` | same as the peer port | 1–65535 | all | External port to request. Leave unset so the announced port matches. |
+
+## Outbound proxy
+
+See [Outbound Proxy](Outbound-Proxy).
+
+| Setting | Default | Accepted values | Avail. | Notes |
+| --- | --- | --- | --- | --- |
+| `OUTPACE_PROXY` | unset | `socks5://[user:password@]host:port` (`socks5h://` also accepted) | edge | SOCKS5 proxy for outgoing peer connections, UDP tracker announces and catalog/search requests. Host names are resolved by the proxy. Never logged with its credentials. |
+| `OUTPACE_PROXY_MODE` | `off` | `off`, `on`, `fallback` | edge | `on` proxies from the start and turns inbound serving and port mapping off (setting either to `1` is an error). `fallback` stays direct until a live start finds no peers, or none connects within 10 seconds, then proxies engine-wide until restart. `on` and `fallback` require `OUTPACE_PROXY`. |
+
+While the proxy is active the DHT is off, the advertised listen port is `0` and there is no
+self-announce. UDP trackers use SOCKS5 `UDP ASSOCIATE` and are turned off if the proxy refuses it.
 
 ## Private peers and descriptors
 

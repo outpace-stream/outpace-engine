@@ -39,7 +39,6 @@ use crate::provider::{
     VodContent,
 };
 use crate::startup_buffer::StartupBufferedSource;
-use ace_peer::session::connect;
 #[cfg(test)]
 use ace_peer::session::PeerSession;
 use ace_swarm::dht::dht_announce_peer;
@@ -688,10 +687,33 @@ impl StreamProvider for AceProvider {
         );
         progress.resolved();
 
+        // Only a direct start under `OUTPACE_PROXY_MODE=fallback` can be retried, so only
+        // then is the resolved info kept for a second attempt.
+        let retry = (ace_swarm::proxy::mode() == ace_swarm::proxy::ProxyMode::Fallback
+            && ace_swarm::proxy::active().is_none())
+        .then(|| info.clone());
+        let discovery = self.live_discovery(&info);
+        let opened = match self.open_resolved(id, info, discovery).await {
+            Err(ProviderError::NoPeers(_))
+                if retry.is_some() && ace_swarm::proxy::engage_fallback() =>
+            {
+                let info = retry.expect("checked above");
+                crate::alog!("[proxy] retrying the live start through the proxy");
+                let discovery = self.live_discovery(&info);
+                self.open_resolved(id, info, discovery).await
+            }
+            other => other,
+        };
+        opened.map_err(|error| ProviderStartFailure::new(StartFailureKind::Discovery, error))
+    }
+}
+
+impl AceProvider {
+    fn live_discovery(&self, info: &StreamInfo) -> PeerDiscovery {
         let trackers = info.trackers.clone();
         let infohash = info.infohash;
         let port = self.discovery_announce_port();
-        let discovery: PeerDiscovery = Arc::new(move |options, sender| {
+        Arc::new(move |options, sender| {
             let trackers = trackers.clone();
             Box::pin(async move {
                 discover_peers_incremental(
@@ -704,10 +726,7 @@ impl StreamProvider for AceProvider {
                 )
                 .await
             })
-        });
-        self.open_resolved(id, info, discovery)
-            .await
-            .map_err(|error| ProviderStartFailure::new(StartFailureKind::Discovery, error))
+        })
     }
 }
 

@@ -77,7 +77,8 @@ Rules for these inputs:
 ### How `play` behaves
 
 - It reads the same `OUTPACE_*` environment as `serve`: data directory and identity, buffering,
-  recovery, seeding and private peers. It never opens a listener, and never announces itself.
+  recovery, seeding, private peers and the [outbound proxy](Outbound-Proxy). It never opens a
+  listener, and never announces itself.
 - It writes `outpace play: <input>` and the resolved id to standard error. Remove these lines
   before you share logs; see [Troubleshooting](Troubleshooting#reporting-a-bug).
 - A live stream runs until you stop it (Ctrl+C) or the reader closes the pipe.
@@ -107,7 +108,8 @@ On standard error it prints:
 The command:
 
 - always turns inbound peer serving on, because a broadcast needs it;
-- refuses to run in private peer mode;
+- refuses to run in private peer mode, or with `OUTPACE_PROXY_MODE=on`
+  (see [Outbound Proxy](Outbound-Proxy));
 - applies the name's profile from `OUTPACE_BROADCAST_OPTIONS`, if there is one.
 
 ## `outpace service` (Windows)

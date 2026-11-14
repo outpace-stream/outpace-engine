@@ -35,6 +35,10 @@ Why you might not:
 - a network that can't accept inbound connections anyway (see
   [NAT and Port Mapping](NAT-and-Port-Mapping)).
 
+An active [outbound proxy](Outbound-Proxy) also stops inbound serving from being advertised:
+with `OUTPACE_PROXY_MODE=on` Outpace runs as a leecher with reciprocal upload, and after a
+`fallback` switch it stops announcing itself.
+
 Playback works in every mode.
 
 ## The peer port

@@ -564,6 +564,10 @@ pub async fn dht_get_peers_incremental(
     peer_target: usize,
     mut on_peer: impl FnMut(SocketAddrV4) -> bool,
 ) -> Vec<SocketAddrV4> {
+    // No proxied DHT transport: skip rather than leak lookups around the proxy.
+    if crate::proxy::skip_dht() {
+        return Vec::new();
+    }
     let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await else {
         return Vec::new();
     };
@@ -646,6 +650,9 @@ async fn dht_stream_from_seeds(
 /// Best-effort and fire-and-forget by nature (DHT is UDP): returns how many `announce_peer`
 /// queries were sent, not a delivery/propagation guarantee.
 pub async fn dht_announce_peer(infohash: &[u8; 20], peer_port: u16, budget: Duration) -> usize {
+    if crate::proxy::skip_dht() {
+        return 0;
+    }
     let sock = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
         Err(_) => return 0,

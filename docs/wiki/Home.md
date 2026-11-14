@@ -72,6 +72,7 @@ New here? Start with the [FAQ](FAQ) or [Getting Started](Getting-Started).
 | Present the official engine's identity on the network | [Engine Camouflage](Engine-Camouflage) |
 | Open your peer port through a router | [NAT and Port Mapping](NAT-and-Port-Mapping) |
 | Restrict peers to an allowlist | [Private Peer Mode](Private-Peer-Mode) |
+| Get peers on a network that blocks peer-to-peer | [Outbound Proxy](Outbound-Proxy) |
 | Run it as a service, in Docker or behind a proxy | [Deployment](Deployment) |
 | Run it on a router, NAS or Raspberry Pi | [Routers and Small Devices](Routers-and-Small-Devices) |
 | Replace an existing AceStream engine | [Migrating from AceStream Engine](Migrating-from-AceStream-Engine) |

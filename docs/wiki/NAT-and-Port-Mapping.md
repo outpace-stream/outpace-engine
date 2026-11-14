@@ -117,8 +117,21 @@ addresses and sends replies into the tunnel. Even a correct forward never comple
 [Deployment](Deployment#lxc-guest-behind-cloudflare-warp) describes a tested workaround. If you
 don't need WARP for Outpace, run Outpace outside it.
 
+## Through a proxy
+
+An [outbound proxy](Outbound-Proxy) only carries connections Outpace opens. Peers can't connect
+to you through it, so while it is active Outpace advertises listen port `0` and doesn't announce
+itself to trackers or the DHT.
+
+- With `OUTPACE_PROXY_MODE=on`, inbound serving and port mapping are off. Setting
+  `OUTPACE_ENABLE_INBOUND=1` or `OUTPACE_ENABLE_PORT_MAPPING=1` with it fails startup.
+- With `OUTPACE_PROXY_MODE=fallback`, the listener and any port mapping run as configured while
+  Outpace connects directly. After it switches to the proxy, both stay up but the port is no
+  longer advertised.
+
 ## Related pages
 
 - [Seeding and Peers](Seeding-and-Peers)
 - [Troubleshooting](Troubleshooting#no-inbound-peers)
 - [Configuration](Configuration#nat-and-port-mapping)
+- [Outbound Proxy](Outbound-Proxy)

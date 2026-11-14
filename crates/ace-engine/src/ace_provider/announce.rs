@@ -55,6 +55,10 @@ async fn announce_infohash_once(
     peer_id: &[u8; 20],
     port: u16,
 ) {
+    // Peers cannot dial us through the proxy: advertising a port would invite dead dials.
+    if ace_swarm::proxy::skip_self_announce() {
+        return;
+    }
     let peers = announce_seeder(trackers, infohash, peer_id, port).await;
     // DHT self-announce too, not just tracker: real Acestream swarms are largely
     // DHT-populated (README.md), so tracker-only self-announce under-serves

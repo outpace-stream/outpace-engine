@@ -115,9 +115,7 @@ async fn connect_upstream_inner(
     crate::alog!("[ace] discovery stage=tcp-attempt");
     let mut session = match tokio::time::timeout(
         CONNECT_TIMEOUT,
-        policy.dial_with(addr, |endpoint| async move {
-            connect(&endpoint.to_string()).await
-        }),
+        policy.dial_with(addr, crate::proxy::connect_peer),
     )
     .await
     {
