@@ -19,14 +19,25 @@ async fn dispatch(
     method: Method,
     Path(path): Path<String>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let segments: Vec<&str> = path.split('/').collect();
     let get = method == Method::GET;
     let post = method == Method::POST;
+    if post && cross_site(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "cross_origin", "message": "cross-origin requests may not control renderers" })),
+        )
+            .into_response();
+    }
     match segments.as_slice() {
         ["targets"] if get => list_targets(&cast, query.as_deref()).await,
-        ["targets", target, "play"] if post => play(&s, &cast, target, &body).await,
+        ["targets", target, "play"] if post => {
+            let body = is_json(&headers).then_some(&body[..]);
+            play(&s, &cast, target, body).await
+        }
         ["targets", target, "stop"] if post => stop(&cast, target).await,
         ["targets", target, "status"] if get => status(&cast, target).await,
         // Renderers often probe the stream with HEAD; hyper sends no body for it.
@@ -58,10 +69,17 @@ fn bad_request(code: &'static str, message: &str) -> Response {
         .into_response()
 }
 
-/// A stream that cannot be started, reported without starting a redirect handoff.
-fn stream_error(error: ProviderError) -> Response {
+/// A stream that cannot be started, reported without starting a redirect handoff. Messages
+/// come from [`StartError`], so provider diagnostics (ids, URLs) stay in the log.
+pub(super) fn stream_error(error: ProviderError) -> Response {
     let (status, code) = match &error {
-        ProviderError::CapacityExhausted => (StatusCode::SERVICE_UNAVAILABLE, "capacity_exhausted"),
+        ProviderError::CapacityExhausted | ProviderError::ResolverBusy(_) => {
+            (StatusCode::SERVICE_UNAVAILABLE, "capacity_exhausted")
+        }
+        ProviderError::NoPeers(_) => (StatusCode::NOT_FOUND, "no_peers"),
+        ProviderError::Network(_) | ProviderError::UnresolvableNetwork(_) => {
+            (StatusCode::BAD_GATEWAY, "network")
+        }
         ProviderError::DirectHls(_) => (StatusCode::UNPROCESSABLE_ENTITY, "origin_hls_unsupported"),
         ProviderError::ProtectedContent
         | ProviderError::InvalidProtection
@@ -73,10 +91,38 @@ fn stream_error(error: ProviderError) -> Response {
         }
     };
     let message = match &error {
-        ProviderError::Backend(_) => "stream could not be started".to_string(),
-        other => other.to_string(),
+        ProviderError::DirectHls(_) => {
+            "the stream is an origin HLS source, which casting does not relay".to_string()
+        }
+        other => StartError::from_provider(other).message,
     };
+    crate::alog!("[dlna] stream start for a cast failed: code={code}");
     (status, Json(json!({ "error": code, "message": message }))).into_response()
+}
+
+/// Refuse a cross-site browser request. Browsers send `Origin` on every cross-origin `POST`,
+/// including the "simple" ones a page can send without a CORS preflight; native clients such
+/// as curl and the Android app send none. Renderer control must not be driven by whatever web
+/// page a LAN browser happens to open.
+fn cross_site(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return false;
+    };
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+    let origin_host = origin.to_str().ok().and_then(|origin| {
+        origin
+            .strip_prefix("http://")
+            .or_else(|| origin.strip_prefix("https://"))
+    });
+    !matches!((origin_host, host), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b))
+}
+
+fn is_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
 }
 
 fn target_json(target: &Target) -> serde_json::Value {
@@ -107,11 +153,16 @@ async fn list_targets(cast: &CastService, query: Option<&str>) -> Response {
 }
 
 /// `POST /cast/targets/{target}/play` with `{"network":"ace","id":"..."}`.
-async fn play(s: &AppState, cast: &CastService, target: &str, body: &[u8]) -> Response {
+/// `body` is `None` unless the request is `application/json`: requiring it makes a browser
+/// preflight any cross-origin attempt.
+async fn play(s: &AppState, cast: &CastService, target: &str, body: Option<&[u8]>) -> Response {
     // Fail on a loopback bind before anything else, so the error is the actionable one.
     if let Err(error) = cast.check_bind() {
         return error_response(&error);
     }
+    let Some(body) = body else {
+        return bad_request("invalid_request", "Content-Type must be application/json");
+    };
     // Read through `Value` rather than a derived struct: no extra deserializer to compile.
     let request: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
     let (Some(network), Some(raw_id)) = (request["network"].as_str(), request["id"].as_str())

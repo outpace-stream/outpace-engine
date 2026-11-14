@@ -404,7 +404,9 @@ impl CastService {
     pub async fn stop(&self, target_id: &str) -> Result<(), CastError> {
         let _operation = self.operation(target_id).await;
         let target = self.target(target_id)?;
-        let removed = self.remove_cast(&target.id, None);
+        // Retire the stream token now, but keep the cast's control endpoint until `Stop`
+        // succeeds: if it fails, a retry must still reach a renderer discovery missed.
+        let retired = self.retire_token(&target.id);
         let result = soap_call(
             &target,
             "Stop",
@@ -413,8 +415,11 @@ impl CastService {
         )
         .await
         .map(drop);
+        if result.is_ok() {
+            self.remove_cast(&target.id, None);
+        }
         match &result {
-            Ok(()) => crate::alog!("[dlna] stopped {:?} (cast active: {removed})", target.name),
+            Ok(()) => crate::alog!("[dlna] stopped {:?} (cast active: {retired})", target.name),
             Err(error) => crate::alog!("[dlna] stop on {:?} failed: {error}", target.name),
         }
         result
@@ -437,7 +442,7 @@ impl CastService {
             .unwrap()
             .casts
             .iter()
-            .find(|cast| cast.target == target.id)
+            .find(|cast| cast.target == target.id && !cast.token.is_empty())
             .cloned();
         Ok(Status { transport, cast })
     }
@@ -445,6 +450,9 @@ impl CastService {
     /// Resolve a stream token to its cast and count the connection until the guard drops.
     pub fn open_stream(&self, token: &str) -> Option<(Cast, ConnectionGuard)> {
         let state = self.state.lock().unwrap();
+        if token.is_empty() {
+            return None;
+        }
         let cast = state.casts.iter().find(|cast| cast.token == token)?.clone();
         cast.connections.fetch_add(1, Ordering::Relaxed);
         let guard = ConnectionGuard(cast.connections.clone());
@@ -463,6 +471,19 @@ impl CastService {
         }
         state.casts.push(cast);
         previous
+    }
+
+    /// Make a cast's stream URL unusable while keeping its renderer for control. Returns
+    /// whether a live token was retired.
+    fn retire_token(&self, target: &str) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let Some(cast) = state.casts.iter_mut().find(|cast| cast.target == target) else {
+            return false;
+        };
+        let live = !cast.token.is_empty();
+        cast.token.clear();
+        cast.url.clear();
+        live
     }
 
     fn remove_cast(&self, target: &str, token: Option<&str>) -> bool {

@@ -187,6 +187,30 @@ async fn an_active_cast_stays_controllable_after_discovery_drops_its_renderer() 
 }
 
 #[tokio::test]
+async fn a_failed_stop_retires_the_token_but_keeps_the_renderer_reachable() {
+    let (addr, renderer) = fake_renderer(vec![(500, "busy"), (200, INFO), (200, OK)]).await;
+    let cast = service("192.168.1.2:6878");
+    let token = cast.insert_cast_for_test(test_support::target("gone", addr), "ace", "x");
+    assert_eq!(
+        cast.stop("gone").await.unwrap_err(),
+        CastError::RendererStatus(500)
+    );
+    assert!(cast.open_stream(&token).is_none());
+    assert!(cast.open_stream("").is_none());
+    let status = cast.status("gone").await.unwrap();
+    assert!(
+        status.cast.is_none(),
+        "a retired cast is not reported as active"
+    );
+    cast.stop("gone").await.unwrap();
+    assert!(matches!(
+        cast.status("gone").await,
+        Err(CastError::UnknownTarget)
+    ));
+    assert_eq!(renderer.await.unwrap().len(), 3);
+}
+
+#[tokio::test]
 async fn operations_on_one_target_are_serialized() {
     // The renderer answers the first SOAP call only after a delay; a stop sent meanwhile
     // must wait for the play sequence to finish instead of interleaving with it.

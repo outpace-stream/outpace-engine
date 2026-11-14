@@ -20,6 +20,7 @@ async fn send(
             Request::builder()
                 .method(method)
                 .uri(uri)
+                .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -194,5 +195,95 @@ async fn cast_stream_answers_head_and_routes_check_the_method() {
             StatusCode::NOT_FOUND,
             "{method} {uri}"
         );
+    }
+}
+
+#[tokio::test]
+async fn renderer_control_refuses_cross_site_and_non_json_requests() {
+    let (app, _) = cast_app("192.168.1.2:6878");
+    let request = |origin: Option<&str>, content_type: &str, uri: &str| {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("host", "192.168.1.2:6878")
+            .header("content-type", content_type);
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        builder
+            .body(Body::from(r#"{"network":"test","id":"x"}"#))
+            .unwrap()
+    };
+    for (origin, uri) in [
+        ("http://evil.example", "/cast/targets/abc/play"),
+        ("null", "/cast/targets/abc/stop"),
+        ("http://192.168.1.2:9999", "/cast/targets/abc/stop"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(Some(origin), "application/json", uri))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{origin} {uri}");
+    }
+    // Same-origin (the web UI) and no Origin (native clients) pass the check.
+    for origin in [Some("http://192.168.1.2:6878"), None] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                origin,
+                "application/json",
+                "/cast/targets/abc/play",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{origin:?}");
+    }
+    // A form-style body never reaches the JSON parser.
+    let response = app
+        .clone()
+        .oneshot(request(None, "text/plain", "/cast/targets/abc/play"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn typed_start_errors_map_to_cast_codes_without_diagnostics() {
+    for (error, status, code) in [
+        (
+            ProviderError::NoPeers("d".into()),
+            StatusCode::NOT_FOUND,
+            "no_peers",
+        ),
+        (
+            ProviderError::Network("d".into()),
+            StatusCode::BAD_GATEWAY,
+            "network",
+        ),
+        (
+            ProviderError::UnresolvableNetwork("d".into()),
+            StatusCode::BAD_GATEWAY,
+            "network",
+        ),
+        (
+            ProviderError::ResolverBusy("d".into()),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "capacity_exhausted",
+        ),
+        (
+            ProviderError::Backend("d".into()),
+            StatusCode::NOT_FOUND,
+            "stream_not_found",
+        ),
+    ] {
+        let response = super::super::cast::stream_error(error);
+        assert_eq!(response.status(), status, "{code}");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"], code);
+        assert_ne!(json["message"], "d", "provider diagnostics stay in the log");
     }
 }

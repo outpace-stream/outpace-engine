@@ -140,16 +140,19 @@ Errors carry `{"error":"<code>","message":"<text>"}`.
 
 | Status | `error` | Meaning |
 | --- | --- | --- |
-| `400` | `invalid_request`, `unknown_network`, `invalid_id` | The `play` body is wrong. |
+| `400` | `invalid_request`, `unknown_network`, `invalid_id` | The `play` body is wrong, or isn't sent as `Content-Type: application/json`. |
+| `403` | `cross_origin` | A browser sent `play` or `stop` from a page on another origin. |
 | `404` | `unknown_target` | No renderer with that id in the last search. Call `GET /cast/targets` first. |
 | `404` | `stream_not_found` | The stream couldn't be started. |
+| `404` | `no_peers` | No peer is sharing the stream. |
 | `422` | `stream_unavailable`, `origin_hls_unsupported` | The stream can't be opened (for example protected content), or it points at an HLS origin, which casting doesn't relay. |
 | `409` | `loopback_bind` | `OUTPACE_BIND` is loopback; see [Turn it on](#turn-it-on). |
 | `409` | `unsupported_bind` | `OUTPACE_BIND` is an IPv6 address an IPv4 renderer can't reach. |
 | `502` | `renderer_fault` | The renderer refused the action. `upnp_error` holds its UPnP error code, for example `714` for a media type it can't play. |
 | `502` | `renderer_unreachable`, `renderer_http_error`, `renderer_invalid` | The renderer didn't answer, answered with an HTTP error, or sent something Outpace won't accept. |
+| `502` | `network` | The catalog the stream id needs couldn't be reached. |
 | `503` | `discovery_failed` | The SSDP search couldn't be sent. |
-| `503` | `capacity_exhausted` | `OUTPACE_MAX_SESSIONS` is reached. |
+| `503` | `capacity_exhausted` | `OUTPACE_MAX_SESSIONS` is reached, or the catalog resolver is busy. Try again. |
 | `504` | `renderer_timeout` | The renderer didn't answer in time: 15 seconds for `play`, 5 seconds for `stop` and `status`. |
 
 ## Security and limits
@@ -176,7 +179,9 @@ to, and remembers at most 16 renderers. A renderer you're casting to stays contr
 
 The `/cast/*` routes follow the same exposure rule as the other control routes: they are
 reachable wherever `OUTPACE_BIND` is. Anyone who can reach the API can list your renderers and
-start or stop playback on them.
+start or stop playback on them. A web page can't do it through a visitor's browser: `play` and
+`stop` refuse requests whose `Origin` is another site, and `play` requires a JSON content type.
+If `stop` can't reach the renderer, the stream URL is retired anyway and `stop` can be retried.
 
 ## Troubleshooting
 
