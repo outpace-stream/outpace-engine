@@ -225,7 +225,8 @@ async fn durable_provider_cache_control(mode: CacheProducer) {
         "old cache owner/writer must be terminal before fresh reconstruction"
     );
     let fresh = make_cache();
-    fresh.initialized().await;
+    // The writer's real load must finish; the 100 ms best-effort wait races a slow disk.
+    warm_peers::fixture_loaded(&fresh).await;
     if mode != CacheProducer::Authenticated {
         assert!(
             fresh.hints(&[0; 20]).is_empty(),
@@ -614,7 +615,8 @@ async fn retained_signed_resume_credit_control(mode: ResumeCredit) {
         "prior cache writer must actually terminate before reconstruction"
     );
     let fresh = make_cache();
-    fresh.initialized().await;
+    // The writer's real load must finish; the 100 ms best-effort wait races a slow disk.
+    warm_peers::fixture_loaded(&fresh).await;
     let hints = fresh.hints(&descriptor.infohash);
     drop(fresh);
     assert!(warm_peers::retired_terminal(&cache_dir).await);
