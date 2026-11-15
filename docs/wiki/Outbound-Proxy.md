@@ -37,7 +37,8 @@ Setting `OUTPACE_PROXY` alone does nothing: the mode stays `off` and the log say
   live stream start gets no peers:
   - if discovery finds no peers at all, that start is retried once through the proxy;
   - if peers are found but none connects within 10 seconds, the start keeps going and its
-    further connection attempts go through the proxy.
+    further connection attempts go through the proxy. A peer that connects and then drops
+    still counts as a connection, and the first connection cancels the switch for that start.
 
   A DHT lookup still running at the moment of the switch stops sending at once.
 

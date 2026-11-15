@@ -208,20 +208,15 @@ impl AceProvider {
                 _ = async { if private { std::future::pending::<()>().await; } else { announce_seeder_periodically(announce_info, announce_port).await; } } => {},
             }
         });
-        // `OUTPACE_PROXY_MODE=fallback`: candidates were found, but if none connects within
-        // the window, switch new dials to the proxy. The live loop keeps retrying candidates,
-        // so this start continues through the proxy without a restart. Only spawned while
-        // fallback is still direct; it holds no strong reference to the session.
-        if ace_swarm::proxy::mode() == ace_swarm::proxy::ProxyMode::Fallback
-            && ace_swarm::proxy::active().is_none()
-        {
-            let connected = Arc::downgrade(&peer_count);
+        // `OUTPACE_PROXY_MODE=fallback`: candidates were found, but if no peer connects at all
+        // within the window (a peer that connected and dropped still counts), switch new dials
+        // to the proxy. The first connection disarms the window. The live loop keeps retrying
+        // candidates, so this start continues through the proxy without a restart. It holds
+        // no strong reference to the session, and does nothing once the session has ended.
+        if let Some(window) = ace_swarm::proxy::fallback_connect_window(FALLBACK_CONNECT_WINDOW) {
+            let session = Arc::downgrade(&peer_count);
             tokio::spawn(async move {
-                tokio::time::sleep(FALLBACK_CONNECT_WINDOW).await;
-                let unconnected = connected
-                    .upgrade()
-                    .is_some_and(|peers| peers.load(Ordering::Relaxed) == 0);
-                if unconnected {
+                if window.await && session.strong_count() > 0 {
                     ace_swarm::proxy::engage_fallback();
                 }
             });

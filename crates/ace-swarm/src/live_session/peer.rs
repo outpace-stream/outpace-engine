@@ -146,6 +146,8 @@ async fn connect_upstream_inner(
     let Some((window, yourip, unchoked)) = read_peer_window(&mut session).await else {
         return Err(PeerConnectStage::Window);
     };
+    // Connection history for `OUTPACE_PROXY_MODE=fallback`; a no-op otherwise.
+    crate::proxy::note_live_peer_connected();
     Ok(ConnectedUpstream {
         session,
         addr,
