@@ -199,6 +199,23 @@ impl AceProvider {
         let announce_port = self.announce_peer_port.clone();
         let reachability = self.reachability.clone();
         let private = self.peer_policy.is_private();
+        // `OUTPACE_PROXY_MODE=fallback`: candidates were found, but if no peer of this start
+        // connects at all within the window (a peer that connected and dropped still counts),
+        // switch new dials to the proxy. This start's first connection disarms it; other
+        // starts' connections don't. Armed before the worker is spawned so its first connection
+        // cannot be missed. The live loop keeps retrying candidates, so this start continues
+        // through the proxy without a restart. It holds no strong reference to the session,
+        // and does nothing once the session has ended.
+        if let Some(window) =
+            ace_swarm::proxy::fallback_connect_window(info.infohash, FALLBACK_CONNECT_WINDOW)
+        {
+            let session = Arc::downgrade(&peer_count);
+            tokio::spawn(async move {
+                if window.await && session.strong_count() > 0 {
+                    ace_swarm::proxy::engage_fallback();
+                }
+            });
+        }
         let worker = tokio::spawn(async move {
             // Run the download loop and the periodic seeder self-announce concurrently;
             // whichever ends first (normally `follow_live`, when the consumer drops) tears
@@ -208,19 +225,6 @@ impl AceProvider {
                 _ = async { if private { std::future::pending::<()>().await; } else { announce_seeder_periodically(announce_info, announce_port).await; } } => {},
             }
         });
-        // `OUTPACE_PROXY_MODE=fallback`: candidates were found, but if no peer connects at all
-        // within the window (a peer that connected and dropped still counts), switch new dials
-        // to the proxy. The first connection disarms the window. The live loop keeps retrying
-        // candidates, so this start continues through the proxy without a restart. It holds
-        // no strong reference to the session, and does nothing once the session has ended.
-        if let Some(window) = ace_swarm::proxy::fallback_connect_window(FALLBACK_CONNECT_WINDOW) {
-            let session = Arc::downgrade(&peer_count);
-            tokio::spawn(async move {
-                if window.await && session.strong_count() > 0 {
-                    ace_swarm::proxy::engage_fallback();
-                }
-            });
-        }
         let source = AceSource {
             metrics: Some(metrics),
             sampler: Some(sampler),

@@ -147,7 +147,7 @@ async fn connect_upstream_inner(
         return Err(PeerConnectStage::Window);
     };
     // Connection history for `OUTPACE_PROXY_MODE=fallback`; a no-op otherwise.
-    crate::proxy::note_live_peer_connected();
+    crate::proxy::note_live_peer_connected(&infohash);
     Ok(ConnectedUpstream {
         session,
         addr,

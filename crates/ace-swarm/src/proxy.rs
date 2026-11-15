@@ -22,7 +22,8 @@ use ace_tracker::codec::{
 };
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::net::{TcpStream, UdpSocket};
@@ -275,42 +276,76 @@ struct Installed {
     dht_skip_logged: AtomicBool,
     announce_skip_logged: AtomicBool,
     failure_logged: AtomicBool,
-    direct_peers: ConnectHistory,
+    connect_windows: ConnectWindows,
 }
 
-/// Monotonic count of live peers that connected directly, with a wake-up for the `fallback`
-/// windows waiting on it. A count, not the session's peer gauge: a peer that connected and
-/// then dropped still proves direct peer-to-peer works.
+/// Armed `fallback` connect windows, one per live start still inside its window. Each start
+/// has its own flag, so one start's connection never cancels another start's window. Entries
+/// live only while their window runs, so the list is bounded by concurrent live starts.
 #[derive(Default)]
-struct ConnectHistory {
-    connected: AtomicU64,
+struct ConnectWindows {
+    armed: std::sync::Mutex<Vec<Arc<ConnectWindow>>>,
+}
+
+struct ConnectWindow {
+    infohash: [u8; 20],
+    connected: AtomicBool,
     notify: tokio::sync::Notify,
 }
 
-impl ConnectHistory {
-    fn note(&self) {
-        self.connected.fetch_add(1, Ordering::AcqRel);
-        self.notify.notify_waiters();
+impl ConnectWindows {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Arc<ConnectWindow>>> {
+        self.armed
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    fn snapshot(&self) -> u64 {
-        self.connected.load(Ordering::Acquire)
-    }
-
-    /// Wait up to `window` for a connection after `since`. Returns `true` only when none came;
-    /// the first one disarms the wait at once.
-    async fn none_within(&self, since: u64, window: Duration) -> bool {
-        let notified = self.notify.notified();
-        tokio::pin!(notified);
-        // Register before checking, so a connection between the snapshot and here is not lost.
-        notified.as_mut().enable();
-        if self.snapshot() != since {
-            return false;
+    /// Register a window synchronously, before the start's worker can connect anything.
+    fn arm(&'static self, infohash: [u8; 20]) -> ArmedWindow {
+        let window = Arc::new(ConnectWindow {
+            infohash,
+            connected: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        });
+        self.lock().push(window.clone());
+        ArmedWindow {
+            windows: self,
+            window,
         }
+    }
+
+    /// A live session for `infohash` connected a peer: mark that start's windows connected.
+    fn note(&self, infohash: &[u8; 20]) {
+        for window in self.lock().iter().filter(|w| &w.infohash == infohash) {
+            window.connected.store(true, Ordering::Release);
+            // `notify_one` keeps a permit, so a connection before the first poll is not lost.
+            window.notify.notify_one();
+        }
+    }
+}
+
+/// One start's window; unregisters itself when dropped, however the wait ends.
+struct ArmedWindow {
+    windows: &'static ConnectWindows,
+    window: Arc<ConnectWindow>,
+}
+
+impl ArmedWindow {
+    /// `true` only when no peer for this start connected at any point in `duration`,
+    /// counting peers that later dropped. The first connection resolves it to `false` at once.
+    async fn none_within(self, duration: Duration) -> bool {
         tokio::select! {
-            _ = notified => false,
-            _ = tokio::time::sleep(window) => self.snapshot() == since,
+            _ = self.window.notify.notified() => false,
+            _ = tokio::time::sleep(duration) => !self.window.connected.load(Ordering::Acquire),
         }
+    }
+}
+
+impl Drop for ArmedWindow {
+    fn drop(&mut self) {
+        self.windows
+            .lock()
+            .retain(|w| !Arc::ptr_eq(w, &self.window));
     }
 }
 
@@ -338,7 +373,7 @@ pub fn install(settings: &ProxySettings) {
         dht_skip_logged: AtomicBool::new(false),
         announce_skip_logged: AtomicBool::new(false),
         failure_logged: AtomicBool::new(false),
-        direct_peers: ConnectHistory::default(),
+        connect_windows: ConnectWindows::default(),
     };
     if INSTALLED.set(installed).is_err() {
         crate::alog!("[proxy] already installed; ignoring a second configuration");
@@ -403,24 +438,25 @@ fn fallback_direct() -> Option<&'static Installed> {
     installed().filter(|i| i.mode == ProxyMode::Fallback && !i.engaged.load(Ordering::Acquire))
 }
 
-/// A live session completed a peer connection (TCP, handshake and first window). Only
-/// recorded while `fallback` is still direct; otherwise a single `OnceLock` read.
-pub(crate) fn note_live_peer_connected() {
+/// A live session for `infohash` completed a peer connection (TCP, handshake and first
+/// window). Only recorded while `fallback` is still direct; otherwise a single `OnceLock` read.
+pub(crate) fn note_live_peer_connected(infohash: &[u8; 20]) {
     if let Some(i) = fallback_direct() {
-        i.direct_peers.note();
+        i.connect_windows.note(infohash);
     }
 }
 
-/// Arm the `fallback` connect window for a live start that found candidates. `None` unless
-/// `fallback` is configured and still direct. The future resolves to `true` only when no live
-/// peer connected directly at any point in `window`, counting peers that later dropped; the
-/// first connection resolves it to `false` at once. The caller decides whether to engage.
+/// Arm the `fallback` connect window for one live start, before its worker is spawned. `None`
+/// unless `fallback` is configured and still direct. The future resolves to `true` only when
+/// no peer of this start connected at any point in `window`, counting peers that later
+/// dropped; this start's first connection resolves it to `false` at once, and other starts'
+/// connections don't affect it. The caller decides whether to engage.
 pub fn fallback_connect_window(
+    infohash: [u8; 20],
     window: Duration,
 ) -> Option<impl std::future::Future<Output = bool> + Send + 'static> {
-    let i = fallback_direct()?;
-    let since = i.direct_peers.snapshot();
-    Some(i.direct_peers.none_within(since, window))
+    let armed = fallback_direct()?.connect_windows.arm(infohash);
+    Some(armed.none_within(window))
 }
 
 /// In `fallback` mode, switch every later connection to the proxy (sticky until restart).
@@ -746,8 +782,8 @@ mod tests {
     fn nothing_installed_means_direct() {
         // Tests never install a process-wide proxy, so every helper reports the direct path.
         assert!(active().is_none());
-        assert!(fallback_connect_window(Duration::from_secs(1)).is_none());
-        note_live_peer_connected();
+        assert!(fallback_connect_window([1; 20], Duration::from_secs(1)).is_none());
+        note_live_peer_connected(&[1; 20]);
         assert_eq!(path(), "direct");
         assert!(udp_trackers_enabled());
         assert!(!skip_dht());
@@ -756,28 +792,40 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn fallback_window_uses_connection_history_and_disarms_on_first_connect() {
+    async fn fallback_window_is_per_start_uses_history_and_disarms_on_first_connect() {
         const WINDOW: Duration = Duration::from_secs(10);
-        // No connection at all: the window expires unconnected.
-        let history = std::sync::Arc::new(ConnectHistory::default());
-        assert!(history.none_within(history.snapshot(), WINDOW).await);
+        let windows: &'static ConnectWindows = Box::leak(Box::default());
+        let (a, b) = ([0xa; 20], [0xb; 20]);
 
-        // A peer connects (and may drop again: the gauge is not consulted) mid-window: the
-        // wait resolves at once, before the window ends.
-        let since = history.snapshot();
+        // No connection at all: the window expires unconnected and unregisters itself.
+        assert!(windows.arm(a).none_within(WINDOW).await);
+        assert!(windows.lock().is_empty());
+
+        // A peer of this start connects (and may drop again: no gauge is read) mid-window:
+        // the wait resolves at once. Another start's connection does not cancel it.
+        let (armed_a, armed_b) = (windows.arm(a), windows.arm(b));
         let started = tokio::time::Instant::now();
-        let noter = history.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            noter.note();
+            windows.note(&b);
         });
-        assert!(!history.none_within(since, WINDOW).await);
-        assert!(started.elapsed() < WINDOW);
+        let (a_unconnected, b_unconnected) = tokio::join!(armed_a.none_within(WINDOW), async {
+            let result = armed_b.none_within(WINDOW).await;
+            assert!(started.elapsed() < WINDOW);
+            result
+        });
+        assert!(
+            a_unconnected,
+            "start a never connected and must still switch"
+        );
+        assert!(!b_unconnected);
 
-        // A connection between arming and the first poll is not lost.
-        let since = history.snapshot();
-        history.note();
-        assert!(!history.none_within(since, WINDOW).await);
+        // A connection after arming but before the first poll (the worker is spawned between
+        // the two) is not lost.
+        let armed = windows.arm(a);
+        windows.note(&a);
+        assert!(!armed.none_within(WINDOW).await);
+        assert!(windows.lock().is_empty());
     }
 
     #[tokio::test]
