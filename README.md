@@ -71,15 +71,17 @@ uses Ace Stream names only to describe protocol compatibility.
   [documented compatible subset](docs/protocol/compat-matrix.md).
 - **Broadcast and share.** Publish your own signed live stream from HTTP, RTMP or an HTTP pull
   source. By default Outpace also seeds what it plays back to other peers.
-- **Cross-platform builds.** Prebuilt binaries for Linux x86_64, ARM64 and ARMv7, macOS Intel and
-  Apple silicon, and Windows x64 and ARM64, plus a container image for amd64, arm64 and arm/v7.
+- **Cross-platform builds.** Prebuilt binaries for Linux (x86_64, ARM64, ARMv7, ARMv6, RISC-V 64),
+  macOS Intel and Apple silicon, Windows x64 and ARM64, FreeBSD and Android, plus a container
+  image for amd64, arm64 and arm/v7. On phones and TV boxes, the
+  [Android app](https://github.com/outpace-stream/outpace-android) runs the engine for you.
 
 What it isn't:
 
 - It doesn't play premium or encrypted content.
 - It has no accounts, EPG or web UI.
 - Stream-name search is a separate, default-off external services adapter. No
-  operator API key is needed. It is available from v1.0.0; see
+  operator API key is needed; see
   [search setup and limits](https://github.com/outpace-stream/outpace-engine/wiki/Stream-Search).
 - The compatible API is a subset, not full parity with the official engine.
 
