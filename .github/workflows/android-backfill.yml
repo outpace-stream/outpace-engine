@@ -76,6 +76,11 @@ jobs:
           VERSION: ${{ steps.check.outputs.version }}
         run: |
           set -euo pipefail
+          # Tags before v1.0.0 have no smoke helper; stop before the build, not after it.
+          if [[ ! -f tools/ci/smoke_daemon.sh ]]; then
+            echo "::error::${TAG} has no tools/ci/smoke_daemon.sh; backfill v1.0.0 or later."
+            exit 1
+          fi
           cargo_version="$(cargo metadata --format-version 1 --no-deps \
             | jq -r '.packages[] | select(.name == "ace-engine") | .version')"
           if [[ "$cargo_version" != "$VERSION" ]]; then
