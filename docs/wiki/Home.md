@@ -82,7 +82,7 @@ New here? Start with the [FAQ](FAQ) or [Getting Started](Getting-Started).
 | Check what version has which feature | [Releases and Versions](Releases-and-Versions) |
 | Run it on an Android phone, tablet or TV box | [Android App](Android-App) |
 | Run the Android app on a television | [Android TV](Android-TV) |
-| See setups other people run | [Use cases](Use-Cases) |
+| See where others run Outpace, or share your setup | [Success Stories](Success-Stories) |
 
 ## Release availability
 
