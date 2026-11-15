@@ -165,6 +165,12 @@ impl ProxyEndpoint {
         self.credentials.is_some()
     }
 
+    /// Whether the proxy is on this host, so RFC 1929 credentials never cross a network.
+    fn is_loopback(&self) -> bool {
+        self.host.eq_ignore_ascii_case("localhost")
+            || self.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    }
+
     /// Negotiate `CONNECT` to `target`, bounded by `timeout`.
     pub async fn connect(
         &self,
@@ -198,7 +204,11 @@ fn percent_decode(raw: &str) -> Option<String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
+            // `from_str_radix` alone would accept a sign (`%+1`), so check the digits first.
             let hex = raw.get(i + 1..i + 3)?;
+            if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
             out.push(u8::from_str_radix(hex, 16).ok()?);
             i += 3;
         } else {
@@ -281,6 +291,7 @@ pub fn install(settings: &ProxySettings) {
     }
     let mode = settings.mode;
     let auth = endpoint.has_credentials();
+    let cleartext_remote = auth && !endpoint.is_loopback();
     let shown = endpoint.to_string();
     let installed = Installed {
         endpoint,
@@ -300,6 +311,12 @@ pub fn install(settings: &ProxySettings) {
         mode.as_str(),
         if auth { "yes" } else { "no" }
     );
+    if cleartext_remote {
+        crate::alog!(
+            "[proxy] WARNING: SOCKS5 sends the username and password unencrypted; the proxy is \
+             not on loopback, so anyone on the path to it can read them"
+        );
+    }
     match mode {
         ProxyMode::On => crate::alog!(
             "[proxy] peers and catalog via CONNECT, UDP trackers via UDP ASSOCIATE; DHT, \
@@ -344,20 +361,20 @@ pub fn udp_trackers_enabled() -> bool {
     active_installed().is_none_or(|i| !i.udp_unsupported.load(Ordering::Acquire))
 }
 
-/// In `fallback` mode, switch every later connection to the proxy. Returns `true` only for
-/// the call that performed the switch, so the caller can retry its start once.
+/// In `fallback` mode, switch every later connection to the proxy (sticky until restart).
+/// Returns whether the proxy is engaged afterwards, whichever caller won the switch, so a
+/// start that lost the race to a concurrent one still retries through the proxy.
 pub fn engage_fallback() -> bool {
     let Some(i) = installed().filter(|i| i.mode == ProxyMode::Fallback) else {
         return false;
     };
-    let switched = !i.engaged.swap(true, Ordering::AcqRel);
-    if switched {
+    if !i.engaged.swap(true, Ordering::AcqRel) {
         crate::alog!(
             "[proxy] fallback engaged: a live start found no peers directly; new connections \
              now use the proxy, DHT and self-announce are off"
         );
     }
-    switched
+    true
 }
 
 /// DHT has no proxied transport; report whether to skip it (logging the first skip).
@@ -419,11 +436,12 @@ pub async fn connect_peer(endpoint: SocketAddrV4) -> ace_peer::Result<PeerSessio
     let Some(i) = active_installed() else {
         return ace_peer::session::connect(&endpoint.to_string()).await;
     };
-    let stream = proxied(
+    // Boxed so the direct path's future stays the size it was before the proxy existed.
+    let stream = Box::pin(proxied(
         i,
         TargetAddr::Ip(SocketAddr::V4(endpoint)),
         ace_peer::session::DEFAULT_PEER_TIMEOUT,
-    )
+    ))
     .await
     .map_err(|error| ace_peer::PeerError::Io(error.into()))?;
     Ok(PeerSession::new(stream))
@@ -438,7 +456,7 @@ pub(crate) async fn connect_host(host: &str, port: u16) -> std::io::Result<TcpSt
         Ok(ip) => TargetAddr::Ip(SocketAddr::new(ip, port)),
         Err(_) => TargetAddr::Domain(host, port),
     };
-    Ok(proxied(i, target, HANDSHAKE_TIMEOUT).await?)
+    Ok(Box::pin(proxied(i, target, HANDSHAKE_TIMEOUT)).await?)
 }
 
 /// Announce to a UDP tracker through the active proxy's UDP relay, advertising port 0.
@@ -456,7 +474,8 @@ pub(crate) async fn tracker_announce(
     if i.udp_unsupported.load(Ordering::Acquire) {
         return Some(Vec::new());
     }
-    let result = relay_announce(
+    // Boxed: the relay future holds a 4 KiB receive buffer that the direct path must not carry.
+    let result = Box::pin(relay_announce(
         &i.endpoint,
         tracker,
         infohash,
@@ -464,7 +483,7 @@ pub(crate) async fn tracker_announce(
         num_want,
         transfer,
         event,
-    )
+    ))
     .await;
     match result {
         Ok(peers) => Some(peers),
@@ -556,19 +575,16 @@ async fn recv_from_tracker<'a>(
     tracker: SocketAddrV4,
     buf: &'a mut [u8; 4096],
 ) -> Result<&'a [u8], RelayError> {
-    let mut len = None;
     for _ in 0..MAX_STRAY_DATAGRAMS {
         let n = sock.recv(buf).await.map_err(|_| RelayError::Tracker)?;
-        if let Ok((source, _)) = socks5::decode_udp_datagram(&buf[..n]) {
-            if source == SocketAddr::V4(tracker) {
-                len = Some(n);
-                break;
-            }
-        }
+        // Fragments, malformed headers and other sources are dropped as strays.
+        let start = match socks5::decode_udp_datagram(&buf[..n]) {
+            Ok((source, payload)) if source == SocketAddr::V4(tracker) => n - payload.len(),
+            _ => continue,
+        };
+        return Ok(&buf[start..n]);
     }
-    let n = len.ok_or(RelayError::Tracker)?;
-    let (_, payload) = socks5::decode_udp_datagram(&buf[..n])?;
-    Ok(payload)
+    Err(RelayError::Tracker)
 }
 
 #[cfg(test)]
@@ -599,7 +615,9 @@ mod tests {
             ("us@er", "p:ss")
         );
 
+        assert!(plain.is_loopback() && !auth.is_loopback());
         let v6 = ProxyEndpoint::parse("socks5://[::1]:1080").unwrap();
+        assert!(v6.is_loopback());
         assert_eq!(v6.host, "::1");
         assert_eq!(v6.to_string(), "socks5://[::1]:1080");
 
@@ -614,6 +632,7 @@ mod tests {
             "socks5://user@127.0.0.1:1080",
             "socks5://user:@127.0.0.1:1080",
             "socks5://u:p%zz@127.0.0.1:1080",
+            "socks5://u:p%+1@127.0.0.1:1080",
             "socks5://127.0.0.1:1080/path",
             "socks5://127.0.0.1:1080?x=1",
             "socks5://::1:1080",

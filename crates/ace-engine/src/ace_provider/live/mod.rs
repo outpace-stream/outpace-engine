@@ -221,8 +221,8 @@ impl AceProvider {
                 let unconnected = connected
                     .upgrade()
                     .is_some_and(|peers| peers.load(Ordering::Relaxed) == 0);
-                if unconnected && ace_swarm::proxy::engage_fallback() {
-                    crate::alog!("[proxy] no peer connected directly; retrying through the proxy");
+                if unconnected {
+                    ace_swarm::proxy::engage_fallback();
                 }
             });
         }

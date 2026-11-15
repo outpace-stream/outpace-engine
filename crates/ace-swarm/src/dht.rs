@@ -385,8 +385,9 @@ async fn dht_walk_owned(
 
     // Paced by responses (#384): keep up to MAX_ACTIVE queries outstanding, sending the next
     // closest node as soon as a correlated reply or a slot timeout frees a slot, instead of
-    // waiting out a fixed window per batch.
-    'walk: while Instant::now() < deadline {
+    // waiting out a fixed window per batch. A `fallback` proxy switch mid-walk stops it:
+    // nothing more goes out directly.
+    'walk: while Instant::now() < deadline && crate::proxy::active().is_none() {
         while let Some(result) = lookups.try_join_next() {
             add_bootstrap(result, &mut frontier, &mut metrics);
         }
@@ -668,6 +669,9 @@ pub async fn dht_announce_peer(infohash: &[u8; 20], peer_port: u16, budget: Dura
         tokens.len() >= 8
     })
     .await;
+    if crate::proxy::active().is_some() {
+        return 0;
+    }
 
     let node_id = session_node_id();
     let mut announced = 0usize;

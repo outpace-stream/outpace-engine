@@ -225,7 +225,7 @@ See [Outbound Proxy](Outbound-Proxy).
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_PROXY` | unset | `socks5://[user:password@]host:port` (`socks5h://` also accepted) | edge | SOCKS5 proxy for outgoing peer connections, UDP tracker announces and catalog/search requests. Host names are resolved by the proxy. Never logged with its credentials. |
+| `OUTPACE_PROXY` | unset | `socks5://[user:password@]host:port` (`socks5h://` also accepted) | edge | SOCKS5 proxy for outgoing peer connections, UDP tracker announces and catalog/search requests. Catalog and search host names are resolved by the proxy; UDP tracker host names are still resolved locally. Never logged with its credentials. |
 | `OUTPACE_PROXY_MODE` | `off` | `off`, `on`, `fallback` | edge | `on` proxies from the start and turns inbound serving and port mapping off (setting either to `1` is an error). `fallback` stays direct until a live start finds no peers, or none connects within 10 seconds, then proxies engine-wide until restart. `on` and `fallback` require `OUTPACE_PROXY`. |
 
 While the proxy is active the DHT is off, the advertised listen port is `0` and there is no

@@ -39,6 +39,8 @@ Setting `OUTPACE_PROXY` alone does nothing: the mode stays `off` and the log say
   - if peers are found but none connects within 10 seconds, the start keeps going and its
     further connection attempts go through the proxy.
 
+  A DHT lookup still running at the moment of the switch stops sending at once.
+
   The switch is engine-wide and lasts until restart; it never switches back on its own. VOD
   starts don't trigger it, but once it has happened they use the proxy too. A stream that has no
   peers anywhere also triggers it.
@@ -112,7 +114,8 @@ The log records the configuration once at startup and each change, under the `[p
 - The username and password are never written to the log, to `/network-policy`, or to error
   messages. The log shows the proxy host and port and whether credentials are set.
 - SOCKS5 username/password authentication is sent unencrypted to the proxy. Use a proxy on
-  `localhost` or a trusted network.
+  `localhost` or a trusted network. When credentials are set and the proxy host isn't loopback,
+  the startup log carries a `[proxy] WARNING` line saying so.
 - The proxy sees which peers and hosts Outpace connects to. Peer traffic itself is unchanged.
 - Each proxy handshake has a deadline (the peer connect timeout for peers, 10 seconds
   otherwise), so a stalled proxy can't hang a start.

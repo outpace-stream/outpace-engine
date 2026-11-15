@@ -232,6 +232,10 @@ async fn stream_tracker_peers(
     policy: TrackerPolicy,
     peers: tokio::sync::mpsc::Sender<SocketAddrV4>,
 ) {
+    // The proxy refused `UDP ASSOCIATE`: skip even the local tracker name lookups.
+    if !crate::proxy::udp_trackers_enabled() {
+        return;
+    }
     let mut jobs = tokio::task::JoinSet::new();
     let mut urls = trackers.iter().take(MAX_TRACKERS);
     loop {
