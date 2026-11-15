@@ -46,9 +46,11 @@ Install and connect your VPN client inside the container, then check two things:
 Make the VPN start at boot and reconnect on its own, and turn on its **kill switch** (also called
 "block connections without VPN" or "lockdown"). Without one, peer traffic falls back to your home
 connection whenever the tunnel drops, and the `ifconfig.me` check only proves the route while
-the tunnel is up. If your client has no kill switch, add a firewall rule that drops outgoing
-traffic on `eth0` except to the LAN and to the VPN server. Cover IPv6 too: block it, or make
-sure the VPN tunnels it.
+the tunnel is up. If your client has no kill switch, add firewall rules that drop outgoing
+traffic on every interface except the tunnel, allowing only the LAN and the VPN server. In the
+container that is `eth0`; on bare metal, check `ip link` for names such as `enp3s0` or `wlan0`.
+Apply the same rules to IPv6, or turn IPv6 off: tunneling IPv6 while connected is not enough if
+it falls back to the home route when the tunnel drops.
 
 ## 3. Install the engine
 

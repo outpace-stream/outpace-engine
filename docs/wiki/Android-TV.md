@@ -62,9 +62,14 @@ Find the television's address under **Settings → Network & Internet**, or in t
 list. The examples use `192.0.2.10`.
 
 Not every set without Wireless debugging listens on port 5555. If `adb connect` is refused, the
-set needs network ADB turned on once over a USB cable: connect it to the computer, run
-`adb tcpip 5555`, unplug it, and continue at [3a](#3a-connect-on-port-5555). Televisions whose
-USB ports only accept storage cannot do this and need Wireless debugging instead.
+set needs network ADB turned on once over a USB cable:
+
+1. Connect the set to the computer and accept **Allow USB debugging?** on the screen.
+2. Run `adb devices` and wait until the set is listed as `device`, not `unauthorized`.
+3. Run `adb tcpip 5555`, unplug the cable, and continue at [3a](#3a-connect-on-port-5555).
+
+Televisions whose USB ports only accept storage cannot do this and need Wireless debugging
+instead.
 
 ## 3a. Connect on port 5555
 
