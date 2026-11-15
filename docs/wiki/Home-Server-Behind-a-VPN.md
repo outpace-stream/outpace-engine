@@ -75,12 +75,15 @@ OUTPACE_ACE_COMPAT=true             # app shows the engine version; AceStream-AP
 ```
 
 Add `OUTPACE_COMPAT_ACESTREAM_SERVICES=true` if you want [Stream Search](Stream-Search) in the
-app, and `OUTPACE_ENABLE_CAST=1` to [cast](Casting) to televisions. Then:
+app, and `OUTPACE_ENABLE_CAST=1` to [cast](Casting) to televisions. Then start it. With systemd:
 
 ```bash
 sudo systemctl enable --now outpace
 journalctl -u outpace -f            # look for "listening on http://192.168.1.20:6878"
 ```
+
+Without systemd, run `outpace serve` with the same variables from your init system; see
+[Deployment](Deployment) for other service managers.
 
 The [Docker image](Installation#container-image) works too; run it with `--network host` so it
 shares the container's VPN.
