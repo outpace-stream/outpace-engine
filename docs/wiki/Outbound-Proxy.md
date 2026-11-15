@@ -8,7 +8,7 @@ Outpace's own peer, tracker and catalog connections through a SOCKS5 proxy.
 Any SOCKS5 endpoint works, including a local VPN client running in proxy mode. The proxy is
 **off by default**; with it off, Outpace connects exactly as before.
 
-**Avail.:** edge.
+**Avail.:** v1.2.0 and later, also in `edge`.
 
 ## Turning it on
 

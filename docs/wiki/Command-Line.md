@@ -145,12 +145,13 @@ It reads no other settings and doesn't start anything.
 ## `--version` and `--help`
 
 ```bash
-outpace --version      # e.g. "outpace 1.1.0"
+outpace --version      # e.g. "outpace 1.2.0"
 outpace --help
 outpace play --help
 ```
 
-`edge` builds report the last release's version; see
+`edge` builds report the workspace version at their source commit, which can be the upcoming
+release's; see
 [Releases and Versions](Releases-and-Versions#which-version-am-i-running).
 
 ## In a container
@@ -159,11 +160,11 @@ The image's entry point is `outpace` and its default command is `serve`, so argu
 the image name:
 
 ```bash
-docker run --rm ghcr.io/outpace-stream/outpace-engine:1.1.0 --version
-docker run --rm -v outpace-data:/var/lib/outpace ghcr.io/outpace-stream/outpace-engine:1.1.0 \
+docker run --rm ghcr.io/outpace-stream/outpace-engine:1.2.0 --version
+docker run --rm -v outpace-data:/var/lib/outpace ghcr.io/outpace-stream/outpace-engine:1.2.0 \
   play acestream://0123456789abcdef0123456789abcdef01234567 > live.ts
 docker run -d -p 127.0.0.1:6878:6878 -p 127.0.0.1:1935:1935 -p 8621:8621/tcp \
-  -v outpace-data:/var/lib/outpace ghcr.io/outpace-stream/outpace-engine:1.1.0 broadcast my-channel
+  -v outpace-data:/var/lib/outpace ghcr.io/outpace-stream/outpace-engine:1.2.0 broadcast my-channel
 ```
 
 ## Related pages

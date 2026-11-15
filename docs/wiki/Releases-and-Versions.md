@@ -9,9 +9,9 @@
 - The version a binary reports is the version in the source it was built from. The tag must
   match it.
 
-The latest published release is **v1.1.0**, a minor release on top of 1.0.3. See the
-[GitHub Release](https://github.com/outpace-stream/outpace-engine/releases/tag/v1.1.0) for downloads,
-the [1.1.0 notes](https://github.com/outpace-stream/outpace-engine/blob/main/docs/releases/1.1.0.md)
+The latest published release is **v1.2.0**, a minor release on top of 1.1.0. See the
+[GitHub Release](https://github.com/outpace-stream/outpace-engine/releases/tag/v1.2.0) for downloads,
+the [1.2.0 notes](https://github.com/outpace-stream/outpace-engine/blob/main/docs/releases/1.2.0.md)
 for its changes, and the
 [1.0.0 notes](https://github.com/outpace-stream/outpace-engine/blob/main/docs/releases/1.0.0.md)
 for scope, upgrades and validation limits.
@@ -22,7 +22,7 @@ for scope, upgrades and validation limits.
   its downloads and generated change notes.
 - **Curated notes:** for releases that have them, in
   [`docs/releases/`](https://github.com/outpace-stream/outpace-engine/tree/main/docs/releases)
-  (including `1.0.0.md`, `1.0.1.md`, `1.0.2.md`, `1.0.3.md` and `1.1.0.md`).
+  (including `1.0.0.md`, `1.0.1.md`, `1.0.2.md`, `1.0.3.md`, `1.1.0.md` and `1.2.0.md`).
 - **Milestones:** <https://github.com/outpace-stream/outpace-engine/milestones> track what each
   version covers.
 
@@ -30,7 +30,7 @@ for scope, upgrades and validation limits.
 
 ```bash
 outpace --version
-docker run --rm ghcr.io/outpace-stream/outpace-engine:1.1.0 --version
+docker run --rm ghcr.io/outpace-stream/outpace-engine:1.2.0 --version
 curl "http://127.0.0.1:6878/server/api?method=get_version"   # needs OUTPACE_ACE_COMPAT=1
 ```
 
@@ -58,13 +58,23 @@ build.
 | `edge` | With every merge to `main` | amd64 | Testing unreleased features. |
 | `sha-<commit>` | No | amd64 | Pinning one specific `main` build. |
 
-## Unreleased
+## v1.2.0 changes
+
+A minor release with two opt-in features and no default changes:
 
 - [Casting](Casting): with `OUTPACE_ENABLE_CAST=1`, the engine finds DLNA/UPnP renderers on
-  the LAN and tells one to play a live stream (`/cast/*` routes). Off by default.
+  the LAN and tells one to play a live stream (`/cast/*` routes) (#488).
 - An optional SOCKS5 [outbound proxy](Outbound-Proxy) for peer, tracker and catalog
-  connections (`OUTPACE_PROXY`, `OUTPACE_PROXY_MODE`), off by default. Stream status reports the
-  active path as `network_path`.
+  connections (`OUTPACE_PROXY`, `OUTPACE_PROXY_MODE`) (#492). Stream status reports the active
+  path as `network_path`, and `/network-policy` gains a `proxy` object.
+- Stream status reports a start `phase` and, on failure, an `error` code. Native start routes
+  and `/vod/...` errors return a JSON `{"error":{"code","message"}}` body instead of plain text or
+  no body; status codes are unchanged (#487, #493). See
+  [Playing Streams](Playing-Streams).
+- A disk-cached VOD download that would not fit is refused with `507` and code `no_space`;
+  `OUTPACE_VOD_DISK_RESERVE_BYTES` sets the space to leave free (#489).
+- DHT lookups send the next query as soon as a reply frees a slot, instead of waiting out fixed
+  1.5-second rounds (#490).
 
 ## v1.1.0 changes
 

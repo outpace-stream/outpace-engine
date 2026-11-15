@@ -8,7 +8,7 @@ Restart the daemon after any change. Booleans accept exactly `1`, `true`, `0` or
 Variables marked "exact `1`" turn on only for the string `1`. **Avail.** says where a variable
 is available: **all** means v0.9.0 and later; **1.0.0** means v1.0.0 and later (also
 in `edge` and builds from `main`); **1.1.0** means v1.1.0 and later (also in `edge` and builds
-from `main`); **edge** means current `main` and the `edge` image, not
+from `main`); **1.2.0** means v1.2.0 and later (also in `edge` and builds from `main`); **edge** means current `main` and the `edge` image, not
 yet in a numbered release; **srt build** requires the optional `srt` feature.
 See [Releases and Versions](Releases-and-Versions) for publication status.
 
@@ -34,7 +34,7 @@ See [Releases and Versions](Releases-and-Versions) for publication status.
 | [`OUTPACE_CACHE_DIR`](Configuration#storage-and-cache) | `<data dir>/cache` | all | Disk-cache root. Wiped at startup. |
 | [`OUTPACE_CACHE_TYPE`](Configuration#storage-and-cache) | `memory` | all | Where seeding pieces are kept: `memory` or `disk`. |
 | [`OUTPACE_DATA_DIR`](Configuration#storage-and-cache) | platform data dir + `outpace` | all | Identity and broadcast state. The container uses `/var/lib/outpace`. |
-| [`OUTPACE_ENABLE_CAST`](Configuration#casting) | `false` | edge | Add the `/cast/*` routes for DLNA/UPnP renderers. Needs a LAN `OUTPACE_BIND`. |
+| [`OUTPACE_ENABLE_CAST`](Configuration#casting) | `false` | 1.2.0 | Add the `/cast/*` routes for DLNA/UPnP renderers. Needs a LAN `OUTPACE_BIND`. |
 | [`OUTPACE_ENABLE_INBOUND`](Configuration#seeding-and-inbound-peers) | `true` | all | Accept inbound peers and announce to trackers and the DHT. |
 | [`OUTPACE_ENABLE_PORT_MAPPING`](Configuration#nat-and-port-mapping) | `false` | all | Ask the router to open the peer port with UPnP or NAT-PMP. |
 | [`OUTPACE_ENABLE_SEEDING`](Configuration#seeding-and-inbound-peers) | `true` | all | Upload to the peers you download from. |
@@ -69,8 +69,8 @@ See [Releases and Versions](Releases-and-Versions) for publication status.
 | [`OUTPACE_PREFETCH_PIECES`](Configuration#playback-and-startup-buffering) | automatic | all | Pieces behind the live edge to start at. |
 | [`OUTPACE_PRIVATE_DESCRIPTORS`](Configuration#private-peers-and-descriptors) | unset | 1.0.0 | Local descriptor files, as an alias-to-path JSON object. |
 | [`OUTPACE_PRIVATE_PEERS`](Configuration#private-peers-and-descriptors) | unset | 1.0.0 | Allowlist that switches on private peer mode. |
-| [`OUTPACE_PROXY`](Configuration#outbound-proxy) | unset | edge | SOCKS5 proxy for peer, tracker and catalog connections, `socks5://[user:password@]host:port`. Treat as a secret when it has credentials. |
-| [`OUTPACE_PROXY_MODE`](Configuration#outbound-proxy) | `off` | edge | `off`, `on` or `fallback` (proxy only after a live start finds no peers). |
+| [`OUTPACE_PROXY`](Configuration#outbound-proxy) | unset | 1.2.0 | SOCKS5 proxy for peer, tracker and catalog connections, `socks5://[user:password@]host:port`. Treat as a secret when it has credentials. |
+| [`OUTPACE_PROXY_MODE`](Configuration#outbound-proxy) | `off` | 1.2.0 | `off`, `on` or `fallback` (proxy only after a live start finds no peers). |
 | [`OUTPACE_REQUEST_CHECK_INTERVAL_MS`](Configuration#live-recovery-advanced) | `1000` | all | How often outstanding piece requests are checked. |
 | [`OUTPACE_REQUEST_TIMEOUT_MS`](Configuration#live-recovery-advanced) | `1500` | all | Wait for a piece before asking another peer. |
 | [`OUTPACE_RTMP_BIND`](Configuration#network-and-listeners) | `127.0.0.1:1935` | all | RTMP ingest address. The container sets `0.0.0.0:1935`. |
@@ -87,7 +87,7 @@ See [Releases and Versions](Releases-and-Versions) for publication status.
 | [`OUTPACE_SUPPORT_SOURCES`](Configuration#support-sources) | unset (off) | 1.0.0 | Streams kept running and seeding with no viewer (JSON). |
 | [`OUTPACE_TRACKER_ALLOW_NON_GLOBAL`](Configuration#discovery-trackers-and-resolution) | off | all | Exact `1`: allow announcing to trackers on private addresses. |
 | [`OUTPACE_TRACKERS`](Configuration#broadcasting-and-ingest) | built-in public tracker | all | Trackers written into new broadcasts. |
-| [`OUTPACE_VOD_DISK_RESERVE_BYTES`](Configuration#vod-free-space-check) | 256 MiB | edge | Free space a disk-cached VOD download must leave. |
+| [`OUTPACE_VOD_DISK_RESERVE_BYTES`](Configuration#vod-free-space-check) | 256 MiB | 1.2.0 | Free space a disk-cached VOD download must leave. |
 
 Variables named `OUTPACE_TEST_*`, `OUTPACE_DHT_COMPARE_*` or `OUTPACE_RUN_*` belong to the test
 suite. The repository's Compose file also reads `OUTPACE_IMAGE`, `OUTPACE_HTTP_HOST`,
