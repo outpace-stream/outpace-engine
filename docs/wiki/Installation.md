@@ -62,19 +62,27 @@ There is a best-effort `aarch64-linux-android` build for 64-bit ARM
 phones and Android TV boxes, to run under [Termux](https://termux.dev). From v1.0.2, there is
 also an `armv7-linux-androideabi` build for 32-bit ARM devices, packaged the
 same way. Many Android TV boxes run 32-bit Android on a 64-bit chip; they need the 32-bit build.
+Releases after v1.2.1 add an `x86_64-linux-android` build for Intel and AMD devices: x86_64
+emulator images, ChromeOS and x86 Android TV boxes. There is no 32-bit x86 build.
 
 - **Best-effort** means it is uploaded after the rest of the release. If a build fails, that
   release has no archive for that target.
 - These archives aren't covered by `SHA256SUMS`. Each has its own `<archive>.sha256` file.
 - These builds run on Android 5 and newer, without root.
 
-In Termux, `dpkg --print-architecture` prints `aarch64` for the 64-bit build or `arm` for the
-32-bit one. For `arm`, set `target=armv7-linux-androideabi` and use a release that has it:
+The commands below pick the target from `dpkg --print-architecture` in Termux: `aarch64` for
+64-bit ARM, `arm` for 32-bit ARM, or `x86_64`. Set `version` to a release that has that target;
+x86_64 needs a release after v1.2.1.
 
 ```bash
 pkg install curl
 version=1.2.1
-target=aarch64-linux-android
+case "$(dpkg --print-architecture)" in
+  aarch64) target=aarch64-linux-android ;;
+  arm) target=armv7-linux-androideabi ;;
+  x86_64) target=x86_64-linux-android ;;
+  *) echo "no Android build for this architecture" >&2 ;;
+esac
 artifact="outpace-${version}-${target}.tar.gz"
 base="https://github.com/outpace-stream/outpace-engine/releases/download/v${version}"
 curl -LO "${base}/${artifact}" && curl -LO "${base}/${artifact}.sha256"

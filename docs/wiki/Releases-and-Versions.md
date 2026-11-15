@@ -63,6 +63,14 @@ build.
 | `edge` | With every merge to `main` | amd64 | Testing unreleased features. |
 | `sha-<commit>` | No | amd64 | Pinning one specific `main` build. |
 
+## Next release
+
+Changes on `main` that aren't in a published release yet:
+
+- A best-effort `x86_64-linux-android` engine archive, for x86_64 emulator images, ChromeOS
+  and Intel or AMD Android TV boxes, next to the ARM ones (#505). See
+  [Installation](Installation#android-with-termux-best-effort) and [Android App](Android-App).
+
 ## v1.2.1 fixes
 
 A patch release with no new features or default changes:
