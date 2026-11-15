@@ -36,9 +36,11 @@
 - [Troubleshooting](Troubleshooting)
 - [Releases and Versions](Releases-and-Versions)
 
-**Use cases**
+**Success stories**
 
-- [Use cases](Use-Cases)
+- [Success stories](Success-Stories)
 - [Android TV](Android-TV)
+- [OpenWrt Router](OpenWrt-Router)
+- [Home Server Behind a VPN](Home-Server-Behind-a-VPN)
 
 - [Android companion app](Android-App)

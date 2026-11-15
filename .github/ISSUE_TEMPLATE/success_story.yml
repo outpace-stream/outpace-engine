@@ -1,0 +1,71 @@
+name: Success story
+description: Share a setup where Outpace works, especially on unusual hardware or in an unusual way.
+title: "Success story: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing! Rough notes are fine; we can write the wiki page with you.
+        Published stories are on the [Success Stories](https://github.com/outpace-stream/outpace-engine/wiki/Success-Stories) page.
+        Don't include content ids, infohashes or stream names. Use the placeholder `0123456789abcdef0123456789abcdef01234567` in examples.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What did you get working?
+      description: One or two sentences. Where does the engine run, and what do you watch it on?
+      placeholder: Outpace on my NAS, playing on two televisions through VLC.
+    validations:
+      required: true
+
+  - type: textarea
+    id: device
+    attributes:
+      label: Device and OS
+      description: Model, CPU architecture, RAM, and operating system with its version.
+      placeholder: Synology DS920+, x86_64, 4 GiB RAM, DSM 7.2
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Outpace version
+      description: The output of `outpace --version`, and the Android app version if you used it.
+      placeholder: outpace 1.2.1, Android app 1.0.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: How you set it up
+      description: Install steps, `OUTPACE_*` settings, service or boot scripts, firewall or VPN rules. Paste commands and config as code.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: playback
+    attributes:
+      label: How you play
+      description: Players, apps and devices you watch on, and how they reach the engine.
+
+  - type: textarea
+    id: problems
+    attributes:
+      label: What didn't work at first
+      description: Problems you hit and how you got past them. This is often the most useful part.
+
+  - type: input
+    id: source
+    attributes:
+      label: Original post
+      description: Optional. A link if you first wrote about it elsewhere, such as a forum or blog.
+
+  - type: input
+    id: credit
+    attributes:
+      label: Credit
+      description: How you'd like to be credited on the wiki page, or "anonymous".
