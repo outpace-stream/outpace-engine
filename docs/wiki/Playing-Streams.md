@@ -173,9 +173,14 @@ the status route answers `404`: read the `error` from the start response itself.
 When [live audio normalisation](HLS-Output#audio-normalisation) fails before a continuous
 MPEG-TS stream (`/streams/<network>/<id>` or `.ts`) is ready, so before any response headers are
 sent, the response uses the same JSON body: `capacity` with `503` + `Retry-After: 1` when audio
-conversion is at capacity, otherwise `internal` with `422` (unsupported audio), `504` (startup
-timed out or output stalled), `410` (stream stopped) or `502` (conversion failed). A failure
-after that point ends the `200` response body early instead.
+conversion is at capacity, otherwise `internal` with:
+
+- `422`: the audio can't be converted.
+- `504`: conversion didn't become ready within the startup timeout, or its output stalled.
+- `410`: the stream itself was stopped or cancelled while the request waited.
+- `502`: conversion failed, or stopped or closed on its own before it was ready.
+
+A failure after that point ends the `200` response body early instead.
 
 The [compatibility API](#acestream-compatible-api) keeps its own error format.
 

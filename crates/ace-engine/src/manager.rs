@@ -85,6 +85,27 @@ impl HlsTransition {
             .contains(&(self.key.clone(), self.generation))
     }
 
+    /// Records a failed provider open unless a stop has fenced this generation or `cancel` is
+    /// set. The check and the record happen under the stop fence lock, so a concurrent stop
+    /// either comes first (the attempt drops and leaves no record) or after the failure.
+    fn settle_failed_open(
+        &self,
+        attempt: crate::start_status::StartAttempt,
+        failure: &ProviderStartFailure,
+        cancel: &watch::Receiver<bool>,
+    ) {
+        let lifecycle = self.state.lock().unwrap();
+        if lifecycle
+            .cancelled
+            .contains(&(self.key.clone(), self.generation))
+            || *cancel.borrow()
+        {
+            return;
+        }
+        // Recorded while `lifecycle` (the stop fence) is still held.
+        settle_failed_open(attempt, failure);
+    }
+
     fn finish(&mut self) -> bool {
         let cancelled = self
             .state
@@ -1172,9 +1193,7 @@ impl StreamManager {
             Ok(inner) => inner,
             Err(failure) => {
                 // A stop during the open leaves no record: the attempt drops without `fail`.
-                if !(transition.is_cancelled() || *cancel.borrow()) {
-                    settle_failed_open(attempt, &failure);
-                }
+                transition.settle_failed_open(attempt, &failure, &cancel);
                 return Err(failure);
             }
         };
@@ -1329,9 +1348,7 @@ impl StreamManager {
                 Ok(inner) => inner,
                 Err(failure) => {
                     // A stop during the open leaves no record: the attempt drops without `fail`.
-                    if !(transition.is_cancelled() || *cancel.borrow()) {
-                        settle_failed_open(attempt, &failure);
-                    }
+                    transition.settle_failed_open(attempt, &failure, &cancel);
                     return Err(failure.into());
                 }
             };
@@ -1739,6 +1756,52 @@ mod tests {
     use crate::testprovider::TestProvider;
     use async_trait::async_trait;
     use tokio::sync::Notify;
+
+    fn no_peers() -> ProviderStartFailure {
+        ProviderStartFailure::new(
+            StartFailureKind::Discovery,
+            ProviderError::NoPeers("synthetic discovery diagnostic".into()),
+        )
+    }
+
+    #[test]
+    fn a_failed_open_is_recorded_only_when_no_stop_or_cancel_fenced_it() {
+        use crate::start_status::{AttemptStatus, StartAttempts};
+        let key: StreamKey = ("net".into(), "chan".into());
+        for (fenced, cancelled, recorded) in [
+            (false, false, true),
+            (true, false, false),
+            (false, true, false),
+        ] {
+            let attempts: Arc<StartAttempts> = Arc::default();
+            let lifecycle = Arc::new(StdMutex::new(HlsLifecycleState::default()));
+            let transition = HlsTransition::begin(lifecycle.clone(), key.clone());
+            // Another generation's stop fence must not suppress this one.
+            lifecycle
+                .lock()
+                .unwrap()
+                .cancelled
+                .insert((key.clone(), transition.generation + 1));
+            if fenced {
+                lifecycle
+                    .lock()
+                    .unwrap()
+                    .cancelled
+                    .insert((key.clone(), transition.generation));
+            }
+            let (_cancel_tx, cancel) = watch::channel(cancelled);
+            transition.settle_failed_open(attempts.begin(key.clone()), &no_peers(), &cancel);
+            let status = attempts.status(&key);
+            assert_eq!(
+                matches!(status, Some(AttemptStatus::Failed(_))),
+                recorded,
+                "fenced={fenced} cancelled={cancelled}: {status:?}"
+            );
+            if !recorded {
+                assert!(status.is_none(), "{status:?}");
+            }
+        }
+    }
 
     struct IdleSource;
 
