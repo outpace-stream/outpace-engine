@@ -311,37 +311,52 @@ fn normalization_status_json(
     json!({"generation":snapshot.generation,"state":state,"failure":failure})
 }
 
-fn normalization_error(error: crate::audio_normalize::PlaybackWaitError) -> Response {
+/// Status and typed error for an audio normalization failure before the first byte. Conversion
+/// admission is `503` (code `capacity`); everything else keeps its status with code `internal`,
+/// matching how the status route reports the same failure.
+fn normalization_failure(
+    error: crate::audio_normalize::PlaybackWaitError,
+) -> (StatusCode, StartError) {
     use crate::audio_normalize::{Failure, PlaybackWaitError};
+    let internal = |message: &str| StartError {
+        code: crate::start_status::StartErrorCode::Internal,
+        message: message.to_owned(),
+    };
     match error {
-        PlaybackWaitError::Failed(Failure::Admission) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::RETRY_AFTER, "1")],
-            "audio conversion capacity reached",
-        )
-            .into_response(),
-        PlaybackWaitError::Failed(reason) => (
-            if reason == Failure::Unsupported {
-                StatusCode::UNPROCESSABLE_ENTITY
-            } else if matches!(reason, Failure::Deadline | Failure::OutputStall) {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::BAD_GATEWAY
-            },
-            format!("audio normalization failed: {}", reason.code()),
-        )
-            .into_response(),
+        PlaybackWaitError::Failed(reason) => {
+            let status = match reason {
+                Failure::Admission => StatusCode::SERVICE_UNAVAILABLE,
+                Failure::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
+                Failure::Deadline | Failure::OutputStall => StatusCode::GATEWAY_TIMEOUT,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            (status, StartError::from_normalization(reason))
+        }
         PlaybackWaitError::Deadline => (
             StatusCode::GATEWAY_TIMEOUT,
-            "audio normalization startup timed out",
-        )
-            .into_response(),
-        PlaybackWaitError::Cancelled => (StatusCode::GONE, "stream stopped").into_response(),
+            internal("audio normalization startup timed out"),
+        ),
+        PlaybackWaitError::Cancelled => (StatusCode::GONE, internal("stream stopped")),
         PlaybackWaitError::Stopped | PlaybackWaitError::Closed => (
             StatusCode::BAD_GATEWAY,
-            "audio normalization stopped before readiness",
-        )
-            .into_response(),
+            internal("audio normalization stopped before readiness"),
+        ),
+    }
+}
+
+/// Native routes: a normalization start failure as typed JSON (see [`start_error_response`]).
+fn normalization_error(error: crate::audio_normalize::PlaybackWaitError) -> Response {
+    let (status, error) = normalization_failure(error);
+    start_error_response(status, &error)
+}
+
+/// Compatibility routes keep their plain-text body; `503` still carries Retry-After.
+fn ace_normalization_error(error: crate::audio_normalize::PlaybackWaitError) -> Response {
+    let (status, error) = normalization_failure(error);
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        (status, [(header::RETRY_AFTER, "1")], error.message).into_response()
+    } else {
+        (status, error.message).into_response()
     }
 }
 
@@ -462,7 +477,7 @@ pub(super) async fn ace_stream_session_response(
         let deadline = (tokio::time::Instant::now() + startup_timeout)
             .min(tokio::time::Instant::from_std(expires_at));
         if let Err(reason) = state.wait_ready(deadline, &mut cancel).await {
-            return normalization_error(reason);
+            return ace_normalization_error(reason);
         }
     }
     let mut gate =
@@ -589,17 +604,105 @@ mod normalization_tests {
         ));
     }
 
+    async fn body_bytes(response: Response) -> Bytes {
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn conversion_capacity_response_names_the_exhausted_resource() {
-        let response = normalization_error(crate::audio_normalize::PlaybackWaitError::Failed(
-            Failure::Admission,
-        ));
+        let failure = || crate::audio_normalize::PlaybackWaitError::Failed(Failure::Admission);
+        let response = normalization_error(failure());
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers()[header::RETRY_AFTER], "1");
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        assert_eq!(body.as_ref(), b"audio conversion capacity reached");
+        let value: serde_json::Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
+        assert_eq!(
+            value,
+            json!({"error":{"code":"capacity","message":"audio conversion capacity reached"}})
+        );
+        let response = ace_normalization_error(failure());
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        assert_eq!(
+            body_bytes(response).await.as_ref(),
+            b"audio conversion capacity reached"
+        );
+    }
+
+    /// Native normalization start failures are typed JSON with their status and Retry-After
+    /// unchanged; the compatibility API keeps its plain-text bodies.
+    #[tokio::test]
+    async fn native_normalization_start_failures_are_typed_json_and_compat_stays_plain() {
+        use crate::audio_normalize::PlaybackWaitError as W;
+        let cases = [
+            (
+                W::Failed(Failure::Admission),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "capacity",
+                "audio conversion capacity reached",
+            ),
+            (
+                W::Failed(Failure::Unsupported),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "internal",
+                "audio normalization failed: unsupported",
+            ),
+            (
+                W::Failed(Failure::OutputStall),
+                StatusCode::GATEWAY_TIMEOUT,
+                "internal",
+                "audio normalization failed: output_stall",
+            ),
+            (
+                W::Failed(Failure::ChildExit),
+                StatusCode::BAD_GATEWAY,
+                "internal",
+                "audio normalization failed: child_exit",
+            ),
+            (
+                W::Deadline,
+                StatusCode::GATEWAY_TIMEOUT,
+                "internal",
+                "audio normalization startup timed out",
+            ),
+            (W::Cancelled, StatusCode::GONE, "internal", "stream stopped"),
+            (
+                W::Stopped,
+                StatusCode::BAD_GATEWAY,
+                "internal",
+                "audio normalization stopped before readiness",
+            ),
+            (
+                W::Closed,
+                StatusCode::BAD_GATEWAY,
+                "internal",
+                "audio normalization stopped before readiness",
+            ),
+        ];
+        for (failure, status, code, message) in cases {
+            let retry = status == StatusCode::SERVICE_UNAVAILABLE;
+            let native = normalization_error(failure);
+            assert_eq!(native.status(), status, "{message}");
+            assert_eq!(native.headers().contains_key(header::RETRY_AFTER), retry);
+            assert_eq!(
+                native.headers()[header::CONTENT_TYPE],
+                "application/json",
+                "{message}"
+            );
+            let value: serde_json::Value =
+                serde_json::from_slice(&body_bytes(native).await).unwrap();
+            assert_eq!(value, json!({"error":{"code":code,"message":message}}));
+
+            let compat = ace_normalization_error(failure);
+            assert_eq!(compat.status(), status, "{message}");
+            assert_eq!(compat.headers().contains_key(header::RETRY_AFTER), retry);
+            assert!(compat.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/plain"));
+            assert_eq!(body_bytes(compat).await.as_ref(), message.as_bytes());
+        }
     }
 
     struct Controlled {
@@ -738,10 +841,17 @@ mod normalization_tests {
             session.stop().await;
             let (response, _lease) = result.unwrap();
             assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-            let bytes = axum::body::to_bytes(response.into_body(), 1024)
-                .await
-                .unwrap();
-            assert_eq!(bytes.as_ref(), b"audio normalization failed: unsupported");
+            let bytes = body_bytes(response).await;
+            if compat {
+                assert_eq!(bytes.as_ref(), b"audio normalization failed: unsupported");
+            } else {
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(value["error"]["code"], "internal");
+                assert_eq!(
+                    value["error"]["message"],
+                    "audio normalization failed: unsupported"
+                );
+            }
         }
     }
     #[tokio::test]
