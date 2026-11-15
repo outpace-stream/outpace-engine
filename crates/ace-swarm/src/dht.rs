@@ -150,14 +150,21 @@ pub fn parse_response(buf: &[u8]) -> Option<GetPeersResponse> {
     Some(out)
 }
 
-/// Did a rejected datagram carry a well-formed KRPC error (`y == "e"`), as opposed to being
-/// unparseable or the wrong shape? Diagnostics only — used to separate a node that answered
-/// with an error from genuinely malformed/hostile traffic.
-fn is_krpc_error(buf: &[u8]) -> bool {
-    match Bencode::parse(buf) {
-        Ok(v) => v.get(b"y").and_then(Bencode::as_bytes) == Some(b"e".as_slice()),
-        Err(_) => false,
+/// The transaction id of a rejected datagram that is a well-formed KRPC error (`y == "e"`),
+/// or `None` if it is unparseable or the wrong shape. Separates a node that answered with an
+/// error from genuinely malformed/hostile traffic, and lets a correlated error close its
+/// query. An error without a usable `t` yields an empty id, which never matches a query.
+fn krpc_error_txid(buf: &[u8]) -> Option<Vec<u8>> {
+    let v = Bencode::parse(buf).ok()?;
+    if v.get(b"y").and_then(Bencode::as_bytes) != Some(b"e".as_slice()) {
+        return None;
     }
+    Some(
+        v.get(b"t")
+            .and_then(Bencode::as_bytes)
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default(),
+    )
 }
 
 /// Per-walk diagnostics for a single iterative lookup. A raw peer count hides the failure
@@ -456,10 +463,20 @@ async fn dht_walk_owned(
         let Some(resp) = parse_response(&buf[..n]) else {
             // Rejected before correlation: either a node's KRPC error or genuinely
             // malformed/hostile traffic. Bucket the two apart for diagnostics.
+            let error_txid = krpc_error_txid(&buf[..n]);
             if let Some(query) = inflight.get_mut(&src) {
                 query.heard = true;
+                // A KRPC error that echoes this query's transaction is the node's final word:
+                // close the query so it no longer holds a slot. Anything else from this source
+                // (malformed, or an error for another transaction) could be spoofed, so the
+                // query stays open for a genuine reply.
+                if error_txid.as_deref() == Some(query.txid.as_slice())
+                    && query.expires > Instant::now()
+                {
+                    inflight.remove(&src);
+                }
             }
-            if is_krpc_error(&buf[..n]) {
+            if error_txid.is_some() {
                 metrics.krpc_errors += 1;
             } else {
                 metrics.malformed_responses += 1;
@@ -1729,6 +1746,77 @@ mod tests {
             elapsed < SLOT_TIMEOUT + Duration::from_millis(700),
             "slots were held for {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn correlated_krpc_error_frees_its_slot_immediately() {
+        // A node that answers with a KRPC error for our transaction will not send a usable
+        // reply, so its slot must free at once rather than at SLOT_TIMEOUT.
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let seed = v4_addr(&server);
+        let handle = answer_once(server, error_response);
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let metrics = dht_walk_from_seeds(
+            &[9u8; 20],
+            Duration::from_secs(10),
+            &client,
+            vec![seed],
+            |_src, _resp| false,
+        )
+        .await;
+        let elapsed = start.elapsed();
+        handle.abort();
+        assert_eq!(metrics.krpc_errors, 1);
+        assert_eq!(metrics.timeouts, 0);
+        assert!(metrics.frontier_exhausted);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "waited {elapsed:?} on a node that already refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn uncorrelated_krpc_error_does_not_close_the_query() {
+        // A KRPC error with the wrong transaction id may be spoofed; it must not close the
+        // query, so a genuine reply that follows is still accepted.
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let seed = v4_addr(&server);
+        let peer: SocketAddrV4 = "10.0.0.6:6666".parse().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let (n, caller) = server.recv_from(&mut buf).await.unwrap();
+            let txid = buf_txid(&buf[..n]);
+            let mut wrong = txid.clone();
+            wrong.push(0xff);
+            server
+                .send_to(&error_response(&wrong), caller)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            server
+                .send_to(&response_with(&txid, &[peer], &[]), caller)
+                .await
+                .unwrap();
+            std::future::pending::<()>().await
+        });
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut found = false;
+        let metrics = dht_walk_from_seeds(
+            &[9u8; 20],
+            Duration::from_secs(5),
+            &client,
+            vec![seed],
+            |_src, resp| {
+                found |= resp.peers.contains(&peer);
+                found
+            },
+        )
+        .await;
+        handle.abort();
+        assert!(found, "spoofable error closed the query: {metrics:?}");
+        assert_eq!(metrics.krpc_errors, 1);
+        assert_eq!(metrics.valid_responses, 1);
     }
 
     #[tokio::test]
