@@ -47,8 +47,9 @@ Make the VPN start at boot and reconnect on its own, and turn on its **kill swit
 "block connections without VPN" or "lockdown"). Without one, peer traffic falls back to your home
 connection whenever the tunnel drops, and the `ifconfig.me` check only proves the route while
 the tunnel is up. If your client has no kill switch, add firewall rules that drop outgoing
-traffic on every interface except the tunnel, allowing only the LAN and the VPN server. In the
-container that is `eth0`; on bare metal, check `ip link` for names such as `enp3s0` or `wlan0`.
+traffic on every interface except the tunnel and loopback (`lo`), allowing only the LAN and the
+VPN server. In the container that is `eth0`; on bare metal, check `ip link` for names such as
+`enp3s0` or `wlan0`.
 Apply the same rules to IPv6, or turn IPv6 off: tunneling IPv6 while connected is not enough if
 it falls back to the home route when the tunnel drops.
 
