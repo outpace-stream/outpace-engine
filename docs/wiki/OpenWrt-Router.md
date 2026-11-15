@@ -11,7 +11,7 @@ the engine themselves.
 | **Versions** | Not stated. The newest release then was v0.8.0, a 0.x development build. Use 1.0.0 or later. |
 | **Device** | ASUS TUF-AX6000 (MediaTek Filogic, 64-bit ARM, 512 MiB RAM) |
 | **OS** | OpenWrt 25.12.5, kernel 6.12 |
-| **Players** | LG and Samsung televisions on the LAN |
+| **Players** | Intended for LG and Samsung televisions on the LAN |
 | **Works on** | OpenWrt routers with a 64-bit ARM, 32-bit ARM, x86_64 or RISC-V 64 CPU; not MIPS |
 
 The reporter wrote their own boot script in `/etc/init.d/` and a watchdog in `/usr/bin/`. The
@@ -117,8 +117,8 @@ Players that only speak the AceStream API need `OUTPACE_ACE_COMPAT=1`; see
   ```
 
   You then need your own boot and restart scripts, as the reporter wrote.
-- **Faster channel changes:** another user in the same thread shortened the startup buffers.
-  On a router, start from
+- **Faster channel changes:** another user in the same thread shortened the startup buffers and
+  turned off buffering in the player, since the engine already buffers. On a router, start from
   `uci add_list outpace.main.env='OUTPACE_PREBUFFER_MS=6000'` and see
   [Configuration](Configuration#playback-and-startup-buffering) before changing more.
 - **Peers:** to upload as well as download, open TCP 8621 on the WAN or enable
