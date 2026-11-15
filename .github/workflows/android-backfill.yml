@@ -1,0 +1,157 @@
+name: Android backfill
+
+# Attaches one best-effort Android engine archive to an existing release, built from that
+# release's tag exactly as release.yml would have built it. Use it when a best-effort build
+# failed, or when a target was added after the release was published. It never replaces an
+# asset that is already there. Same split as release.yml: the build job has a read-only
+# token, and the upload job runs no build steps.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, for example v1.2.1
+        required: true
+        type: string
+      target:
+        description: Android target to build
+        required: true
+        type: choice
+        options:
+          - aarch64-linux-android
+          - armv7-linux-androideabi
+          - x86_64-linux-android
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-backfill-${{ inputs.tag }}-${{ inputs.target }}
+  cancel-in-progress: false
+
+env:
+  BIN_NAME: outpace
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag }}
+  TARGET: ${{ inputs.target }}
+
+jobs:
+  build:
+    name: Build ${{ inputs.target }} for ${{ inputs.tag }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Check the tag and the release
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::${TAG} is not a release tag (vX.Y.Z)."
+            exit 1
+          fi
+          version="${TAG#v}"
+          archive="${BIN_NAME}-${version}-${TARGET}.tar.gz"
+          assets="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          if grep -Fxq "$archive" <<<"$assets"; then
+            echo "::error::${TAG} already has ${archive}; nothing to backfill."
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the release tag
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Check the tag against Cargo metadata
+        shell: bash
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Tags before v1.0.0 have no smoke helper; stop before the build, not after it.
+          if [[ ! -f tools/ci/smoke_daemon.sh ]]; then
+            echo "::error::${TAG} has no tools/ci/smoke_daemon.sh; backfill v1.0.0 or later."
+            exit 1
+          fi
+          cargo_version="$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "ace-engine") | .version')"
+          if [[ "$cargo_version" != "$VERSION" ]]; then
+            echo "::error::${TAG} builds ace-engine ${cargo_version}, not ${VERSION}."
+            exit 1
+          fi
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: ${{ inputs.target }}
+          cache: false
+          build-warnings: ""
+
+      - name: Install Android cross toolchain
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ inputs.target }}
+
+      - name: Build release binary
+        run: cargo build --locked --release -p ace-engine --bin "$BIN_NAME" --target "$TARGET"
+
+      - name: Start emulated daemon and check health
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_var="CARGO_TARGET_$(tr 'a-z-' 'A-Z_' <<<"$TARGET")_RUNNER"
+          export SMOKE_RUNNER="${!runner_var:-}"
+          echo "runner: ${SMOKE_RUNNER:-native}"
+          sh tools/ci/smoke_daemon.sh "target/$TARGET/release/$BIN_NAME"
+
+      # Same name and layout as release.yml: the Android app downloads these by name.
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="${BIN_NAME}-${VERSION}-${TARGET}"
+          mkdir -p "dist/${name}"
+          cp "target/${TARGET}/release/${BIN_NAME}" LICENSE README.md "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-backfill
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  upload:
+    # Write-scoped, but runs no build steps or toolchain actions: it only attaches the archive.
+    name: Attach to ${{ inputs.tag }}
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged binary
+        uses: actions/download-artifact@v8
+        with:
+          name: android-backfill
+          path: dist
+
+      # No --clobber: an asset that appeared since the build job checked is left alone.
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.tar.gz.sha256 --repo "$GITHUB_REPOSITORY"

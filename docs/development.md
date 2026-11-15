@@ -103,8 +103,18 @@ does not match `v<cargo_version>`, so artifact names and image tags agree with C
 - creates the GitHub Release with curated and generated notes;
 - publishes standard and minimal images for linux/amd64, linux/arm64 and linux/arm/v7,
   with versioned and moving `latest`/`minimal` tags and provenance;
-- attempts Android ARM64 afterward as best-effort, with a separate `.sha256` file. Its failure
-  does not block the standard release.
+- attempts the Android archives (`aarch64-linux-android`, `armv7-linux-androideabi`,
+  `x86_64-linux-android`) afterward as best-effort, each with a separate `.sha256` file. Their
+  failure does not block the standard release.
+
+If an Android build failed, or a target was added after a release was published, run the
+**Android backfill** workflow (`.github/workflows/android-backfill.yml`) with the release tag and
+target. It builds and smoke-tests that tag's sources, packages them as `release.yml` does, and
+attaches the archive. It refuses a tag that already has that archive:
+
+```bash
+gh workflow run android-backfill.yml -f tag=v1.2.1 -f target=x86_64-linux-android
+```
 
 Inspect the final workflow status and verify exact assets/checksums, image manifests and version
 output. Packaging success does not prove playback acceptance. After publication, refresh
