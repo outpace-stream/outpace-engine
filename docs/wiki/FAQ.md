@@ -18,8 +18,8 @@ works with Ace Stream content ids and `acestream://` links. It can also serve th
 engine HTTP routes that existing apps call, through an opt-in compatibility mode.
 
 It isn't a full clone. It doesn't play premium or encrypted content, and it has no accounts, web
-UI or EPG. [Optional stream-name search](Stream-Search) requires a separate services opt-in
-in builds available from v1.0.0. It needs no operator API key. See
+UI or EPG. [Optional stream-name search](Stream-Search) requires a separate services opt-in.
+It needs no operator API key. See
 [what's different](Migrating-from-AceStream-Engine#whats-different).
 
 Outpace isn't affiliated with or endorsed by Ace Stream. It uses Ace Stream names only to
@@ -34,8 +34,9 @@ machine, stop it first, because both want ports 6878 and 8621.
 ## How do I play an Ace Stream link on Linux, macOS or Windows?
 
 1. Download the release for your platform from
-   [Installation](Installation#release-binaries). There are binaries for Linux x86_64, ARM64 and
-   ARMv7, macOS Intel and Apple silicon, and Windows x64 and ARM64.
+   [Installation](Installation#release-binaries). There are binaries for Linux (x86_64, ARM64,
+   ARMv7, ARMv6 and RISC-V 64), macOS (Intel and Apple silicon), Windows (x64 and ARM64) and
+   FreeBSD x86_64, plus Homebrew, Scoop, AUR, `.deb` and `.rpm` packages.
 2. Start it: `outpace serve` (`outpace.exe serve` on Windows).
 3. Take the content id from the `acestream://` link, the 40 characters after `acestream://`, and
    open `http://127.0.0.1:6878/streams/ace/<content-id>` in your player.
@@ -47,6 +48,14 @@ outpace play acestream://0123456789abcdef0123456789abcdef01234567 | vlc -
 ```
 
 See [Getting Started](Getting-Started) and [Command Line](Command-Line#outpace-play).
+
+## Can I run Outpace on Android or Android TV?
+
+Yes. The [Android app](Android-App) downloads an engine release onto a phone, tablet or Android TV
+box, runs it in the background without root, and hands streams to the player you already use. It
+can also control an Outpace engine running elsewhere on your network. For a television, see
+[Android TV](Android-TV). If you prefer a terminal, the engine also runs under
+[Termux](Installation#android-with-termux-best-effort).
 
 ## How do I run Outpace in Docker?
 
@@ -143,13 +152,14 @@ RTMP (1935) private. No UDP port needs forwarding. See
 
 ## Can I rewind live TV?
 
-For a few minutes, with [Timeshift](Timeshift) (available from v1.0.0). It's an in-memory buffer,
+For a few minutes, with [Timeshift](Timeshift). It's an in-memory buffer,
 not a recorder, and it doesn't do EPG catch-up.
 
-## Why did my old playlist of bare infohashes stop working?
+## Can I play a stream by its infohash?
 
-On `/streams/ace/`, a bare 40-character id now means a content id. Prefix infohashes with `ih:`,
-for example `/streams/ace/ih:<infohash>`. See [Playing Streams](Playing-Streams#what-you-can-play).
+Yes, with the `ih:` prefix: `/streams/ace/ih:<infohash>`. A bare 40-character id on
+`/streams/ace/` always means a content id. An infohash plays only when Outpace can find a
+verified descriptor for it. See [Playing Streams](Playing-Streams#what-you-can-play).
 
 ## Where do I report a bug?
 

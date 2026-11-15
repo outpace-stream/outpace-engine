@@ -41,7 +41,9 @@ With Compose, remember that most settings must go in `compose.override.yml`. If 
 
 ## Slow startup
 
-Outpace keeps recent productive peer hints in its data directory to help later starts.
+Outpace keeps recent productive peer hints in its cache directory (`OUTPACE_CACHE_DIR`,
+`<data dir>/cache` by default) to help later starts. With `OUTPACE_CACHE_TYPE=disk` the
+startup cache wipe clears them, so they help only within one run.
 On Linux and Android, this works through execute-only parent directories, including
 Android app storage and Termux. The cache directory must still belong to the daemon
 user, must not be group- or world-writable, and must have no symlinks in its path.
@@ -101,8 +103,6 @@ most players retry on their own.
 - A `503` that never goes away, after playback had worked, can mean
   [audio normalisation](HLS-Output#audio-normalisation) failed. Check `normalization` in
   `/status`. Stop the stream and start it again.
-- On v0.9.0, an HLS stream whose source **ended** also answers `503` for ever. Newer builds
-  return a closed playlist instead.
 
 ## Stalls and gaps during playback
 
@@ -217,8 +217,9 @@ it, or stop unused streams. A slot frees up only after the stream's cleanup has 
 
 ## Shutdown takes a long time
 
-On v0.9.0, a connected viewer keeps the daemon running until the stop timeout. Newer builds end
-viewer connections first. See [Deployment](Deployment#graceful-shutdown).
+Shutdown ends viewer connections first, then gives broadcasts up to 5 seconds to clean up. A
+stop that still takes long usually means a stuck filesystem operation; the log names the step
+that gave up. See [Deployment](Deployment#graceful-shutdown).
 
 ## Reading the logs
 

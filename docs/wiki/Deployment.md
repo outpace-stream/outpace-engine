@@ -123,7 +123,7 @@ startup buffer (up to 128 MiB), seeding store, HLS window and timeshift budget, 
 
 ## systemd
 
-The [AUR packages](Installation#arch-linux-aur) and, from v1.0.0, the
+The [AUR packages](Installation#arch-linux-aur) and the
 [`.deb` and `.rpm` packages](Installation#debian-ubuntu-and-fedora-packages)
 set all of this up: edit `/etc/outpace/outpace.env` and run `systemctl enable --now outpace`. The
 unit they ship is
@@ -182,7 +182,7 @@ journal adds the date. Open TCP 8621 in your firewall if you run as a full parti
 
 ## Windows service
 
-From v1.0.0. On Windows, `outpace.exe` can install itself as
+On Windows, `outpace.exe` can install itself as
 a service. Run these from an elevated (administrator) prompt:
 
 ```powershell
@@ -225,7 +225,7 @@ directory is kept. Open TCP 8621 in Windows Defender Firewall if you run as a fu
 
 ## macOS launchd
 
-From v1.0.0. The repository ships a per-user LaunchAgent. It
+The repository ships a per-user LaunchAgent. It
 starts Outpace at login and restarts it if it crashes:
 
 ```bash
@@ -245,7 +245,7 @@ packaging/macos/install-launchagent.sh uninstall     # to remove it
 
 ## FreeBSD rc.d
 
-From v1.0.0, there is a FreeBSD binary (see
+There is a FreeBSD binary (see
 [Installation](Installation#freebsd-and-other-bsds)). Run it under `daemon(8)`, which
 restarts it if it exits:
 
@@ -342,7 +342,7 @@ To compare two engines behind one router, give each its own external peer port a
 ## Linux portability
 
 - Images: `linux/amd64`, `linux/arm64`, `linux/arm/v7` (releases); `edge` is `linux/amd64` only.
-- ARMv7 means hard-float ARMv7 such as Raspberry Pi 2/3. From v1.0.0 there are also
+- ARMv7 means hard-float ARMv7 such as Raspberry Pi 2/3. There are also
   ARMv6 hard-float and RISC-V 64 binaries (no image). Soft-float ARM isn't supported. On 32-bit
   ARM expect fewer simultaneous streams; start with `OUTPACE_CACHE_TYPE=disk`,
   `OUTPACE_SEED_STORE_BYTES=67108864` and `OUTPACE_SESSION_BUFFER=64`.
@@ -383,10 +383,6 @@ On `SIGTERM` (`docker stop`, `systemctl stop`) outpace:
 3. drains HTTP connections;
 4. exits.
 
-> **From v1.0.0:** shutdown ends open viewer responses first. On v0.9.0, a
-> connected viewer keeps the process alive until it disconnects, or until the stop timeout
-> kills it (30 seconds in the provided Compose file).
-
 A stuck filesystem operation can't be cancelled. In that case cleanup gives up after its grace
 period and logs it. Already-connected RTMP publisher sockets can stay open until the process
 exits.
@@ -395,9 +391,8 @@ exits.
 
 A stream with no viewers, HLS requests or leases is torn down after a 30-second grace period.
 
-> **From v1.0.0:** one stream whose cleanup hangs no longer stops later
-> idle streams from being cleaned up. The log shows `[manager] idle cleanup still pending` when
-> this happens.
+One stream whose cleanup hangs doesn't stop other idle streams from being cleaned up. The log
+shows `[manager] idle cleanup still pending` when this happens.
 
 ## Related pages
 

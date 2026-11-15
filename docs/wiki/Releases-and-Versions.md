@@ -8,6 +8,10 @@
   the container images, and creates a GitHub Release.
 - The version a binary reports is the version in the source it was built from. The tag must
   match it.
+- **1.0.0 is the first stable release.** The 0.x tags (up to v0.9.0) were development builds.
+  They are still listed on the releases page for history, but they aren't supported and the
+  wiki doesn't describe them: run 1.0.0 or later. Version notes in the wiki only name releases
+  newer than 1.0.0.
 
 The latest published release is **v1.2.1**, a patch release on top of 1.2.0. See the
 [GitHub Release](https://github.com/outpace-stream/outpace-engine/releases/tag/v1.2.1) for downloads,
@@ -53,9 +57,9 @@ build.
 
 | Tag | Moves? | Architectures | Use for |
 | --- | --- | --- | --- |
-| `X.Y.Z` (e.g. `1.0.0`) | No | amd64, arm64, arm/v7 | Production. Pin this. |
+| `X.Y.Z` (e.g. `1.2.1`) | No | amd64, arm64, arm/v7 | Production. Pin this. |
 | `latest` | With each release | amd64, arm64, arm/v7 | Trying the newest release. |
-| `X.Y.Z-minimal`, `minimal` | Like `X.Y.Z` and `latest` | amd64, arm64, arm/v7 | Smaller `scratch` image (from v1.0.0). |
+| `X.Y.Z-minimal`, `minimal` | Like `X.Y.Z` and `latest` | amd64, arm64, arm/v7 | Smaller `scratch` image. |
 | `edge` | With every merge to `main` | amd64 | Testing unreleased features. |
 | `sha-<commit>` | No | amd64 | Pinning one specific `main` build. |
 
@@ -129,9 +133,10 @@ A patch release with no new features or default changes. It fixes live audio nor
   instead of refused with `422` (#448). With normalization off, HLS now drops `0x81`/`0x87`
   tracks when the stream has AAC, as it already did for DVB-signalled AC3.
 
-## v1.0.0 highlights
+## v1.0.0: first stable release
 
-These changes are included in 1.0.0; they are absent from v0.9.0:
+1.0.0 is the baseline the rest of this wiki describes. Compared with the 0.x development builds
+it adds:
 
 **New features**
 
@@ -180,24 +185,25 @@ These changes are included in 1.0.0; they are absent from v0.9.0:
 - The compatibility API rejects duplicated query parameters and file or stream selections it
   can't honour, while still accepting the Android SDK's duplicated descriptor parameters.
 
-## v0.9.0 highlights
+**Validation**
 
-From the [0.9.0 notes](https://github.com/outpace-stream/outpace-engine/blob/main/docs/releases/0.9.0.md):
-
-- better live protocol compatibility, and serving only complete, verified pieces;
-- an optional daemon-wide cap on concurrent sources (`OUTPACE_MAX_SESSIONS`);
-- more responsive peer handling under load.
-
-The 0.9.0 notes describe the evidence available at that release. Since then, the reviewed
-7,500-second matched comparison completed with more than 7,200 sampled active seconds per
-player, and the maintainer recorded [production-replacement acceptance in #210](https://github.com/outpace-stream/outpace-engine/issues/210#issuecomment-6827431678).
+Before 1.0.0, the reviewed 7,500-second matched comparison against the original engine completed
+with more than 7,200 sampled active seconds per player, and the maintainer recorded [production-replacement acceptance in #210](https://github.com/outpace-stream/outpace-engine/issues/210#issuecomment-6827431678).
 That acceptance is not a new passing soak of every later commit. Latency to live against the
 reference remains unmeasured; the historical reconnect stall was closed as inconclusive,
 not as causally fixed. See the 1.0.0 notes for the remaining limits.
 
+## Development versions (0.x)
+
+Tags v0.1.0 to v0.9.0 were development builds published while the engine was being built.
+They lack most of the features above, have no build provenance, and get no fixes. If you still
+run one, upgrade to the latest release; see [Upgrading](#upgrading). Their notes, such as the
+[0.9.0 notes](https://github.com/outpace-stream/outpace-engine/blob/main/docs/releases/0.9.0.md),
+stay in the repository for history.
+
 ## Deferred scope
 
-For 1.0.0, multi-file/selected-file VOD (#79), optional broadcast discovery and metadata fields
+Multi-file/selected-file VOD (#79), optional broadcast discovery and metadata fields
 (#269), and original-engine HLS transport origination/support parity (#272) are explicitly
 deferred. VOD remains single-file; native VOD HLS has approximate byte-based segmentation,
 and PCR/keyframe seeking (#128) remains conditional on a demonstrated player failure.
@@ -233,9 +239,9 @@ The generator requires explicit destination directories; it does not create `For
 The engine repository moved from `jamezrin/outpace-stream` to
 `outpace-stream/outpace-engine`. GitHub redirects old repository links and Git remotes;
 update local remotes with `git remote set-url origin git@github.com:outpace-stream/outpace-engine.git`.
-The Android companion app is developed independently in
-[outpace-stream/outpace-android](https://github.com/outpace-stream/outpace-android).
-Its APK releases belong there; engine binaries remain in engine releases.
+The [Android app](Android-App) is developed independently in
+[outpace-stream/outpace-android](https://github.com/outpace-stream/outpace-android), with its own
+version numbers. Its APK releases belong there; engine binaries remain in engine releases.
 
 Container publication now targets `ghcr.io/outpace-stream/outpace-engine`. Existing personal-
 namespace images at `ghcr.io/jamezrin/outpace` remain available for rollback. The initial

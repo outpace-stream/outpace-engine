@@ -9,8 +9,8 @@ and flash than a server. This page collects what changes on them.
 | --- | --- |
 | OpenWrt router | The [OpenWrt installer](#openwrt) below. It picks the right build. |
 | Raspberry Pi 2/3/4/5, most ARM NAS boxes | `armv7-unknown-linux-musleabihf` (32-bit) or `aarch64-unknown-linux-musl` (64-bit OS) from [Installation](Installation#release-binaries). |
-| Raspberry Pi Zero/1 | `arm-unknown-linux-musleabihf` (ARMv6), from v1.0.0. |
-| RISC-V boards | `riscv64gc-unknown-linux-musl`, from v1.0.0. |
+| Raspberry Pi Zero/1 | `arm-unknown-linux-musleabihf` (ARMv6). |
+| RISC-V boards | `riscv64gc-unknown-linux-musl`. |
 | x86 mini PC or appliance | `x86_64-unknown-linux-musl`. |
 
 All Linux release binaries are static (musl), so they run on any distribution, including
@@ -73,8 +73,8 @@ Running the installer again upgrades the binary and keeps your configuration.
 | `arm_arm1176jzf-s_vfp` | `arm-unknown-linux-musleabihf` |
 | `riscv64_*` | `riscv64gc-unknown-linux-musl` |
 
-Only releases that ship an architecture's build can be installed on it. ARMv6 and RISC-V 64
-builds are available from v1.0.0, so on those routers install 1.0.0 or later.
+Only releases that ship an architecture's build can be installed on it. Every release from
+1.0.0 on ships all five.
 
 MIPS routers (for example MT7621 or ath79 boards) are not supported. Most have too little
 flash and RAM for Outpace, and Rust supports MIPS only as a tier 3 target.
@@ -100,7 +100,7 @@ logread -e outpace
 
 ## pfSense and OPNsense
 
-These run FreeBSD. From v1.0.0, the FreeBSD x86_64 binary covers them. Treat a
+These run FreeBSD. The FreeBSD x86_64 binary covers them. Treat a
 firewall carefully: keep the API on `127.0.0.1` and open only the peer port.
 
 ## Related pages

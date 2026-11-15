@@ -80,9 +80,6 @@ window, returns `404`.
 
 ## When a source ends
 
-> **From v1.0.0:** ended streams close their playlists. On v0.9.0 an
-> ended stream keeps answering `503` for as long as a player keeps polling it.
-
 When a live source stops (the broadcaster ends, or the swarm reaches the end):
 
 - the completed segments stay available;
@@ -104,7 +101,7 @@ browsers, Apple devices and many TVs can't play over HLS. Normalisation fixes th
 | Setting | Converts | Avail. |
 | --- | --- | --- |
 | `OUTPACE_HLS_AUDIO_NORMALIZE=1` | Live **HLS** only. Direct MPEG-TS stays untouched. | all |
-| `OUTPACE_LIVE_AUDIO_NORMALIZE=1` | The shared live source, once, before it goes to MPEG-TS viewers, HLS and support sources. | 1.0.0 |
+| `OUTPACE_LIVE_AUDIO_NORMALIZE=1` | The shared live source, once, before it goes to MPEG-TS viewers, HLS and support sources. | all |
 
 With both on, only the shared conversion runs. VOD is never converted, whichever switch is on.
 

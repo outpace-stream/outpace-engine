@@ -5,7 +5,8 @@ can build yourself. All three run the same program: `outpace serve` starts the d
 
 ## Choose a version
 
-- **Releases** (`vX.Y.Z` tags) are the stable choice. The latest is **v1.2.1**.
+- **Releases** (`vX.Y.Z` tags) are the stable choice. The latest is **v1.2.1**. Every release
+  from 1.0.0 on is stable; the older 0.x tags were development builds and aren't supported.
 - **`edge`** follows `main` and includes features newer than the latest release. It is
   `linux/amd64` only and changes with every merge. Don't use it where you need predictable
   upgrades.
@@ -22,9 +23,9 @@ file on the [releases page](https://github.com/outpace-stream/outpace-engine/rel
 | Linux x86_64 | `x86_64-unknown-linux-musl` | `.tar.gz` |
 | Linux ARM64 (aarch64) | `aarch64-unknown-linux-musl` | `.tar.gz` |
 | Linux ARMv7 hard-float (Raspberry Pi 2/3 class) | `armv7-unknown-linux-musleabihf` | `.tar.gz` |
-| Linux ARMv6 hard-float (Raspberry Pi Zero/1 class), from v1.0.0 | `arm-unknown-linux-musleabihf` | `.tar.gz` |
-| Linux RISC-V 64, from v1.0.0 | `riscv64gc-unknown-linux-musl` | `.tar.gz` |
-| FreeBSD 14 and 15 x86_64, from v1.0.0 | `x86_64-unknown-freebsd` | `.tar.gz` |
+| Linux ARMv6 hard-float (Raspberry Pi Zero/1 class) | `arm-unknown-linux-musleabihf` | `.tar.gz` |
+| Linux RISC-V 64 | `riscv64gc-unknown-linux-musl` | `.tar.gz` |
+| FreeBSD 14 and 15 x86_64 | `x86_64-unknown-freebsd` | `.tar.gz` |
 | macOS Intel | `x86_64-apple-darwin` | `.tar.gz` |
 | macOS Apple silicon | `aarch64-apple-darwin` | `.tar.gz` |
 | Windows x86_64 | `x86_64-pc-windows-msvc` | `.zip` |
@@ -53,7 +54,11 @@ On Windows, unzip the archive and run `outpace.exe serve` from a terminal. To ru
 
 ### Android with Termux (best-effort)
 
-From v1.0.0, there is a best-effort `aarch64-linux-android` build for 64-bit ARM
+For most people the [Android app](Android-App) is the easier way to run Outpace on a phone or
+Android TV box: it downloads and runs these same engine builds for you, with no terminal. This
+section is for running the binary yourself.
+
+There is a best-effort `aarch64-linux-android` build for 64-bit ARM
 phones and Android TV boxes, to run under [Termux](https://termux.dev). From v1.0.2, there is
 also an `armv7-linux-androideabi` build for 32-bit ARM devices, packaged the
 same way. Many Android TV boxes run 32-bit Android on a 64-bit chip; they need the 32-bit build.
@@ -85,9 +90,8 @@ outpace serve
 - Android may still stop background apps. Disable battery optimisation for Termux if streams
   stop when the screen is off.
 
-The [Android companion app](Android-App) is developed separately. Signed APKs start at v0.1.0
-in that repository. [Android TV](Android-TV) is the sideload path for a television. The Termux
-instructions above remain the way to run the engine binary yourself.
+The [Android app](Android-App) is developed separately, with its own signed APK releases.
+[Android TV](Android-TV) walks through sideloading it onto a television.
 
 ### Homebrew and Scoop
 
@@ -182,7 +186,7 @@ for service hardening and configuration.
 
 ### Debian, Ubuntu and Fedora packages
 
-From v1.0.0, each release also has `.deb` and `.rpm` packages for x86_64, ARM64 and
+Each release also has `.deb` and `.rpm` packages for x86_64, ARM64 and
 ARMv7. They contain the same static binary, plus a systemd unit and a configuration file, and
 they are listed in `SHA256SUMS`.
 
@@ -215,9 +219,8 @@ The service runs with the hardening described in [Deployment](Deployment#systemd
 
 ### FreeBSD and other BSDs
 
-From v1.0.0 there is a FreeBSD x86_64 binary. It uses the same archive layout, so
-the commands above work with `target=x86_64-unknown-freebsd` and `version` set to a release
-that includes it (v0.9.0 does not). Use `sha256 -c` or
+There is a FreeBSD x86_64 binary. It uses the same archive layout, so
+the commands above work with `target=x86_64-unknown-freebsd`. Use `sha256 -c` or
 `shasum -a 256 --check` to verify. The binary is built against FreeBSD 14 and is tested on 14
 and 15. That also covers pfSense and OPNsense, but install it with care on a firewall: keep the
 API on `127.0.0.1` and open only the peer port. To run it as a service, see
@@ -229,7 +232,7 @@ There are no NetBSD or OpenBSD builds. On those systems,
 ### Verify where a release came from
 
 `SHA256SUMS` proves an archive wasn't corrupted, but it comes from the same release page as the
-archive. Releases from v1.0.0 onward also carry signed
+archive. Every release also carries signed
 [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations),
 which proves that this repository's release workflow built the archive from the tagged commit.
 With the [GitHub CLI](https://cli.github.com):
@@ -264,13 +267,13 @@ The same works for release images, including the `-minimal` ones, by tag or dige
 gh attestation verify oci://ghcr.io/outpace-stream/outpace-engine:<version> --repo outpace-stream/outpace-engine
 ```
 
-`edge` images and v0.9.0 and older releases have no attestations. Existing images at
+`edge` images have no attestations. Existing images at
 `ghcr.io/jamezrin/outpace` remain available; their provenance refers to the old repository.
 New images use `ghcr.io/outpace-stream/outpace-engine`.
 
 ### ARM, RISC-V and small devices
 
-ARMv7 builds cover hard-float ARMv7 Linux (Raspberry Pi 2/3, older NAS boxes). From v1.0.0,
+ARMv7 builds cover hard-float ARMv7 Linux (Raspberry Pi 2/3, older NAS boxes).
 ARMv6 builds cover hard-float ARMv6 (Raspberry Pi Zero and 1, older ARM routers and NAS
 boxes), and RISC-V 64 builds cover 64-bit RISC-V boards. Soft-float ARM is not supported. The
 container image doesn't cover ARMv6 or RISC-V 64 yet: use the binaries. Expect lower throughput
@@ -299,11 +302,15 @@ The image is `ghcr.io/outpace-stream/outpace-engine`.
 
 | Tag | What it is | Architectures |
 | --- | --- | --- |
-| `1.0.0` (any `X.Y.Z`) | A release. Pin this in production. | `linux/amd64`, `linux/arm64`, `linux/arm/v7` |
+| `1.2.1` (any `X.Y.Z`) | A release. Pin this in production. | `linux/amd64`, `linux/arm64`, `linux/arm/v7` |
 | `latest` | The most recent release. | same as releases |
-| `X.Y.Z-minimal`, `minimal` | The same release in a minimal `scratch` image, from v1.0.0. | `linux/amd64`, `linux/arm64`, `linux/arm/v7` |
+| `X.Y.Z-minimal`, `minimal` | The same release in a minimal `scratch` image. | `linux/amd64`, `linux/arm64`, `linux/arm/v7` |
 | `edge` | The current `main` branch. | `linux/amd64` only |
 | `sha-<commit>` | One specific `main` commit. | `linux/amd64` only |
+
+Release tags in this registry start at `1.0.1`. The `1.0.0` image was published before the
+[organization migration](Releases-and-Versions#organization-migration) and is only at
+`ghcr.io/jamezrin/outpace:1.0.0`.
 
 What the image sets up:
 
@@ -331,7 +338,7 @@ The image doesn't include FFmpeg; see [FFmpeg](#ffmpeg) below.
 
 ### Minimal image
 
-From v1.0.0, every release image also comes as `X.Y.Z-minimal` (and `minimal` for the
+Every release image also comes as `X.Y.Z-minimal` (and `minimal` for the
 newest). It is built `FROM scratch`: the same static binary, its licence, and a data directory,
 with no shell, package manager or `curl`. It is about a fifth of the size of the Debian image.
 
@@ -377,7 +384,7 @@ The binary is `target/release/outpace`.
 
 Release binaries use a slower, smaller `dist` profile (link-time optimisation, one codegen unit,
 symbols stripped). It roughly halves the binary, which helps on routers and boards with little
-flash. To build the same way from v1.0.0 source or later:
+flash. To build the same way:
 
 ```bash
 cargo build --profile dist --locked -p ace-engine --bin outpace
@@ -401,13 +408,13 @@ headers:
 cargo build --release --locked -p ace-engine --bin outpace --features srt
 ```
 
-SRT is available from v1.0.0; build from that tag, or from `main` for development.
+Build from a release tag, or from `main` for development.
 
 ## FFmpeg
 
 Outpace doesn't need FFmpeg to play, package HLS or broadcast. It only runs FFmpeg when you turn
-on audio normalisation with `OUTPACE_HLS_AUDIO_NORMALIZE` (all versions) or
-`OUTPACE_LIVE_AUDIO_NORMALIZE` (from v1.0.0); see
+on audio normalisation with `OUTPACE_HLS_AUDIO_NORMALIZE` or
+`OUTPACE_LIVE_AUDIO_NORMALIZE`; see
 [HLS Output](HLS-Output#audio-normalisation). With both off, it never looks for FFmpeg.
 
 If you turn normalisation on:
@@ -436,7 +443,8 @@ USER outpace
 | --- | --- | --- |
 | `identity.seed` | This node's stable peer identity. | Yes |
 | `broadcasts/` | Signing keys and piece reservations of your [broadcasts](Broadcasting). These files are private keys. | Yes, and protect them |
-| `cache/` | The disk piece cache, when enabled. Wiped on start. | No |
+| `acestream-device-id` | The stable device id, only with [engine camouflage](Engine-Camouflage) on. | Optional |
+| `cache/` | Recent peer hints, and the disk piece cache when enabled. Wiped on start with the disk cache. | No |
 
 The default is the platform data directory plus `outpace`: `~/.local/share/outpace` on Linux and the BSDs,
 `~/Library/Application Support/outpace` on macOS, and `%APPDATA%\outpace` on Windows. In the
