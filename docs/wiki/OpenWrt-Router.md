@@ -16,7 +16,8 @@ the engine themselves.
 
 The reporter wrote their own boot script in `/etc/init.d/` and a watchdog in `/usr/bin/`. The
 repository now ships both as an OpenWrt service: procd starts the engine at boot and restarts it
-if it exits. The steps below use that service. The installer is tested on OpenWrt 24.10;
+if it exits. If it keeps exiting within an hour of starting, procd gives up after five tries,
+and the engine stays down until you run `/etc/init.d/outpace restart`. The steps below use that service. The installer is tested on OpenWrt 24.10;
 25.12 matches the reporter's router but is not part of that testing.
 
 ## What you need
@@ -122,9 +123,15 @@ Players that only speak the AceStream API need `OUTPACE_ACE_COMPAT=1`; see
 
   You then need your own boot and restart scripts, as the reporter wrote.
 - **Faster channel changes:** another user in the same thread shortened the startup buffers and
-  turned off buffering in the player, since the engine already buffers. On a router, start from
-  `uci add_list outpace.main.env='OUTPACE_PREBUFFER_MS=6000'` and see
-  [Configuration](Configuration#playback-and-startup-buffering) before changing more.
+  turned off buffering in the player, since the engine already buffers. On a router, start from:
+
+  ```sh
+  uci add_list outpace.main.env='OUTPACE_PREBUFFER_MS=6000'
+  uci commit outpace
+  /etc/init.d/outpace restart
+  ```
+
+  See [Configuration](Configuration#playback-and-startup-buffering) before changing more.
 - **Peers:** to upload as well as download, open TCP 8621 on the WAN or enable
   [port mapping](NAT-and-Port-Mapping). Never open 6878 on the WAN: the API has no password.
 - **Flash wear:** don't point `OUTPACE_CACHE_DIR` at internal flash; use USB storage for a disk

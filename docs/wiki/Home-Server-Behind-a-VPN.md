@@ -12,7 +12,7 @@ television using it as a remote engine. Client devices need no engine and no VPN
 | **Host** | Proxmox VE, unprivileged Debian LXC container |
 | **Network** | A VPN client inside the container; the LAN stays reachable outside the tunnel |
 | **Players** | VLC on desktop and Android; the Android app with a remote engine |
-| **Works on** | Any Linux machine: a Proxmox container or VM, another hypervisor, or bare metal |
+| **Works on** | Any Linux machine: a Proxmox container or VM, another hypervisor, or bare metal. The steps use Debian or Ubuntu with systemd. |
 
 Proxmox is only how the machine is split up. On bare metal, or in any other VM, skip
 [step 1](#1-create-the-container) and do the rest on the host. Keep the engine in the same network
@@ -43,14 +43,29 @@ Install and connect your VPN client inside the container, then check two things:
   clients keep local routes by default or have an "allow LAN access" switch; without it,
   players cannot reach the engine.
 
-Make the VPN start at boot and reconnect on its own.
+Make the VPN start at boot and reconnect on its own, and turn on its **kill switch** (also called
+"block connections without VPN" or "lockdown"). Without one, peer traffic falls back to your home
+connection whenever the tunnel drops, and the `ifconfig.me` check only proves the route while
+the tunnel is up. If your client has no kill switch, add a firewall rule that drops outgoing
+traffic on `eth0` except to the LAN and to the VPN server. Cover IPv6 too: block it, or make
+sure the VPN tunnels it.
 
 ## 3. Install the engine
 
+Download the package for the container's architecture from the
+[releases page](https://github.com/outpace-stream/outpace-engine/releases) and install it. On
+x86_64:
+
 ```bash
+curl -LO https://github.com/outpace-stream/outpace-engine/releases/download/v1.2.1/outpace_1.2.1_amd64.deb
 sudo apt install ./outpace_1.2.1_amd64.deb
 sudoedit /etc/outpace/outpace.env
 ```
+
+On ARM, use `outpace_1.2.1_arm64.deb` or `outpace_1.2.1_armhf.deb`. On Fedora and other RPM
+distributions, use the `.rpm` with `dnf`; see
+[Installation](Installation#debian-ubuntu-and-fedora-packages). Without systemd, run the
+[release binary](Installation#release-binaries) with the same settings.
 
 Set at least:
 

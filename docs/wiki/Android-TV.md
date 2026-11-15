@@ -10,7 +10,7 @@ an engine for the television, and play streams from the remote in an installed p
 | **Versions** | Android app v0.1.0 at the time; the steps below are for app v1.0.0 and later. Engine downloaded by the app (v1.0.2 or later on 32-bit sets). |
 | **Device** | TCL 55T69C, Google TV (Android 12) |
 | **Player** | VLC for Android |
-| **Works on** | Any Android TV or Google TV set or box that allows USB debugging |
+| **Works on** | Android TV or Google TV sets and boxes with an ARM CPU (64-bit or 32-bit) and Android 5 or newer that allow USB debugging. x86 devices are not supported. |
 
 The app is not on the Play Store, so a computer on the same network installs it with `adb`.
 This is not the [Termux](Installation#android-with-termux-best-effort) install: the app manages
@@ -60,6 +60,11 @@ on it:
 
 Find the television's address under **Settings → Network & Internet**, or in the router's client
 list. The examples use `192.0.2.10`.
+
+Not every set without Wireless debugging listens on port 5555. If `adb connect` is refused, the
+set needs network ADB turned on once over a USB cable: connect it to the computer, run
+`adb tcpip 5555`, unplug it, and continue at [3a](#3a-connect-on-port-5555). Televisions whose
+USB ports only accept storage cannot do this and need Wireless debugging instead.
 
 ## 3a. Connect on port 5555
 
