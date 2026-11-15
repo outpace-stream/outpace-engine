@@ -23,9 +23,8 @@ Examples use `http://127.0.0.1:6878` and the placeholder id
 | Magnet (`magnet:?xt=urn:btih:...`) | via compat `magnet=` or `outpace play` | Reduced to its infohash, then treated like an infohash. BitTorrent v2 magnets aren't supported. |
 | Local descriptor | `/streams/ace/local%3A<alias>` | [Private Peer Mode](Private-Peer-Mode) only. |
 
-> **Upgrading from an early build?** A bare 40-hex id on `/streams/ace/` means a **content id**. Older
-> playlists that used bare infohashes there must switch to `ih:<infohash>`. There is no silent
-> fallback from one to the other.
+A bare 40-hex id on `/streams/ace/` always means a **content id**. Use `ih:<infohash>` for an
+infohash; there is no silent fallback from one to the other.
 
 Content ids are case-insensitive. Outpace lowercases them, and the bare and `cid:` forms share
 one session.
@@ -216,7 +215,7 @@ that VOD gets the same `507` `no_space` error. The memory cache writes nothing t
 the check.
 
 Multi-file VOD isn't supported and fails with a clear error; selected-file support (#79) is
-explicitly deferred for 1.0.0. VOD isn't available through the compatibility API.
+explicitly deferred. VOD isn't available through the compatibility API.
 
 VOD HLS segments use byte-based cuts and approximate durations. They are not keyframe-aligned,
 and PCR-based media-time seeking (#128) remains conditional on a demonstrated player failure.
@@ -317,8 +316,7 @@ channel lists or EPG, no file selection beyond the single file (`_idx=0`), no se
 original engine's sense, and no VOD. Outpace adds its own [timeshift](Timeshift) commands
 instead.
 
-[Stream-name search](Stream-Search) is a separate, default-off AceStream services adapter in
-builds available from v1.0.0. Enabling `OUTPACE_ACE_COMPAT` alone does not add search, and
+[Stream-name search](Stream-Search) is a separate, default-off AceStream services adapter. Enabling `OUTPACE_ACE_COMPAT` alone does not add search, and
 `get_content_id` still does not convert an infohash to a content ID. Select results using
 explicit `/streams/ace/ih:<infohash>` or compatibility `infohash=` playback selectors.
 
@@ -340,6 +338,7 @@ through TLS termination or a sub-path, the returned URLs won't work. See
 | acexy | Compat JSON handshake, `playback_url`, stop command | Covered by local compatibility tests. |
 | Acestream-Manager | Compat health check, stats, TS/HLS proxy | Covered by local compatibility tests (search excluded). |
 | Apps built on the public AceStream Android SDK | Compat `/ace/*` and `/server/api` | SDK request quirks are handled: duplicated selectors, `stream_id=-1`, `api_version=2`. |
+| [Outpace for Android](Android-App) | Native URLs, `/status`, `/streams` | The companion app; hands the native URL to the player you pick. |
 | Kodi and other add-ons using `/ace/getstream` | Compat API | Likely to work if they stick to the supported routes. Not tested. |
 
 "Covered by local tests" means the client's requests were reproduced offline. It doesn't

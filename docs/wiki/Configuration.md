@@ -40,7 +40,7 @@ These settings decide what the daemon exposes to the network. Change them delibe
 | `OUTPACE_ENABLE_PORT_MAPPING` | `false` | Ask your router (UPnP/NAT-PMP) to open the peer port. |
 | `OUTPACE_ENABLE_CAST` | `false` | Add `/cast/*` routes on `OUTPACE_BIND` that discover LAN renderers on request and start or stop playback on them. |
 | `OUTPACE_DATA_DIR` | platform data dir + `outpace` | Node identity and broadcast signing keys. |
-| `OUTPACE_CACHE_DIR` | `<data dir>/cache` | Disk cache. **Wiped at startup** when disk caching is on. |
+| `OUTPACE_CACHE_DIR` | `<data dir>/cache` | Disk cache and recent peer hints. **Wiped at startup** when disk caching is on. |
 
 The image binds HTTP and RTMP to `0.0.0.0` *inside the container* so that published ports work.
 What reaches your network is decided by the `-p`/`ports:` mapping. See
@@ -50,15 +50,14 @@ What reaches your network is decided by the `-p`/`ports:` mapping. See
 
 The **Avail.** column shows where each setting is available:
 
-- **all**: v0.9.0 and later.
-- **1.0.0**: v1.0.0 and later, also in `edge` and builds from `main`. A v0.9.0
-  binary ignores these variables. See [Releases and Versions](Releases-and-Versions) for publication status.
+- **all**: every release, v1.0.0 and later. Earlier 0.x tags were development builds and
+  aren't supported; see [Releases and Versions](Releases-and-Versions).
 - **1.1.0**: v1.1.0 and later, also in `edge` and builds from `main`. Earlier releases ignore
   these variables.
 - **1.2.0**: v1.2.0 and later, also in `edge` and builds from `main`. Earlier releases ignore
   these variables.
 - **srt build**: v1.0.0 and later, only in binaries built with the `srt` feature.
-- **edge**: current `main` and the `edge` image. Not in v1.2.0.
+- **edge**: current `main` and the `edge` image, not yet in a numbered release.
 
 ## Network and listeners
 
@@ -79,7 +78,7 @@ peers stall. The defaults favour smooth playback over a fast start.
 | --- | --- | --- | --- | --- |
 | `OUTPACE_PREBUFFER_MS` | `30000` | ms, `0` disables | all | Target amount of media to queue on the server before a live stream is released to viewers (direct TS and HLS alike). Measured on the media clock when possible, otherwise from the advertised bitrate. Lower it (for example `5000`) for faster starts; `0` sends media immediately. When the peers hold less live history than the target, playback starts as soon as everything up to the live edge has arrived, with that shorter lead. |
 | `OUTPACE_PREBUFFER_BYTES` | `134217728` (128 MiB) | bytes, at least `188` | all | Hard cap on the startup queue. Reaching it releases playback early. |
-| `OUTPACE_PREBUFFER_TIMEOUT_MS` | `15000` | ms, at least `1` when prebuffering is on | all | Longest wait, counted from the **first media byte**, before releasing whatever is queued. A short live window degrades to a shorter buffer, not a failure. Since v1.0.0 it is absolute: source gaps no longer restart it. |
+| `OUTPACE_PREBUFFER_TIMEOUT_MS` | `15000` | ms, at least `1` when prebuffering is on | all | Longest wait, counted from the **first media byte**, before releasing whatever is queued. A short live window degrades to a shorter buffer, not a failure. It is absolute: source gaps don't restart it. |
 | `OUTPACE_PREFETCH_PIECES` | unset (automatic) | pieces | all | How far behind the live edge to start. When unset it is derived from the prebuffer target and the advertised bitrate, or 32 pieces if the bitrate is unknown. Leave unset unless you are debugging. |
 | `OUTPACE_SESSION_BUFFER` | `256` | messages, at least `1` | all | Per-viewer fan-out queue depth. Lower it (for example `64`) on small devices. A viewer that falls this far behind skips ahead and sees a discontinuity. |
 
@@ -118,7 +117,7 @@ Off by default. Turning either switch on requires FFmpeg; see
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
 | `OUTPACE_HLS_AUDIO_NORMALIZE` | `false` | boolean | all | Convert AC3 or MPEG audio to AAC for live HLS only. |
-| `OUTPACE_LIVE_AUDIO_NORMALIZE` | `false` | boolean | 1.0.0 | Convert once per source, before TS, HLS and support fan-out. Takes over from the HLS-only switch when both are on. |
+| `OUTPACE_LIVE_AUDIO_NORMALIZE` | `false` | boolean | all | Convert once per source, before TS, HLS and support fan-out. Takes over from the HLS-only switch when both are on. |
 | `OUTPACE_FFMPEG_PATH` | `ffmpeg` | path or name on `PATH` | all | The FFmpeg executable. Resolved once at startup and only used when a switch above is on. |
 
 ## Timeshift
@@ -127,15 +126,15 @@ Off by default. See [Timeshift](Timeshift).
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_HISTORY_SECONDS` | `0` (off) | 0–3600 seconds | 1.0.0 | How far back viewers can rewind. Any nonzero value turns timeshift on. |
-| `OUTPACE_HISTORY_BYTES` | `134217728` (128 MiB) | bytes, 188 up to the platform pool limit | 1.0.0 | Memory budget per source. At 8 Mbit/s, 128 MiB is about two minutes. |
-| `OUTPACE_HISTORY_TOTAL_BYTES` | `268435456` (256 MiB) | bytes, at least `OUTPACE_HISTORY_BYTES` | 1.0.0 | Memory budget shared by all sources and managed-origin viewers. |
+| `OUTPACE_HISTORY_SECONDS` | `0` (off) | 0–3600 seconds | all | How far back viewers can rewind. Any nonzero value turns timeshift on. |
+| `OUTPACE_HISTORY_BYTES` | `134217728` (128 MiB) | bytes, 188 up to the platform pool limit | all | Memory budget per source. At 8 Mbit/s, 128 MiB is about two minutes. |
+| `OUTPACE_HISTORY_TOTAL_BYTES` | `268435456` (256 MiB) | bytes, at least `OUTPACE_HISTORY_BYTES` | all | Memory budget shared by all sources and managed-origin viewers. |
 
 ## Managed HLS origins
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_MANAGED_HLS` | `false` | boolean | 1.0.0 | Serve descriptors that point at an HTTP(S) HLS origin through a local relay instead of redirecting the player to the origin. The daemon then fetches public origin URLs itself. See [Managed HLS Origins](Managed-HLS-Origins). |
+| `OUTPACE_MANAGED_HLS` | `false` | boolean | all | Serve descriptors that point at an HTTP(S) HLS origin through a local relay instead of redirecting the player to the origin. The daemon then fetches public origin URLs itself. See [Managed HLS Origins](Managed-HLS-Origins). |
 
 ## Casting
 
@@ -239,8 +238,8 @@ See [Private Peer Mode](Private-Peer-Mode).
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_PRIVATE_PEERS` | unset (public mode) | comma-separated `IPv4:port`, at most 256 entries and 8 KiB | 1.0.0 | Any value switches on outbound-only private mode: only these peers, no trackers, no DHT, no inbound. An empty value is an error. |
-| `OUTPACE_PRIVATE_DESCRIPTORS` | unset | JSON object `{"alias":"/abs/path"}`, at most 64 entries and 64 KiB | 1.0.0 | Local descriptor files playable as `local:<alias>`. Setting it without `OUTPACE_PRIVATE_PEERS` fails startup. |
+| `OUTPACE_PRIVATE_PEERS` | unset (public mode) | comma-separated `IPv4:port`, at most 256 entries and 8 KiB | all | Any value switches on outbound-only private mode: only these peers, no trackers, no DHT, no inbound. An empty value is an error. |
+| `OUTPACE_PRIVATE_DESCRIPTORS` | unset | JSON object `{"alias":"/abs/path"}`, at most 64 entries and 64 KiB | all | Local descriptor files playable as `local:<alias>`. Setting it without `OUTPACE_PRIVATE_PEERS` fails startup. |
 
 ## Discovery, trackers and resolution
 
@@ -261,7 +260,7 @@ See [Private Peer Mode](Private-Peer-Mode).
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_SUPPORT_SOURCES` | unset (off) | JSON object `{"name":"selector"}`, at most 8 entries and 64 KiB | 1.0.0 | Live streams to keep running and seeding with no viewer. Requires inbound serving and seeding. See [Support Sources and Operations](Support-Sources-and-Operations). |
+| `OUTPACE_SUPPORT_SOURCES` | unset (off) | JSON object `{"name":"selector"}`, at most 8 entries and 64 KiB | all | Live streams to keep running and seeding with no viewer. Requires inbound serving and seeding. See [Support Sources and Operations](Support-Sources-and-Operations). |
 
 ## AceStream compatibility API
 
@@ -274,7 +273,7 @@ See [Private Peer Mode](Private-Peer-Mode).
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_COMPAT_ACESTREAM_SERVICES` | `false` | boolean | 1.0.0 | Enables `/search` and external index requests. Independent of `OUTPACE_ACE_COMPAT`; rejected in private peer mode. |
+| `OUTPACE_COMPAT_ACESTREAM_SERVICES` | `false` | boolean | all | Enables `/search` and external index requests. Independent of `OUTPACE_ACE_COMPAT`; rejected in private peer mode. |
 
 No operator API key is required. Search uses external plain HTTP services, exposing queries
 and the server IP to the service and network observers. See [Stream Search](Stream-Search)
@@ -306,8 +305,8 @@ Overrides are ignored while the switch is off.
 | `OUTPACE_METRICS` | `false` | `1` or `true` serves Prometheus text metrics at `GET /metrics` on the HTTP bind. See [Support sources and operations](Support-Sources-and-Operations#prometheus-metrics). |
 | `OUTPACE_SEED_DEBUG` | unset | Any value logs every inbound seeding message (`[seed-session]` lines). Very verbose. Turn it on only while debugging. |
 
-Variables named `OUTPACE_TEST_*`, `OUTPACE_DHT_COMPARE_*` or `OUTPACE_RUN_*` belong to the test
-suite and do nothing in normal operation.
+Variables named `OUTPACE_TEST_*`, `OUTPACE_DHT_COMPARE_*` or `OUTPACE_RUN_*`, and
+`OUTPACE_CAST_LIVE`, belong to the test suite and do nothing in normal operation.
 
 ## Docker Compose variables
 
@@ -324,7 +323,8 @@ The repository's `compose.yml` also reads these. They configure Compose, not the
 Compose only passes a fixed list of daemon settings from `.env` into the container:
 `OUTPACE_BROADCAST_SOURCES`, `OUTPACE_ALLOW_NON_GLOBAL_BROADCAST_SOURCE`,
 `OUTPACE_ENABLE_INBOUND`, `OUTPACE_ENABLE_SEEDING`, `OUTPACE_ENABLE_PORT_MAPPING`,
-`OUTPACE_CACHE_TYPE`, `OUTPACE_CACHE_DIR`, `OUTPACE_SEED_STORE_BYTES` and `OUTPACE_ACE_COMPAT`.
+`OUTPACE_CACHE_TYPE`, `OUTPACE_CACHE_DIR`, `OUTPACE_SEED_STORE_BYTES`, `OUTPACE_ACE_COMPAT` and
+`OUTPACE_COMPAT_ACESTREAM_SERVICES`.
 The bind addresses and data directory are fixed in the file. **Any other setting you put in
 `.env` is ignored.** Add those to a `compose.override.yml`; see
 [Deployment](Deployment#passing-other-settings).

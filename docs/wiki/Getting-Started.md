@@ -77,8 +77,7 @@ Outpace deliberately buffers before it sends the first byte, so playback rides o
 hiccups:
 
 - it collects up to 30 seconds of media, waiting no more than 15 seconds after the first media
-  byte arrives. On v0.9.0 a gap in the source restarts that 15-second clock, so a choppy source
-  can wait longer; newer builds count it once;
+  byte arrives. Gaps in the source don't restart that clock;
 - HLS also waits until six segments are ready. If that doesn't happen within 45 seconds it
   returns HTTP `503`, and most players retry.
 

@@ -1,7 +1,7 @@
 # Stream Search
 
-Optional service-backed stream-name search is available in builds containing
-[#408](https://github.com/outpace-stream/outpace-engine/pull/408), available from v1.0.0. It is disabled
+Optional service-backed stream-name search
+([#408](https://github.com/outpace-stream/outpace-engine/pull/408)) is in every release. It is disabled
 by default and independent of the legacy HTTP compatibility API. Outpace remains headless:
 client apps supply the UI. General catalog management, EPG, playlist management and a
 production crawler are outside this adapter's scope.

@@ -122,8 +122,8 @@ Things to know:
 
 ## SRT ingest
 
-> **From v1.0.0, only in special builds.** SRT isn't in any
-> release binary or published image. Build from the `v1.2.1` tag,
+> **Only in special builds.** SRT isn't in any
+> release binary or published image. Build from a release tag such as `v1.2.1`,
 > on native Linux with `--features srt` and libsrt 1.5.7 or newer; see [Installation](Installation#building-with-srt-ingest).
 
 SRT gives you an **encrypted** input over UDP, useful for publishing from a remote encoder.
@@ -167,7 +167,7 @@ Security notes:
 
 `OUTPACE_BROADCAST_OPTIONS` sets per-name descriptor metadata. It applies to every producer type
 and to the `broadcast` command. Supported fields are listed below. Metatracker/startup-node
-settings and tags/logo/description (#269) are explicitly deferred for 1.0.0 pending complete
+settings and tags/logo/description (#269) are explicitly deferred pending complete
 wire and runtime evidence; arbitrary metadata is not accepted. See
 [Releases and Versions](Releases-and-Versions#deferred-scope).
 

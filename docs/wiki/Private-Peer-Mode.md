@@ -1,8 +1,5 @@
 # Private Peer Mode
 
-> **From v1.0.0:** Private peer mode and local descriptors. See [Releases and Versions](Releases-and-Versions)
-> for publication status.
-
 Private peer mode restricts Outpace to an exact list of peers that you choose. It is for setups
 such as a home gateway that should only pull from your own origin node, or a lab swarm.
 

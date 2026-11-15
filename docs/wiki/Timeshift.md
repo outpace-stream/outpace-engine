@@ -1,8 +1,5 @@
 # Timeshift
 
-> **From v1.0.0:** Timeshift. See [Releases and Versions](Releases-and-Versions)
-> for publication status.
-
 Timeshift lets a viewer rewind a live HLS stream by a few minutes, watch from there, and jump
 back to live. Outpace keeps recently packaged HLS segments in memory, and each viewer can seek
 into them independently.

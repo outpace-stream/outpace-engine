@@ -70,9 +70,7 @@ Rules for these inputs:
 - The `acestream://` link of a broadcast made by **another** Outpace daemon needs
   `OUTPACE_BEP9_CONTENT_ID_FALLBACK=1`.
 
-> **From v1.0.0:** `play` rejects duplicate query keys
-> and the file-selection options `_idx` and `stream_id`. v0.9.0 does not enforce
-> these rejection rules.
+- `play` rejects duplicate query keys and the file-selection options `_idx` and `stream_id`.
 
 ### How `play` behaves
 
@@ -114,7 +112,7 @@ The command:
 
 ## `outpace service` (Windows)
 
-From v1.0.0. This command exists only in Windows builds:
+This command exists only in Windows builds:
 
 | Command | What it does |
 | --- | --- |
@@ -126,7 +124,7 @@ See [Deployment](Deployment#windows-service) for settings, data and logs.
 
 ## `outpace healthcheck`
 
-From v1.0.0. Checks that a running daemon answers `/healthz`,
+Checks that a running daemon answers `/healthz`,
 then exits `0` if it does and `1` if it doesn't. Use it for container and service health checks
 on systems without `curl`, such as the minimal image.
 

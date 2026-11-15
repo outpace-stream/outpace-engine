@@ -24,25 +24,26 @@ installing it.
 Linux:
 
 ```bash
-sha256sum -c outpace-android-0.1.0.apk.sha256
+sha256sum -c outpace-android-1.0.0.apk.sha256
 ```
 
 macOS does not ship `sha256sum`. `shasum` reads the same file:
 
 ```bash
-shasum -a 256 -c outpace-android-0.1.0.apk.sha256
+shasum -a 256 -c outpace-android-1.0.0.apk.sha256
 ```
 
 Windows PowerShell prints `True` when the hash matches. `Get-FileHash` uses uppercase; the
 comparison is case-insensitive:
 
 ```powershell
-$hash = (Get-FileHash .\outpace-android-0.1.0.apk -Algorithm SHA256).Hash
-$expected = (Get-Content .\outpace-android-0.1.0.apk.sha256 -Raw).Split()[0]
+$hash = (Get-FileHash .\outpace-android-1.0.0.apk -Algorithm SHA256).Hash
+$expected = (Get-Content .\outpace-android-1.0.0.apk.sha256 -Raw).Split()[0]
 $hash -eq $expected
 ```
 
-App releases start at v0.1.0. That package name is `io.github.outpacestream.android`.
+The examples use v1.0.0; use the version you downloaded. The package name is
+`io.github.outpacestream.android`.
 
 ## Turn on USB debugging
 
@@ -108,13 +109,21 @@ pairing; open **Pair device with pairing code** and pair again instead of waitin
 ## Install and open
 
 ```bash
-adb install -r outpace-android-0.1.0.apk
+adb install -r outpace-android-1.0.0.apk
 ```
 
 The app appears in the television's app row. Open it with the remote. The APK does not contain
-the engine: the first screen offers **Download engine**, then **Start engine**. The app picks
-the engine archive for this device (64-bit or 32-bit). 32-bit engine archives start with engine
-v1.0.2.
+the engine, so Home shows **Local engine not set up** with a **Configure** button:
+
+1. **Configure** opens **Settings**. Under **Local engine**, choose **Manage versions**.
+2. Choose **Install** on the newest release. The app downloads the engine archive for this
+   device (64-bit or 32-bit), checks it and selects it. 32-bit engine archives start with
+   engine v1.0.2.
+3. Back in Settings, choose **Start engine**.
+
+On a television, **Start on boot** is on by default, so the engine comes back after the set
+restarts. If the television already runs an Outpace engine elsewhere on the network, choose
+**Add a remote engine** under **Engine connection** instead of installing one.
 
 Play from **Home** or **Search**, then pick the player in the chooser. **Open as HLS** is there
 for players that handle `.m3u8` better than MPEG-TS. **Recently played** on Home is the easiest

@@ -17,10 +17,11 @@ live media, and serves it to your players over HTTP:
 - through an optional Ace Stream-compatible HTTP API that existing apps and add-ons already
   understand.
 
-It's a single self-contained, headless binary (or container image) for Linux, macOS and
-Windows. Performance and efficiency are core goals: Outpace aims to start quickly, play
-smoothly and stay light on CPU and memory, and the project treats performance regressions as
-bugs. It never downloads or runs the proprietary Ace Stream engine. Ace Stream is the network
+It's a single self-contained, headless binary (or container image) for Linux, macOS,
+Windows and FreeBSD, with an [Android app](Android-App) for phones and TV boxes. Performance
+and efficiency are core goals: Outpace aims to start quickly, play smoothly and stay light on
+CPU and memory, and the project treats performance regressions as bugs. It never downloads or
+runs the proprietary Ace Stream engine. Ace Stream is the network
 it supports today. Outpace is an independent project, not affiliated with or endorsed by Ace
 Stream.
 
@@ -47,8 +48,8 @@ New here? Start with the [FAQ](FAQ) or [Getting Started](Getting-Started).
 - It does **not** play premium, encrypted or protected content. That is a permanent non-goal.
 - It is **not** a full clone of the closed engine. There are no accounts, subscriptions, web UI,
   EPG or general channel catalogues. The compatibility API is a documented subset.
-- [Stream-name search](Stream-Search) is a separate, default-off external services adapter,
-  available from v1.0.0. It needs no operator API key and uses external HTTP services; it does
+- [Stream-name search](Stream-Search) is a separate, default-off external services adapter.
+  It needs no operator API key and uses external HTTP services; it does
   not bundle a UI or catalog.
 - It is not a recorder or DVR. The optional [Timeshift](Timeshift) buffer lives in memory and
   disappears on restart.
@@ -79,14 +80,17 @@ New here? Start with the [FAQ](FAQ) or [Getting Started](Getting-Started).
 | Keep sources warm and monitor the daemon | [Support Sources and Operations](Support-Sources-and-Operations) |
 | Fix a problem or read the logs | [Troubleshooting](Troubleshooting) |
 | Check what version has which feature | [Releases and Versions](Releases-and-Versions) |
+| Run it on an Android phone, tablet or TV box | [Android App](Android-App) |
 | Run the Android app on a television | [Android TV](Android-TV) |
 
 ## Release availability
 
-The latest tagged release is **v1.2.1**. Features marked **From v1.0.0** are available in
-release binaries and multi-architecture images; optional SRT still requires a feature build.
-The [Configuration](Configuration) reference records feature version floors.
-See [Releases and Versions](Releases-and-Versions) for the release contents and remaining limits.
+The latest release is **v1.2.1**. Outpace 1.0.0 was the first stable release, and everything
+in this wiki applies to 1.0.0 and later unless a page names a newer version. The earlier 0.x
+tags were development builds and aren't supported. Optional SRT ingest still requires a feature
+build. The [Configuration](Configuration) reference records which settings need a newer
+release; see [Releases and Versions](Releases-and-Versions) for release contents and remaining
+limits.
 
 ## Placeholder ids
 
@@ -100,4 +104,4 @@ real content ids, infohashes or stream names; see
 
 Outpace is licensed under AGPL-3.0-or-later.
 
-The [Android companion app](Android-App) has its own repository and release schedule.
+The [Android app](Android-App) has its own repository and release schedule.
