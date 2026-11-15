@@ -81,7 +81,7 @@ case "$(dpkg --print-architecture)" in
   aarch64) target=aarch64-linux-android ;;
   arm) target=armv7-linux-androideabi ;;
   x86_64) target=x86_64-linux-android ;;
-  *) echo "no Android build for this architecture" >&2; exit 1 ;;
+  *) echo "no Android build for this architecture" >&2 ;;
 esac
 artifact="outpace-${version}-${target}.tar.gz"
 base="https://github.com/outpace-stream/outpace-engine/releases/download/v${version}"
