@@ -170,11 +170,12 @@ the status route answers `404`: read the `error` from the start response itself.
 | `no_space` | `507` | VOD only, with the disk cache: the file doesn't fit in the free space on the cache disk, or the disk filled during the download. `message` gives the required and available sizes. See [VOD free-space check](Configuration#vod-free-space-check). |
 | `internal` | `404` (`502` for VOD; see below for audio normalisation) | Any other failure. The daemon log shows how far the start got. |
 
-When [live audio normalisation](HLS-Output#audio-normalisation) fails before the first byte of a
-continuous MPEG-TS stream (`/streams/<network>/<id>` or `.ts`), the response uses the same JSON
-body: `capacity` with `503` + `Retry-After: 1` when audio conversion is at capacity, otherwise
-`internal` with `422` (unsupported audio), `504` (startup timed out or output stalled), `410`
-(stream stopped) or `502` (conversion failed).
+When [live audio normalisation](HLS-Output#audio-normalisation) fails before a continuous
+MPEG-TS stream (`/streams/<network>/<id>` or `.ts`) is ready, so before any response headers are
+sent, the response uses the same JSON body: `capacity` with `503` + `Retry-After: 1` when audio
+conversion is at capacity, otherwise `internal` with `422` (unsupported audio), `504` (startup
+timed out or output stalled), `410` (stream stopped) or `502` (conversion failed). A failure
+after that point ends the `200` response body early instead.
 
 The [compatibility API](#acestream-compatible-api) keeps its own error format.
 

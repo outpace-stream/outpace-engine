@@ -1171,7 +1171,10 @@ impl StreamManager {
         let inner = match provider.open_with_progress(id, attempt.progress()).await {
             Ok(inner) => inner,
             Err(failure) => {
-                settle_failed_open(attempt, &failure);
+                // A stop during the open leaves no record: the attempt drops without `fail`.
+                if !(transition.is_cancelled() || *cancel.borrow()) {
+                    settle_failed_open(attempt, &failure);
+                }
                 return Err(failure);
             }
         };
@@ -1325,7 +1328,10 @@ impl StreamManager {
             let inner = match provider.open_with_progress(id, attempt.progress()).await {
                 Ok(inner) => inner,
                 Err(failure) => {
-                    settle_failed_open(attempt, &failure);
+                    // A stop during the open leaves no record: the attempt drops without `fail`.
+                    if !(transition.is_cancelled() || *cancel.borrow()) {
+                        settle_failed_open(attempt, &failure);
+                    }
                     return Err(failure.into());
                 }
             };
