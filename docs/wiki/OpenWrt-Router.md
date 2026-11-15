@@ -6,7 +6,7 @@ the engine themselves.
 
 | Report | Details |
 | --- | --- |
-| **Source** | [4PDA forum, Ace Stream \[Android\] thread](https://4pda.to/forum/lofiversion/index.php?t737440-14240.html), posts of 2026-10-30 and 2026-10-31 |
+| **Source** | [4PDA forum, Ace Stream \[Android\] thread](https://4pda.to/forum/index.php?showtopic=737440&st=14240), posts of 2026-10-30 and 2026-10-31 |
 | **Reported by** | 4PDA user blackwrist |
 | **Versions** | Not stated. The newest release then was v0.8.0, a 0.x development build. Use 1.0.0 or later. |
 | **Device** | ASUS TUF-AX6000 (MediaTek Filogic, 64-bit ARM, 512 MiB RAM) |
