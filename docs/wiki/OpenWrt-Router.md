@@ -79,6 +79,10 @@ uci commit outpace
 
 ## 3. Start it
 
+These commands run the service script the installer added, `/etc/init.d/outpace`, which every
+OpenWrt service has. `enable` and `start` are not `outpace` subcommands; the script runs
+`outpace serve` for you.
+
 ```sh
 /etc/init.d/outpace enable     # start at boot
 /etc/init.d/outpace start
