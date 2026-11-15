@@ -35,7 +35,8 @@ App versions are independent of engine versions.
 
 - Android 5.0 or newer.
 - 64-bit ARM (`arm64-v8a`) or 32-bit ARM (`armeabi-v7a`). Many TV boxes run 32-bit Android on a
-  64-bit chip; the app picks the matching engine build.
+  64-bit chip; the app picks the matching engine build. Engine releases after v1.2.1 also have
+  an `x86_64` build, for emulators, ChromeOS and Intel/AMD TV boxes.
 - A video player app. Outpace has no player of its own.
 - For a local engine: engine v1.0.0 or newer for 64-bit ARM, v1.0.2 or newer for 32-bit ARM.
   Search, casting, the proxy and camouflage need the engine versions listed in the
@@ -63,7 +64,8 @@ that download programs to run.
   [issues](https://github.com/outpace-stream/outpace-android/issues).
 
 APK releases belong to the Android repository. Engine archives, including the Android targets
-(`aarch64-linux-android`, and `armv7-linux-androideabi` from v1.0.2), remain in
+(`aarch64-linux-android`, `armv7-linux-androideabi` from v1.0.2, and `x86_64-linux-android`
+in releases after v1.2.1), remain in
 [engine releases](https://github.com/outpace-stream/outpace-engine/releases).
 [Termux](Installation#android-with-termux-best-effort) remains a way to run the engine binary
 yourself.

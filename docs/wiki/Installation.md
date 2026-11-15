@@ -62,14 +62,17 @@ There is a best-effort `aarch64-linux-android` build for 64-bit ARM
 phones and Android TV boxes, to run under [Termux](https://termux.dev). From v1.0.2, there is
 also an `armv7-linux-androideabi` build for 32-bit ARM devices, packaged the
 same way. Many Android TV boxes run 32-bit Android on a 64-bit chip; they need the 32-bit build.
+Releases after v1.2.1 add an `x86_64-linux-android` build for Intel and AMD devices: x86_64
+emulator images, ChromeOS and x86 Android TV boxes. There is no 32-bit x86 build.
 
 - **Best-effort** means it is uploaded after the rest of the release. If a build fails, that
   release has no archive for that target.
 - These archives aren't covered by `SHA256SUMS`. Each has its own `<archive>.sha256` file.
 - These builds run on Android 5 and newer, without root.
 
-In Termux, `dpkg --print-architecture` prints `aarch64` for the 64-bit build or `arm` for the
-32-bit one. For `arm`, set `target=armv7-linux-androideabi` and use a release that has it:
+In Termux, `dpkg --print-architecture` prints `aarch64` for the 64-bit ARM build, `arm` for the
+32-bit one, or `x86_64` for the x86_64 one. For `arm`, set `target=armv7-linux-androideabi`; for
+`x86_64`, set `target=x86_64-linux-android`. Use a release that has that target:
 
 ```bash
 pkg install curl
