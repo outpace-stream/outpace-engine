@@ -9,10 +9,11 @@
 - The version a binary reports is the version in the source it was built from. The tag must
   match it.
 
-The latest published release is **v1.2.0**, a minor release on top of 1.1.0. See the
-[GitHub Release](https://github.com/outpace-stream/outpace-engine/releases/tag/v1.2.0) for downloads,
-the [1.2.0 notes](https://github.com/outpace-stream/outpace-engine/blob/main/docs/releases/1.2.0.md)
-for its changes, and the
+The latest published release is **v1.2.1**, a patch release on top of 1.2.0. See the
+[GitHub Release](https://github.com/outpace-stream/outpace-engine/releases/tag/v1.2.1) for downloads,
+the [1.2.1 notes](https://github.com/outpace-stream/outpace-engine/blob/main/docs/releases/1.2.1.md)
+and [1.2.0 notes](https://github.com/outpace-stream/outpace-engine/blob/main/docs/releases/1.2.0.md)
+for recent changes, and the
 [1.0.0 notes](https://github.com/outpace-stream/outpace-engine/blob/main/docs/releases/1.0.0.md)
 for scope, upgrades and validation limits.
 
@@ -22,7 +23,7 @@ for scope, upgrades and validation limits.
   its downloads and generated change notes.
 - **Curated notes:** for releases that have them, in
   [`docs/releases/`](https://github.com/outpace-stream/outpace-engine/tree/main/docs/releases)
-  (including `1.0.0.md`, `1.0.1.md`, `1.0.2.md`, `1.0.3.md`, `1.1.0.md` and `1.2.0.md`).
+  (including `1.0.0.md`, `1.0.1.md`, `1.0.2.md`, `1.0.3.md`, `1.1.0.md`, `1.2.0.md` and `1.2.1.md`).
 - **Milestones:** <https://github.com/outpace-stream/outpace-engine/milestones> track what each
   version covers.
 
@@ -30,7 +31,7 @@ for scope, upgrades and validation limits.
 
 ```bash
 outpace --version
-docker run --rm ghcr.io/outpace-stream/outpace-engine:1.2.0 --version
+docker run --rm ghcr.io/outpace-stream/outpace-engine:1.2.1 --version
 curl "http://127.0.0.1:6878/server/api?method=get_version"   # needs OUTPACE_ACE_COMPAT=1
 ```
 
@@ -57,6 +58,15 @@ build.
 | `X.Y.Z-minimal`, `minimal` | Like `X.Y.Z` and `latest` | amd64, arm64, arm/v7 | Smaller `scratch` image (from v1.0.0). |
 | `edge` | With every merge to `main` | amd64 | Testing unreleased features. |
 | `sha-<commit>` | No | amd64 | Pinning one specific `main` build. |
+
+## v1.2.1 fixes
+
+A patch release with no new features or default changes:
+
+- [Casting](Casting): a `play` that fails after the TV may already have acted on it is followed
+  by one `Stop`, and the stream the TV has open ends when its cast is stopped, fails or is
+  replaced, so a failed cast no longer leaves the TV playing (#497, #498). A failed `play` can
+  take up to 5 seconds longer to answer.
 
 ## v1.2.0 changes
 
