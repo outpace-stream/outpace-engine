@@ -154,10 +154,16 @@ pub fn parse_response(buf: &[u8]) -> Option<GetPeersResponse> {
 /// or `None` if it is unparseable or the wrong shape. Separates a node that answered with an
 /// error from genuinely malformed/hostile traffic, and lets a correlated error close its
 /// query. An error without a usable `t` yields an empty id, which never matches a query.
+/// BEP-5 requires `e` to be `[code, message]`; an error type without that payload is
+/// malformed and must not close a query.
 fn krpc_error_txid(buf: &[u8]) -> Option<Vec<u8>> {
     let v = Bencode::parse(buf).ok()?;
     if v.get(b"y").and_then(Bencode::as_bytes) != Some(b"e".as_slice()) {
         return None;
+    }
+    match v.get(b"e") {
+        Some(Bencode::List(e)) if matches!(e.as_slice(), [Bencode::Int(_), Bencode::Bytes(_)]) => {}
+        _ => return None,
     }
     Some(
         v.get(b"t")
@@ -1774,6 +1780,92 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "waited {elapsed:?} on a node that already refused"
         );
+    }
+
+    /// A datagram typed as a KRPC error, with this `t`, carrying `e` as given (or none).
+    fn error_with_payload(txid: &[u8], e: Option<Bencode>) -> Vec<u8> {
+        let mut top: BTreeMap<Vec<u8>, Bencode> = BTreeMap::new();
+        top.insert(b"t".to_vec(), Bencode::Bytes(txid.to_vec()));
+        top.insert(b"y".to_vec(), Bencode::Bytes(b"e".to_vec()));
+        if let Some(e) = e {
+            top.insert(b"e".to_vec(), e);
+        }
+        Bencode::Dict(top).encode()
+    }
+
+    #[test]
+    fn krpc_error_txid_requires_a_code_and_message_payload() {
+        assert_eq!(
+            krpc_error_txid(&error_response(b"ab")),
+            Some(b"ab".to_vec())
+        );
+        let invalid = [
+            None,
+            Some(Bencode::Bytes(b"err".to_vec())),
+            Some(Bencode::List(vec![])),
+            Some(Bencode::List(vec![Bencode::Int(201)])),
+            Some(Bencode::List(vec![
+                Bencode::Bytes(b"201".to_vec()),
+                Bencode::Bytes(b"err".to_vec()),
+            ])),
+            Some(Bencode::List(vec![
+                Bencode::Int(201),
+                Bencode::Bytes(b"err".to_vec()),
+                Bencode::Int(1),
+            ])),
+        ];
+        for e in invalid {
+            let label = format!("{e:?}");
+            assert_eq!(
+                krpc_error_txid(&error_with_payload(b"ab", e)),
+                None,
+                "{label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn correlated_error_without_a_valid_payload_does_not_close_the_query() {
+        // Errors echoing the right transaction but with a missing or invalid `e` are
+        // malformed, so they must leave the query open for the genuine reply that follows.
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let seed = v4_addr(&server);
+        let peer: SocketAddrV4 = "10.0.0.7:7777".parse().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let (n, caller) = server.recv_from(&mut buf).await.unwrap();
+            let txid = buf_txid(&buf[..n]);
+            for e in [None, Some(Bencode::Bytes(b"err".to_vec()))] {
+                server
+                    .send_to(&error_with_payload(&txid, e), caller)
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            server
+                .send_to(&response_with(&txid, &[peer], &[]), caller)
+                .await
+                .unwrap();
+            std::future::pending::<()>().await
+        });
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut found = false;
+        let metrics = dht_walk_from_seeds(
+            &[9u8; 20],
+            Duration::from_secs(5),
+            &client,
+            vec![seed],
+            |_src, resp| {
+                found |= resp.peers.contains(&peer);
+                found
+            },
+        )
+        .await;
+        handle.abort();
+        assert!(found, "malformed error closed the query: {metrics:?}");
+        assert_eq!(metrics.malformed_responses, 2);
+        assert_eq!(metrics.krpc_errors, 0);
+        assert_eq!(metrics.valid_responses, 1);
     }
 
     #[tokio::test]
