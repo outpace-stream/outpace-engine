@@ -308,6 +308,10 @@ The image is `ghcr.io/outpace-stream/outpace-engine`.
 | `edge` | The current `main` branch. | `linux/amd64` only |
 | `sha-<commit>` | One specific `main` commit. | `linux/amd64` only |
 
+Release tags in this registry start at `1.0.1`. The `1.0.0` image was published before the
+[organization migration](Releases-and-Versions#organization-migration) and is only at
+`ghcr.io/jamezrin/outpace:1.0.0`.
+
 What the image sets up:
 
 - It runs as an unprivileged `outpace` user.

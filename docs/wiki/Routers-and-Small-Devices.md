@@ -73,8 +73,8 @@ Running the installer again upgrades the binary and keeps your configuration.
 | `arm_arm1176jzf-s_vfp` | `arm-unknown-linux-musleabihf` |
 | `riscv64_*` | `riscv64gc-unknown-linux-musl` |
 
-Only releases that ship an architecture's build can be installed on it. Every release ships
-all five.
+Only releases that ship an architecture's build can be installed on it. Every release from
+1.0.0 on ships all five.
 
 MIPS routers (for example MT7621 or ath79 boards) are not supported. Most have too little
 flash and RAM for Outpace, and Rust supports MIPS only as a tier 3 target.
