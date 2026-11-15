@@ -158,6 +158,9 @@ pub struct Cast {
     /// The MPEG-TS MIME type the renderer accepted; the stream route serves this type.
     pub mime: &'static str,
     connections: Arc<AtomicUsize>,
+    /// Set once this cast stops owning its stream URL (stopped, replaced or failed). Open
+    /// stream responses end on it, so a renderer that ignores `Stop` stops receiving data.
+    ended: Arc<tokio::sync::watch::Sender<bool>>,
     /// The renderer's control endpoint, kept so `stop` and `status` still reach it after a
     /// later discovery misses its SSDP reply.
     renderer: Target,
@@ -167,6 +170,22 @@ impl Cast {
     pub fn connections(&self) -> usize {
         self.connections.load(Ordering::Relaxed)
     }
+
+    /// Resolves once the cast no longer owns its stream URL, or is dropped.
+    pub fn ended(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut ended = self.ended.subscribe();
+        async move {
+            let _ = ended.wait_for(|ended| *ended).await;
+        }
+    }
+
+    fn end(&self) {
+        self.ended.send_replace(true);
+    }
+}
+
+fn new_ended() -> Arc<tokio::sync::watch::Sender<bool>> {
+    Arc::new(tokio::sync::watch::channel(false).0)
 }
 
 /// Counts one open stream response for a cast while it lives.
@@ -362,6 +381,7 @@ impl CastService {
             url: url.clone(),
             mime: soap::TS_MIME_TYPES[0],
             connections: Arc::new(AtomicUsize::new(0)),
+            ended: new_ended(),
             renderer: target.clone(),
         };
         let previous = self.replace_cast(cast.clone())?;
@@ -375,14 +395,18 @@ impl CastService {
             )
             .await;
         }
-        let result = async {
+        // The error, and whether the renderer may be playing anyway: many renderers open the
+        // stream inside `SetAVTransportURI`, and a lost or late reply says nothing about what
+        // they did. Only a SOAP fault to `SetAVTransportURI` is a definite refusal.
+        let result: Result<(), (CastError, bool)> = async {
             let mut set = Err(CastError::UnknownTarget);
             for (attempt, mime) in soap::TS_MIME_TYPES.into_iter().enumerate() {
                 if attempt > 0 {
                     // Renderers may check the stream's Content-Type too, so serve the new
                     // type before offering it.
                     cast.mime = mime;
-                    self.replace_cast(cast.clone())?;
+                    self.replace_cast(cast.clone())
+                        .map_err(|error| (error, false))?;
                 }
                 set = soap_call(
                     &target,
@@ -400,7 +424,10 @@ impl CastService {
                     break;
                 }
             }
-            set?;
+            set.map_err(|error| {
+                let refused = matches!(error, CastError::Fault(_));
+                (error, !refused)
+            })?;
             soap_call(
                 &target,
                 "Play",
@@ -408,11 +435,31 @@ impl CastService {
                 PLAYBACK_SOAP_TIMEOUT,
             )
             .await
+            .map(drop)
+            .map_err(|error| (error, true))
         }
         .await;
-        if let Err(error) = result {
+        if let Err((error, may_be_playing)) = result {
+            // Removing the cast also ends a stream response the renderer already opened.
             self.remove_cast(&target.id, Some(&cast.token));
             crate::alog!("[dlna] play on {:?} failed: {error}", target.name);
+            if may_be_playing {
+                // Best effort, like the Stop before a new URI: the play error is what the
+                // client needs, and the stream URL is already gone either way.
+                let stopped = soap_call(
+                    &target,
+                    "Stop",
+                    soap::stop(&target.service_type),
+                    SOAP_TIMEOUT,
+                )
+                .await;
+                if let Err(stop_error) = stopped {
+                    crate::alog!(
+                        "[dlna] stop after failed play on {:?} failed: {stop_error}",
+                        target.name
+                    );
+                }
+            }
             return Err(error);
         }
         crate::alog!("[dlna] casting {network} stream to {:?}", target.name);
@@ -488,11 +535,17 @@ impl CastService {
             .iter()
             .position(|known| known.target == cast.target)
             .map(|at| state.casts.swap_remove(at));
+        if let Some(previous) = &previous {
+            // A MIME retry re-installs the same cast; anything else takes over the target.
+            if previous.token != cast.token {
+                previous.end();
+            }
+        }
         if state.casts.len() >= MAX_CASTS {
             let retired = state.casts.iter().position(|known| known.token.is_empty());
             match retired {
                 Some(at) => {
-                    state.casts.swap_remove(at);
+                    state.casts.swap_remove(at).end();
                 }
                 None => return Err(CastError::Capacity),
             }
@@ -511,15 +564,20 @@ impl CastService {
         let live = !cast.token.is_empty();
         cast.token.clear();
         cast.url.clear();
+        cast.end();
         live
     }
 
     fn remove_cast(&self, target: &str, token: Option<&str>) -> bool {
         let mut state = self.state.lock().unwrap();
         let before = state.casts.len();
-        state
-            .casts
-            .retain(|cast| cast.target != target || token.is_some_and(|t| cast.token != t));
+        state.casts.retain(|cast| {
+            let keep = cast.target != target || token.is_some_and(|t| cast.token != t);
+            if !keep {
+                cast.end();
+            }
+            keep
+        });
         state.casts.len() != before
     }
 
@@ -534,6 +592,7 @@ impl CastService {
             url: String::new(),
             mime: soap::TS_MIME_TYPES[0],
             connections: Arc::new(AtomicUsize::new(0)),
+            ended: new_ended(),
             renderer,
         });
         token

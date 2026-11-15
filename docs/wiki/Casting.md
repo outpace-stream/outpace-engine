@@ -64,6 +64,11 @@ while a `play` is still talking to the same TV waits for it to finish, then stop
 can take several seconds. The TV fetches the stream like any other player: it shares the
 running session with your other viewers and counts as one of the stream's clients.
 
+If `play` fails after the TV may already have acted on it, for example when the TV doesn't
+answer in time or drops the connection, Outpace sends the TV one `Stop` before it reports the
+error, which can add up to 5 seconds. Only a TV that answers with a UPnP error is taken at
+its word and left alone. The failed cast's stream URL stops working either way.
+
 ## HTTP API
 
 All bodies are JSON. Every route answers `404` when `OUTPACE_ENABLE_CAST` is off.
@@ -74,7 +79,7 @@ All bodies are JSON. Every route answers `404` when `OUTPACE_ENABLE_CAST` is off
 | `POST /cast/targets/{target}/play` | Body `{"network":"ace","id":"<content id>"}`. Starts the live stream if it isn't running, then points the renderer at it and starts playback. |
 | `POST /cast/targets/{target}/stop` | Stops playback. Answers `204` with no body. |
 | `GET /cast/targets/{target}/status` | The renderer's transport state, and whether it is still fetching the stream. |
-| `GET /cast/s/{token}.ts` | The stream URL handed to the renderer. Each `play` makes a new random token, and `stop` retires it. You don't call this yourself. |
+| `GET /cast/s/{token}.ts` | The stream URL handed to the renderer. Each `play` makes a new random token. `stop`, a failed `play` and a new `play` to the same TV retire it, which also ends a response the TV still has open. You don't call this yourself. |
 
 The `id` in `play` takes the same forms as `/streams/ace/<id>`: a bare 40-hex content id,
 `cid:<content id>` or `ih:<infohash>`.
@@ -182,7 +187,8 @@ The `/cast/*` routes follow the same exposure rule as the other control routes: 
 reachable wherever `OUTPACE_BIND` is. Anyone who can reach the API can list your renderers and
 start or stop playback on them. A web page can't do it through a visitor's browser: `play` and
 `stop` refuse requests whose `Origin` is another site, and `play` requires a JSON content type.
-If `stop` can't reach the renderer, the stream URL is retired anyway and `stop` can be retried.
+If `stop` can't reach the renderer, the stream URL is retired anyway, the TV's open stream is
+ended, and `stop` can be retried.
 
 ## Troubleshooting
 
