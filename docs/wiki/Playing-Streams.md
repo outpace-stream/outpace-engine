@@ -168,7 +168,19 @@ the status route answers `404`: read the `error` from the start response itself.
 | `protected` | `422` | Encrypted or invalid-protection content, which Outpace doesn't play. |
 | `capacity` | `503` + `Retry-After: 1` (`404` when the catalog resolver is saturated) | The [session cap](Configuration#limits-and-admission), the catalog resolver or audio conversion is at capacity. Retry later. |
 | `no_space` | `507` | VOD only, with the disk cache: the file doesn't fit in the free space on the cache disk, or the disk filled during the download. `message` gives the required and available sizes. See [VOD free-space check](Configuration#vod-free-space-check). |
-| `internal` | `404` (`502` for VOD) | Any other failure. The daemon log shows how far the start got. |
+| `internal` | `404` (`502` for VOD; see below for audio normalisation) | Any other failure. The daemon log shows how far the start got. |
+
+When [live audio normalisation](HLS-Output#audio-normalisation) fails before a continuous
+MPEG-TS stream (`/streams/<network>/<id>` or `.ts`) is ready, so before any response headers are
+sent, the response uses the same JSON body: `capacity` with `503` + `Retry-After: 1` when audio
+conversion is at capacity, otherwise `internal` with:
+
+- `422`: the audio can't be converted.
+- `504`: conversion didn't become ready within the startup timeout, or its output stalled.
+- `410`: the stream itself was stopped or cancelled while the request waited.
+- `502`: conversion failed, or stopped or closed on its own before it was ready.
+
+A failure after that point ends the `200` response body early instead.
 
 The [compatibility API](#acestream-compatible-api) keeps its own error format.
 

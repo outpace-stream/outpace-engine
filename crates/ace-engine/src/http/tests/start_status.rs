@@ -251,6 +251,8 @@ struct GatedProvider {
     open: Notify,
     emit: Arc<Notify>,
     peers: Arc<AtomicU32>,
+    /// When set, the open fails with `NoPeers` once released instead of opening a source.
+    fail: std::sync::atomic::AtomicBool,
 }
 
 struct GatedSource {
@@ -309,6 +311,12 @@ impl StreamProvider for GatedProvider {
         progress.resolved();
         self.resolved.notify_one();
         self.open.notified().await;
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(ProviderStartFailure::new(
+                crate::start_failure::StartFailureKind::Discovery,
+                ProviderError::NoPeers("synthetic discovery diagnostic".into()),
+            ));
+        }
         Ok(Box::new(GatedSource {
             emit: self.emit.clone(),
             peers: self.peers.clone(),
@@ -336,6 +344,7 @@ async fn status_reports_each_phase_from_the_start_request_through_playing() {
         open: Notify::new(),
         emit: Arc::new(Notify::new()),
         peers: Arc::new(AtomicU32::new(0)),
+        fail: Default::default(),
     });
     let state = app_state(provider.clone());
     let app = router(state.clone());
@@ -390,6 +399,7 @@ async fn cancelled_start_leaves_no_status_record() {
         open: Notify::new(),
         emit: Arc::new(Notify::new()),
         peers: Arc::new(AtomicU32::new(0)),
+        fail: Default::default(),
     });
     let state = app_state(provider.clone());
     let app = router(state.clone());
@@ -413,4 +423,45 @@ async fn cancelled_start_leaves_no_status_record() {
     .expect("a cancelled start drops its record");
     assert_eq!(phase(&app).await.0, StatusCode::NOT_FOUND);
     state.manager.shutdown().await;
+}
+
+/// A stop during the open fences the start; a provider error that arrives afterwards (here
+/// `NoPeers`) must not be recorded as a failed start on the status route.
+#[tokio::test]
+async fn a_provider_error_after_stop_leaves_no_status_record() {
+    for suffix in [".ts", ".m3u8"] {
+        let provider = Arc::new(GatedProvider {
+            entered: Notify::new(),
+            resolve: Notify::new(),
+            resolved: Notify::new(),
+            open: Notify::new(),
+            emit: Arc::new(Notify::new()),
+            peers: Arc::new(AtomicU32::new(0)),
+            fail: true.into(),
+        });
+        let state = app_state(provider.clone());
+        let app = router(state.clone());
+        let request = tokio::spawn({
+            let app = app.clone();
+            let path = format!("/streams/gate/chan{suffix}");
+            async move { get(&app, &path).await }
+        });
+        provider.entered.notified().await;
+        assert_eq!(
+            phase(&app).await,
+            (StatusCode::OK, json!("resolving")),
+            "{suffix}"
+        );
+        let _ = state.manager.stop("gate", "chan").await;
+        provider.resolve.notify_one();
+        provider.open.notify_one();
+        let _ = request.await;
+        assert!(
+            state.manager.start_status("gate", "chan").is_none(),
+            "{suffix}: {:?}",
+            state.manager.start_status("gate", "chan")
+        );
+        assert_eq!(phase(&app).await.0, StatusCode::NOT_FOUND, "{suffix}");
+        state.manager.shutdown().await;
+    }
 }
