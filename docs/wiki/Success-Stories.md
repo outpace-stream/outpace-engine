@@ -28,7 +28,9 @@ Got Outpace running on a NAS, a set-top box, a car, a boat, or anything we haven
 us, even if it is rough. Unusual hardware and odd setups are exactly what this page is for, and
 a short report is enough to start: we can write it up with you.
 
-Post it in
+Fill in the
+[success story form](https://github.com/outpace-stream/outpace-engine/issues/new?template=success_story.yml),
+post in
 [Discussions → Show and tell](https://github.com/outpace-stream/outpace-engine/discussions/categories/show-and-tell),
 or open a pull request that adds a page under `docs/wiki/`. Include what you can of:
 

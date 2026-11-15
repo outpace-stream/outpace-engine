@@ -178,6 +178,7 @@ The HTTP API has no authentication, so keep it on `127.0.0.1` or behind a proxy.
 | Replace an existing AceStream engine | [Migrating](https://github.com/outpace-stream/outpace-engine/wiki/Migrating-from-AceStream-Engine) |
 | Publish your own stream | [Broadcasting](https://github.com/outpace-stream/outpace-engine/wiki/Broadcasting) |
 | Fix a problem | [Troubleshooting](https://github.com/outpace-stream/outpace-engine/wiki/Troubleshooting) |
+| See it running on a TV, a router or a home server | [Success stories](https://github.com/outpace-stream/outpace-engine/wiki/Success-Stories) |
 
 The [user wiki](https://github.com/outpace-stream/outpace-engine/wiki) is generated from
 [`docs/wiki/`](docs/wiki); edit it there.
@@ -217,6 +218,9 @@ protocol. Every kind of contribution counts:
   challenge a design or a decision when you think it's wrong, and explain why.
 - **Docs and guides.** The wiki lives in [`docs/wiki/`](docs/wiki). If something confused you,
   improving the page helps the next person.
+- **Success stories.** Running Outpace somewhere unusual? Tell us with the
+  [success story form](https://github.com/outpace-stream/outpace-engine/issues/new?template=success_story.yml),
+  and we'll add it to [Success stories](https://github.com/outpace-stream/outpace-engine/wiki/Success-Stories).
 - **Code.** Look for [good first issues](https://github.com/outpace-stream/outpace-engine/labels/good%20first%20issue),
   or open an issue first for larger changes, so we can agree on the approach before you invest
   the time.
