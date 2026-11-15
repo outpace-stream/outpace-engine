@@ -7,13 +7,20 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub(crate) async fn fake_renderer(
     replies: Vec<(u16, &'static str)>,
 ) -> (SocketAddrV4, tokio::task::JoinHandle<Vec<(String, String)>>) {
+    fake_renderer_paced(replies.into_iter().map(|(s, r)| (s, r, 0)).collect()).await
+}
+
+/// [`fake_renderer`] that waits `delay_ms` before each reply.
+pub(crate) async fn fake_renderer_paced(
+    replies: Vec<(u16, &'static str, u64)>,
+) -> (SocketAddrV4, tokio::task::JoinHandle<Vec<(String, String)>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let SocketAddr::V4(addr) = listener.local_addr().unwrap() else {
         unreachable!()
     };
     let task = tokio::spawn(async move {
         let mut seen = Vec::new();
-        for (status, reply) in replies {
+        for (status, reply, delay_ms) in replies {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
             let mut buf = [0u8; 4096];
@@ -40,6 +47,7 @@ pub(crate) async fn fake_renderer(
                 .to_string();
             let body = text.split_once("\r\n\r\n").unwrap().1.to_string();
             seen.push((action, body));
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             let response = format!(
                 "HTTP/1.1 {status} X\r\nContent-Type: text/xml\r\nContent-Length: {}\r\n\r\n{reply}",
                 reply.len()
@@ -79,6 +87,7 @@ async fn play_status_stop_drive_av_transport_and_track_the_stream_fetch() {
         (opened.network.as_str(), opened.id.as_str()),
         ("ace", "cid:0123")
     );
+    let ended = opened.ended();
     let status = cast.status("t1").await.unwrap();
     assert_eq!(status.transport.state, "PLAYING");
     assert_eq!(status.cast.as_ref().unwrap().connections(), 1);
@@ -87,6 +96,9 @@ async fn play_status_stop_drive_av_transport_and_track_the_stream_fetch() {
 
     cast.stop("t1").await.unwrap();
     assert!(cast.open_stream(&started.token).is_none());
+    tokio::time::timeout(Duration::from_secs(1), ended)
+        .await
+        .expect("stop ends the open stream response");
 
     let seen = renderer.await.unwrap();
     let actions: Vec<_> = seen.iter().map(|(a, _)| a.as_str()).collect();
@@ -128,6 +140,12 @@ async fn illegal_mime_type_falls_back_to_the_dlna_mpeg_ts_type() {
     assert_eq!(started.mime, "video/mpeg");
     let (open, _guard) = cast.open_stream(&started.token).unwrap();
     assert_eq!(open.mime, "video/mpeg");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), open.ended())
+            .await
+            .is_err(),
+        "re-installing the same cast for the MIME retry does not end its stream"
+    );
     let seen = renderer.await.unwrap();
     assert!(seen[0].1.contains("http-get:*:video/mp2t:*"));
     assert!(seen[1].1.contains("http-get:*:video/mpeg:*"));
@@ -140,10 +158,17 @@ async fn renderer_fault_is_reported_and_the_cast_is_dropped() {
         .replace("714", "701")
         .replace("Illegal MIME-type", "Transition not available");
     let other_fault: &'static str = Box::leak(other_fault.into_boxed_str());
-    let (addr, _renderer) = fake_renderer(vec![(500, other_fault)]).await;
+    // A second reply is offered so a (wrong) Stop after the refusal would be recorded.
+    let (addr, renderer) = fake_renderer(vec![(500, other_fault), (200, OK)]).await;
     let cast = service("192.168.1.2:6878");
     cast.insert_target_for_test(test_support::target("t1", addr));
     let error = cast.play("t1", "ace", "x", "t").await.unwrap_err();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !renderer.is_finished(),
+        "a SetAVTransportURI fault is a definite refusal: no Stop follows"
+    );
+    renderer.abort();
     assert_eq!(
         error,
         CastError::Fault(soap::Fault {
@@ -153,6 +178,108 @@ async fn renderer_fault_is_reported_and_the_cast_is_dropped() {
     );
     assert_eq!(error.code(), "renderer_fault");
     assert!(cast.state.lock().unwrap().casts.is_empty());
+}
+
+#[tokio::test]
+async fn a_play_failing_after_the_uri_was_set_stops_the_renderer_and_ends_its_stream() {
+    // The renderer opens the stream while it handles SetAVTransportURI (slow reply), then
+    // fails Play without a SOAP fault, so it may be playing anyway.
+    let (addr, renderer) =
+        fake_renderer_paced(vec![(200, OK, 300), (500, "busy", 0), (200, OK, 0)]).await;
+    let cast = Arc::new(service("192.168.1.2:6878"));
+    cast.insert_target_for_test(test_support::target("t1", addr));
+    let playing = tokio::spawn({
+        let cast = cast.clone();
+        async move { cast.play("t1", "ace", "x", "t").await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let token = cast.state.lock().unwrap().casts[0].token.clone();
+    let (opened, _guard) = cast.open_stream(&token).unwrap();
+    let ended = opened.ended();
+
+    assert_eq!(
+        playing.await.unwrap().unwrap_err(),
+        CastError::RendererStatus(500)
+    );
+    tokio::time::timeout(Duration::from_secs(1), ended)
+        .await
+        .expect("a failed play ends the stream response the renderer opened");
+    assert!(cast.open_stream(&token).is_none());
+    assert!(cast.state.lock().unwrap().casts.is_empty());
+    let actions: Vec<_> = renderer
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(a, _)| {
+            a.split('#')
+                .nth(1)
+                .unwrap()
+                .trim_end_matches('"')
+                .to_string()
+        })
+        .collect();
+    assert_eq!(actions, ["SetAVTransportURI", "Play", "Stop"]);
+}
+
+#[tokio::test]
+async fn a_lost_set_av_transport_uri_reply_is_followed_by_a_stop() {
+    // The renderer closes the connection without answering: it may still have the URI.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let SocketAddr::V4(addr) = listener.local_addr().unwrap() else {
+        unreachable!()
+    };
+    let server = tokio::spawn(async move {
+        let mut actions = Vec::new();
+        for answer in [false, true] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let mut request = Vec::new();
+            while !String::from_utf8_lossy(&request).contains("</s:Envelope>") {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&buf[..n]);
+            }
+            let text = String::from_utf8_lossy(&request).to_string();
+            let action = text.split('#').nth(1).unwrap().split('"').next().unwrap();
+            actions.push(action.to_string());
+            if answer {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{OK}",
+                    OK.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        }
+        actions
+    });
+    let cast = service("192.168.1.2:6878");
+    cast.insert_target_for_test(test_support::target("t1", addr));
+    let error = cast.play("t1", "ace", "x", "t").await.unwrap_err();
+    assert_ne!(error.code(), "renderer_fault");
+    assert_eq!(server.await.unwrap(), ["SetAVTransportURI", "Stop"]);
+}
+
+#[tokio::test]
+async fn replacing_a_cast_ends_the_previous_stream() {
+    let (addr, renderer) = fake_renderer(vec![(200, OK), (200, OK), (200, OK)]).await;
+    let cast = service("192.168.1.2:6878");
+    let target = test_support::target("t1", addr);
+    cast.insert_target_for_test(target.clone());
+    let old = cast.insert_cast_for_test(target, "ace", "x");
+    let (opened, _guard) = cast.open_stream(&old).unwrap();
+    let ended = opened.ended();
+    let started = cast.play("t1", "ace", "y", "t").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), ended)
+        .await
+        .expect("the replaced cast's stream ends");
+    let (current, _guard) = cast.open_stream(&started.token).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), current.ended())
+            .await
+            .is_err(),
+        "the new cast's stream keeps going"
+    );
+    assert_eq!(renderer.await.unwrap().len(), 3);
 }
 
 #[tokio::test]

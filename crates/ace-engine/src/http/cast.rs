@@ -284,9 +284,14 @@ async fn cast_stream(s: &AppState, cast: &CastService, file: &str) -> Response {
             "DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000",
         ),
     );
-    let stream = body.into_data_stream().map(move |chunk| {
-        let _held = &guard;
-        chunk
-    });
+    // End the response once the cast stops owning this URL (stopped, replaced or a failed
+    // `play`), so a renderer that ignores `Stop` does not keep receiving the stream.
+    let stream = body
+        .into_data_stream()
+        .map(move |chunk| {
+            let _held = &guard;
+            chunk
+        })
+        .take_until(active.ended());
     Response::from_parts(parts, Body::from_stream(stream))
 }

@@ -287,3 +287,44 @@ async fn typed_start_errors_map_to_cast_codes_without_diagnostics() {
         assert_ne!(json["message"], "d", "provider diagnostics stay in the log");
     }
 }
+
+#[tokio::test]
+async fn stopping_a_cast_ends_its_open_stream_response() {
+    use futures::StreamExt;
+    let mut registry = ProviderRegistry::new();
+    registry.register(Arc::new(PacedFixtureProvider));
+    let mut app_state = state();
+    app_state.manager = StreamManager::new(registry);
+    app_state.networks = vec!["fix".into()];
+    let cast = Arc::new(CastService::new());
+    cast.set_http_bind("192.168.1.2:6878".parse().unwrap());
+    let app = router_with_services(app_state, None, Some(cast.clone()));
+    // The renderer is unreachable, so `stop` fails, but it still retires the stream URL.
+    let renderer = crate::cast::test_support::target("t1", "127.0.0.1:9".parse().unwrap());
+    let token = cast.insert_cast_for_test(renderer, "fix", "abc");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/cast/s/{token}.ts"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_secs(5), body.next())
+        .await
+        .expect("the live stream produces data");
+    assert!(first.is_some());
+    assert!(cast.stop("t1").await.is_err());
+    let drained = tokio::time::timeout(Duration::from_secs(2), async {
+        while body.next().await.is_some() {}
+    })
+    .await;
+    assert!(
+        drained.is_ok(),
+        "the response ends once the cast is stopped"
+    );
+}
