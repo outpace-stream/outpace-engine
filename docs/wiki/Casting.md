@@ -3,7 +3,7 @@
 Outpace can send a live stream to a DLNA/UPnP **media renderer** on your network: most smart
 TVs, many AV receivers and set-top boxes, and software renderers. The engine finds the
 renderers, then tells one to play a URL that the engine serves. The TV needs no app and no
-copied URL. Casting is in `edge` builds from `main`; it is off by default.
+copied URL. Casting is available from v1.2.0; it is off by default.
 
 Casting covers **live streams**. VOD files aren't supported yet.
 

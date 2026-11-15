@@ -55,8 +55,10 @@ The **Avail.** column shows where each setting is available:
   binary ignores these variables. See [Releases and Versions](Releases-and-Versions) for publication status.
 - **1.1.0**: v1.1.0 and later, also in `edge` and builds from `main`. Earlier releases ignore
   these variables.
+- **1.2.0**: v1.2.0 and later, also in `edge` and builds from `main`. Earlier releases ignore
+  these variables.
 - **srt build**: v1.0.0 and later, only in binaries built with the `srt` feature.
-- **edge**: current `main` and the `edge` image. Not in v1.1.0.
+- **edge**: current `main` and the `edge` image. Not in v1.2.0.
 
 ## Network and listeners
 
@@ -139,7 +141,7 @@ Off by default. See [Timeshift](Timeshift).
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_ENABLE_CAST` | `false` | boolean | edge | `1` or `true` adds the `/cast/*` routes for DLNA/UPnP media renderers. Discovery runs only when `GET /cast/targets` is called, and its result is cached for 60 seconds. `OUTPACE_BIND` must be reachable from the renderer. See [Casting](Casting). |
+| `OUTPACE_ENABLE_CAST` | `false` | boolean | 1.2.0 | `1` or `true` adds the `/cast/*` routes for DLNA/UPnP media renderers. Discovery runs only when `GET /cast/targets` is called, and its result is cached for 60 seconds. `OUTPACE_BIND` must be reachable from the renderer. See [Casting](Casting). |
 
 ## Broadcasting and ingest
 
@@ -178,7 +180,7 @@ See [Seeding and Peers](Seeding-and-Peers).
 | `OUTPACE_CACHE_DIR` | `<data dir>/cache` | directory | all | Disk cache root, used only with `disk`. Wiped at startup. It may be inside the data directory, but it must not be the data directory or contain it. |
 | `OUTPACE_SEED_STORE_BYTES` | `134217728` (128 MiB) | bytes | all | Ceiling on retained pieces **per stream** (not a total). In memory mode it is capped per platform (about 512 MiB on 32-bit, 8 GiB on 64-bit). It must hold at least one full piece of every broadcast you run. |
 | `OUTPACE_SEED_RETENTION_SECS` | `45` | seconds, `0` = byte cap only | all | For live streams, keep only about this many seconds of recent pieces, so memory follows the bitrate instead of filling the byte cap. VOD always uses the byte cap. |
-| `OUTPACE_VOD_DISK_RESERVE_BYTES` | `268435456` (256 MiB) | bytes, `0` = 5% margin only | edge | Free space a VOD download must leave on the cache filesystem with `disk`. See [VOD free-space check](#vod-free-space-check). |
+| `OUTPACE_VOD_DISK_RESERVE_BYTES` | `268435456` (256 MiB) | bytes, `0` = 5% margin only | 1.2.0 | Free space a VOD download must leave on the cache filesystem with `disk`. See [VOD free-space check](#vod-free-space-check). |
 
 ### How the disk cache wipe works
 
@@ -225,8 +227,8 @@ See [Outbound Proxy](Outbound-Proxy).
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_PROXY` | unset | `socks5://[user:password@]host:port` (`socks5h://` also accepted) | edge | SOCKS5 proxy for outgoing peer connections, UDP tracker announces and catalog/search requests. Catalog and search host names are resolved by the proxy; UDP tracker host names are still resolved locally. Never logged with its credentials. |
-| `OUTPACE_PROXY_MODE` | `off` | `off`, `on`, `fallback` | edge | `on` proxies from the start and turns inbound serving and port mapping off (setting either to `1` is an error). `fallback` stays direct until a live start finds no peers, or none connects within 10 seconds, then proxies engine-wide until restart. `on` and `fallback` require `OUTPACE_PROXY`. |
+| `OUTPACE_PROXY` | unset | `socks5://[user:password@]host:port` (`socks5h://` also accepted) | 1.2.0 | SOCKS5 proxy for outgoing peer connections, UDP tracker announces and catalog/search requests. Catalog and search host names are resolved by the proxy; UDP tracker host names are still resolved locally. Never logged with its credentials. |
+| `OUTPACE_PROXY_MODE` | `off` | `off`, `on`, `fallback` | 1.2.0 | `on` proxies from the start and turns inbound serving and port mapping off (setting either to `1` is an error). `fallback` stays direct until a live start finds no peers, or none connects within 10 seconds, then proxies engine-wide until restart. `on` and `fallback` require `OUTPACE_PROXY`. |
 
 While the proxy is active the DHT is off, the advertised listen port is `0` and there is no
 self-announce. UDP trackers use SOCKS5 `UDP ASSOCIATE` and are turned off if the proxy refuses it.
