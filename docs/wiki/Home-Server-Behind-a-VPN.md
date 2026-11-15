@@ -4,7 +4,7 @@ Run one engine on a home server, with its peer-to-peer traffic leaving through a
 from any device on the LAN: VLC on a laptop, or the [Android app](Android-App) on a phone or
 television using it as a remote engine. Client devices need no engine and no VPN of their own.
 
-| | |
+| Report | Details |
 | --- | --- |
 | **Source** | Outpace maintainers |
 | **Reported** | 2026-11-15 |

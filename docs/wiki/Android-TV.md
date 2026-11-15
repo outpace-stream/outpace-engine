@@ -3,7 +3,7 @@
 Sideload the [companion app](Android-App) onto an Android TV or Google TV set, let it download
 an engine for the television, and play streams from the remote in an installed player.
 
-| | |
+| Report | Details |
 | --- | --- |
 | **Source** | Outpace maintainers |
 | **Reported** | 2026-11-14 |

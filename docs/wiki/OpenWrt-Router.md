@@ -4,7 +4,7 @@ Run the engine on the home router, so every device on the LAN can play streams w
 or set-top box left on. The reporter's goal was LG and Samsung televisions, which cannot run
 the engine themselves.
 
-| | |
+| Report | Details |
 | --- | --- |
 | **Source** | [4PDA forum, Ace Stream \[Android\] thread](https://4pda.to/forum/lofiversion/index.php?t737440-14240.html), posts of 2026-10-30 and 2026-10-31 |
 | **Reported by** | 4PDA user blackwrist |
