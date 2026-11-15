@@ -70,14 +70,19 @@ emulator images, ChromeOS and x86 Android TV boxes. There is no 32-bit x86 build
 - These archives aren't covered by `SHA256SUMS`. Each has its own `<archive>.sha256` file.
 - These builds run on Android 5 and newer, without root.
 
-In Termux, `dpkg --print-architecture` prints `aarch64` for the 64-bit ARM build, `arm` for the
-32-bit one, or `x86_64` for the x86_64 one. For `arm`, set `target=armv7-linux-androideabi`; for
-`x86_64`, set `target=x86_64-linux-android`. Use a release that has that target:
+The commands below pick the target from `dpkg --print-architecture` in Termux: `aarch64` for
+64-bit ARM, `arm` for 32-bit ARM, or `x86_64`. Set `version` to a release that has that target;
+x86_64 needs a release after v1.2.1.
 
 ```bash
 pkg install curl
 version=1.2.1
-target=aarch64-linux-android
+case "$(dpkg --print-architecture)" in
+  aarch64) target=aarch64-linux-android ;;
+  arm) target=armv7-linux-androideabi ;;
+  x86_64) target=x86_64-linux-android ;;
+  *) echo "no Android build for this architecture" >&2; exit 1 ;;
+esac
 artifact="outpace-${version}-${target}.tar.gz"
 base="https://github.com/outpace-stream/outpace-engine/releases/download/v${version}"
 curl -LO "${base}/${artifact}" && curl -LO "${base}/${artifact}.sha256"
