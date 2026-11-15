@@ -66,8 +66,10 @@ running session with your other viewers and counts as one of the stream's client
 
 If `play` fails after the TV may already have acted on it, for example when the TV doesn't
 answer in time or drops the connection, Outpace sends the TV one `Stop` before it reports the
-error, which can add up to 5 seconds. Only a TV that answers with a UPnP error is taken at
-its word and left alone. The failed cast's stream URL stops working either way.
+error, which can add up to 5 seconds. A TV that refuses the stream URL itself (a UPnP error
+in answer to `SetAVTransportURI`) never started, so it gets no `Stop`; a UPnP error to `Play`
+still gets one, because the TV already has the URL. The failed cast's stream URL stops
+working either way.
 
 ## HTTP API
 
