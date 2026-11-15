@@ -40,5 +40,7 @@
 
 - [Use cases](Use-Cases)
 - [Android TV](Android-TV)
+- [OpenWrt Router](OpenWrt-Router)
+- [Home Server Behind a VPN](Home-Server-Behind-a-VPN)
 
 - [Android companion app](Android-App)
