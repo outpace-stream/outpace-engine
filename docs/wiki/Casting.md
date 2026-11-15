@@ -152,7 +152,7 @@ Errors carry `{"error":"<code>","message":"<text>"}`.
 | `502` | `renderer_unreachable`, `renderer_http_error`, `renderer_invalid` | The renderer didn't answer, answered with an HTTP error, or sent something Outpace won't accept. |
 | `502` | `network` | The catalog the stream id needs couldn't be reached. |
 | `503` | `discovery_failed` | The SSDP search couldn't be sent. |
-| `503` | `capacity_exhausted` | `OUTPACE_MAX_SESSIONS` is reached, or the catalog resolver is busy. Try again. |
+| `503` | `capacity_exhausted` | `OUTPACE_MAX_SESSIONS` is reached, the catalog resolver is busy, or 16 renderers are already casting. Stop one, or try again. |
 | `504` | `renderer_timeout` | The renderer didn't answer in time: 15 seconds for `play`, 5 seconds for `stop` and `status`. |
 
 ## Security and limits
@@ -174,7 +174,8 @@ untrusted:
 - Redirects are never followed.
 
 There is no background discovery. The engine searches only when `GET /cast/targets` asks it
-to, and remembers at most 16 renderers. A renderer you're casting to stays controllable with
+to, and remembers at most 16 renderers. At most 16 renderers can be casting at once; a `play`
+to another renderer is refused until one is stopped, and never cuts off a running cast. A renderer you're casting to stays controllable with
 `stop` and `status` even if a later search misses it.
 
 The `/cast/*` routes follow the same exposure rule as the other control routes: they are

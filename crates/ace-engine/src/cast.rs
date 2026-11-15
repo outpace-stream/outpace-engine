@@ -35,8 +35,10 @@ const SOAP_TIMEOUT: Duration = Duration::from_secs(5);
 /// `SetAVTransportURI` and `Play`: many renderers open and probe the stream URL before they
 /// answer, so this also covers the start of the stream body.
 const PLAYBACK_SOAP_TIMEOUT: Duration = Duration::from_secs(15);
-/// Renderers kept from one discovery, and so also the most concurrent casts.
+/// Renderers kept from one discovery.
 const MAX_TARGETS: usize = 16;
+/// Most concurrent casts. A new cast at this limit is refused, never made by evicting another.
+const MAX_CASTS: usize = MAX_TARGETS;
 
 /// Why a cast operation failed. Messages never carry renderer-supplied text beyond the
 /// sanitized UPnP fault description.
@@ -48,6 +50,8 @@ pub enum CastError {
     /// The bind address cannot be reached from an IPv4 renderer.
     UnsupportedBind,
     Discovery,
+    /// [`MAX_CASTS`] renderers are already casting.
+    Capacity,
     Unreachable,
     Timeout,
     Redirect,
@@ -69,6 +73,9 @@ impl fmt::Display for CastError {
                 f.write_str("OUTPACE_BIND is not reachable from an IPv4 renderer")
             }
             CastError::Discovery => f.write_str("ssdp search failed"),
+            CastError::Capacity => {
+                f.write_str("too many renderers are casting; stop one before casting to another")
+            }
             CastError::Unreachable => f.write_str("renderer unreachable"),
             CastError::Timeout => f.write_str("renderer timed out"),
             CastError::Redirect => f.write_str("renderer answered with a redirect"),
@@ -94,6 +101,7 @@ impl CastError {
             CastError::LoopbackBind => "loopback_bind",
             CastError::UnsupportedBind => "unsupported_bind",
             CastError::Discovery => "discovery_failed",
+            CastError::Capacity => "capacity_exhausted",
             CastError::Unreachable => "renderer_unreachable",
             CastError::Timeout => "renderer_timeout",
             CastError::Redirect
@@ -266,9 +274,20 @@ impl CastService {
         Ok(targets)
     }
 
-    /// Whether `id` names a renderer from the last discovery.
-    pub fn knows_target(&self, id: &str) -> bool {
-        self.target(id).is_ok()
+    /// Check, before any stream is started, that `id` is a known renderer and that casting to
+    /// it would not exceed [`MAX_CASTS`]. `play` checks again under the target's lock.
+    pub fn check_target(&self, id: &str) -> Result<(), CastError> {
+        self.target(id)?;
+        let state = self.state.lock().unwrap();
+        let full = state.casts.len() >= MAX_CASTS
+            && !state
+                .casts
+                .iter()
+                .any(|cast| cast.target == id || cast.token.is_empty());
+        if full {
+            return Err(CastError::Capacity);
+        }
+        Ok(())
     }
 
     /// The renderer `id` from the last discovery, or from its active cast.
@@ -345,7 +364,7 @@ impl CastService {
             connections: Arc::new(AtomicUsize::new(0)),
             renderer: target.clone(),
         };
-        let previous = self.replace_cast(cast.clone());
+        let previous = self.replace_cast(cast.clone())?;
         if previous.is_some() {
             // Some renderers refuse a new URI while playing; a failed Stop is not fatal.
             let _ = soap_call(
@@ -363,7 +382,7 @@ impl CastService {
                     // Renderers may check the stream's Content-Type too, so serve the new
                     // type before offering it.
                     cast.mime = mime;
-                    self.replace_cast(cast.clone());
+                    self.replace_cast(cast.clone())?;
                 }
                 set = soap_call(
                     &target,
@@ -459,18 +478,27 @@ impl CastService {
         Some((cast, guard))
     }
 
-    fn replace_cast(&self, cast: Cast) -> Option<Cast> {
+    /// Install `cast`, replacing the target's previous cast. At [`MAX_CASTS`] a new target is
+    /// refused rather than silently evicting another renderer's live cast; only a cast already
+    /// stopped (token retired, kept for a `Stop` retry) may make room.
+    fn replace_cast(&self, cast: Cast) -> Result<Option<Cast>, CastError> {
         let mut state = self.state.lock().unwrap();
         let previous = state
             .casts
             .iter()
             .position(|known| known.target == cast.target)
             .map(|at| state.casts.swap_remove(at));
-        if state.casts.len() >= MAX_TARGETS {
-            state.casts.remove(0);
+        if state.casts.len() >= MAX_CASTS {
+            let retired = state.casts.iter().position(|known| known.token.is_empty());
+            match retired {
+                Some(at) => {
+                    state.casts.swap_remove(at);
+                }
+                None => return Err(CastError::Capacity),
+            }
         }
         state.casts.push(cast);
-        previous
+        Ok(previous)
     }
 
     /// Make a cast's stream URL unusable while keeping its renderer for control. Returns
@@ -498,7 +526,7 @@ impl CastService {
     #[cfg(test)]
     pub(crate) fn insert_cast_for_test(&self, renderer: Target, network: &str, id: &str) -> String {
         let token = hex::encode(rand::random::<[u8; 16]>());
-        self.replace_cast(Cast {
+        let _ = self.replace_cast(Cast {
             target: renderer.id.clone(),
             token: token.clone(),
             network: network.to_string(),

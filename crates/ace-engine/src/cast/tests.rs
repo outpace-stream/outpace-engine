@@ -211,6 +211,41 @@ async fn a_failed_stop_retires_the_token_but_keeps_the_renderer_reachable() {
 }
 
 #[tokio::test]
+async fn a_new_cast_at_capacity_is_refused_instead_of_evicting_another() {
+    let cast = service("192.168.1.2:6878");
+    let unreachable = "127.0.0.1:9".parse().unwrap();
+    let tokens: Vec<String> = (0..MAX_CASTS)
+        .map(|n| {
+            let target = test_support::target(&format!("busy{n}"), unreachable);
+            cast.insert_cast_for_test(target, "ace", "x")
+        })
+        .collect();
+    cast.insert_target_for_test(test_support::target("new", unreachable));
+    assert_eq!(cast.check_target("new"), Err(CastError::Capacity));
+    assert_eq!(
+        cast.play("new", "ace", "x", "t").await.unwrap_err(),
+        CastError::Capacity
+    );
+    assert_eq!(CastError::Capacity.code(), "capacity_exhausted");
+    for token in &tokens {
+        assert!(
+            cast.open_stream(token).is_some(),
+            "no active cast was evicted"
+        );
+    }
+
+    // Replacing the cast of a target that is already casting is allowed at the limit.
+    let (addr, renderer) = fake_renderer(vec![(200, OK), (200, OK), (200, OK)]).await;
+    let replaced = cast.insert_cast_for_test(test_support::target("busy0", addr), "ace", "x");
+    assert!(cast.check_target("busy0").is_ok());
+    let started = cast.play("busy0", "ace", "y", "t").await.unwrap();
+    assert!(cast.open_stream(&replaced).is_none());
+    assert!(cast.open_stream(&started.token).is_some());
+    assert_eq!(renderer.await.unwrap().len(), 3);
+    assert_eq!(cast.state.lock().unwrap().casts.len(), MAX_CASTS);
+}
+
+#[tokio::test]
 async fn operations_on_one_target_are_serialized() {
     // The renderer answers the first SOAP call only after a delay; a stop sent meanwhile
     // must wait for the play sequence to finish instead of interleaving with it.

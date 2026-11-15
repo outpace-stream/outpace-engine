@@ -50,7 +50,7 @@ fn error_response(error: &CastError) -> Response {
     let status = match error {
         CastError::UnknownTarget => StatusCode::NOT_FOUND,
         CastError::LoopbackBind | CastError::UnsupportedBind => StatusCode::CONFLICT,
-        CastError::Discovery => StatusCode::SERVICE_UNAVAILABLE,
+        CastError::Discovery | CastError::Capacity => StatusCode::SERVICE_UNAVAILABLE,
         CastError::Timeout => StatusCode::GATEWAY_TIMEOUT,
         _ => StatusCode::BAD_GATEWAY,
     };
@@ -81,6 +81,8 @@ pub(super) fn stream_error(error: ProviderError) -> Response {
             (StatusCode::BAD_GATEWAY, "network")
         }
         ProviderError::DirectHls(_) => (StatusCode::UNPROCESSABLE_ENTITY, "origin_hls_unsupported"),
+        // VOD-only today; a live cast should not reach it, but keep its meaning if it does.
+        ProviderError::NoSpace(_) => (StatusCode::INSUFFICIENT_STORAGE, "no_space"),
         ProviderError::ProtectedContent
         | ProviderError::InvalidProtection
         | ProviderError::Unresolvable(_) => {
@@ -183,8 +185,8 @@ async fn play(s: &AppState, cast: &CastService, target: &str, body: Option<&[u8]
         Ok(id) => id.into_owned(),
         Err(reason) => return bad_request("invalid_id", reason),
     };
-    if !cast.knows_target(target) {
-        return error_response(&CastError::UnknownTarget);
+    if let Err(error) = cast.check_target(target) {
+        return error_response(&error);
     }
     // Start the shared session and hold a viewer on it while the renderer is told about it:
     // many renderers open the URL inside `SetAVTransportURI`, and should find it running.
