@@ -76,10 +76,10 @@ None of these start a stream. Use them for monitoring, never a playback URL.
 | `GET /healthz` | `ok` while the HTTP server runs. Liveness only: it doesn't prove peers or media. | all |
 | `GET /networks` | Provider networks, normally `{"networks":["ace"]}`. | all |
 | `GET /streams` | Active streams with their viewer count and metadata. | all |
-| `GET /streams/ace/<id>/status` | One stream: start `phase` and `error`, peers, bitrate, server buffer, upload, recovery counters, session occupancy. While starting, or shortly after a failed start, only `phase`, `error`, `clients` and `peers`. `404` when neither running nor recently started. | all |
+| `GET /streams/ace/<id>/status` | One stream: start `phase` and `error`, peers, bitrate, server buffer, upload, recovery counters, session occupancy, and `network_path` (`direct` or `proxy`, see [Outbound Proxy](Outbound-Proxy#checking-which-path-is-in-use)). While starting, or shortly after a failed start, only `phase`, `error`, `clients`, `peers` and `network_path`. `404` when neither running nor recently started. | all |
 | `GET /origin-hls/status` | Managed-relay state: `{"enabled":...,"active_sessions":...}`. | 1.0.0 |
 | `GET /support` | Support-source states. | 1.0.0 |
-| `GET /network-policy` | Public or private peer mode and allowlist size. | 1.0.0 |
+| `GET /network-policy` | Public or private peer mode and allowlist size. The `proxy` object (edge) shows the [outbound proxy](Outbound-Proxy) mode and current path. | 1.0.0 |
 | `GET /debug/memstats` | Allocator counters (live heap, resident) on 64-bit Linux and macOS builds. | all |
 | `GET /metrics` | Prometheus text metrics. Only when `OUTPACE_METRICS=1`, otherwise `404`. | 1.0.0 |
 | `GET /server/api?method=get_status` | `dl` or `idle`, plus `active_sessions`, `occupied_sessions` and `max_sessions`. Needs compat on. | all |

@@ -29,7 +29,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 /// The fixed Acestream chunk size (16 KiB) that the wire codec and every descriptor use.
 pub const DEFAULT_CHUNK_LENGTH: u64 = 16_384;
@@ -618,7 +617,7 @@ async fn fetch_catalog_transport_query(
         ),
     };
 
-    let mut stream = TcpStream::connect((host, port))
+    let mut stream = crate::proxy::connect_host(host, port)
         .await
         .map_err(|_| ResolveError::CatalogNetwork("catalog connect failed"))?;
     stream

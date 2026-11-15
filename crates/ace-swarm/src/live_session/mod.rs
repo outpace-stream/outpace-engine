@@ -32,7 +32,7 @@ use crate::store::PieceStore;
 use crate::types::StreamInfo;
 #[cfg(test)]
 use crate::types::StreamMetadata;
-use ace_peer::session::{connect, PeerSession};
+use ace_peer::session::PeerSession;
 #[cfg(test)]
 use ace_wire::extended::NodeFields;
 use ace_wire::extended::{

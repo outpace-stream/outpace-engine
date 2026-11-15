@@ -3,6 +3,9 @@ use ace_swarm::live_session::{follow_live, LiveCounters, LiveSeedOptions, LiveSe
 
 const INITIAL_DISCOVERY_BUDGET: Duration = Duration::from_secs(10);
 const EMPTY_DISCOVERY_RETRY_GAP: Duration = Duration::from_secs(1);
+/// `OUTPACE_PROXY_MODE=fallback`: how long a direct start may have candidates but no connected
+/// peer before new connections switch to the proxy.
+const FALLBACK_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 
 pub(super) struct AceSource {
     pub(super) metrics: Option<Arc<crate::live_stats::LiveMetrics>>,
@@ -196,6 +199,23 @@ impl AceProvider {
         let announce_port = self.announce_peer_port.clone();
         let reachability = self.reachability.clone();
         let private = self.peer_policy.is_private();
+        // `OUTPACE_PROXY_MODE=fallback`: candidates were found, but if no peer of this start
+        // connects at all within the window (a peer that connected and dropped still counts),
+        // switch new dials to the proxy. This start's first connection disarms it; other
+        // starts' connections don't. Armed before the worker is spawned so its first connection
+        // cannot be missed. The live loop keeps retrying candidates, so this start continues
+        // through the proxy without a restart. It holds no strong reference to the session,
+        // and does nothing once the session has ended.
+        if let Some(window) =
+            ace_swarm::proxy::fallback_connect_window(info.infohash, FALLBACK_CONNECT_WINDOW)
+        {
+            let session = Arc::downgrade(&peer_count);
+            tokio::spawn(async move {
+                if window.await && session.strong_count() > 0 {
+                    ace_swarm::proxy::engage_fallback();
+                }
+            });
+        }
         let worker = tokio::spawn(async move {
             // Run the download loop and the periodic seeder self-announce concurrently;
             // whichever ends first (normally `follow_live`, when the consumer drops) tears

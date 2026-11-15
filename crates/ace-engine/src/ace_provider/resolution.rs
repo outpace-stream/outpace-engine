@@ -154,9 +154,8 @@ impl AceProvider {
         for addr in all {
             let Ok(Ok(session)) = tokio::time::timeout(
                 CONNECT_TIMEOUT,
-                self.peer_policy.dial_with(addr, |endpoint| async move {
-                    connect(&endpoint.to_string()).await
-                }),
+                self.peer_policy
+                    .dial_with(addr, ace_swarm::proxy::connect_peer),
             )
             .await
             else {
@@ -630,9 +629,8 @@ impl AceProvider {
         for addr in all {
             let Ok(Ok(session)) = tokio::time::timeout(
                 CONNECT_TIMEOUT,
-                self.peer_policy.dial_with(addr, |endpoint| async move {
-                    connect(&endpoint.to_string()).await
-                }),
+                self.peer_policy
+                    .dial_with(addr, ace_swarm::proxy::connect_peer),
             )
             .await
             else {

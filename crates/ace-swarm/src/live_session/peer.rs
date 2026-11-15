@@ -115,9 +115,7 @@ async fn connect_upstream_inner(
     crate::alog!("[ace] discovery stage=tcp-attempt");
     let mut session = match tokio::time::timeout(
         CONNECT_TIMEOUT,
-        policy.dial_with(addr, |endpoint| async move {
-            connect(&endpoint.to_string()).await
-        }),
+        policy.dial_with(addr, crate::proxy::connect_peer),
     )
     .await
     {
@@ -148,6 +146,8 @@ async fn connect_upstream_inner(
     let Some((window, yourip, unchoked)) = read_peer_window(&mut session).await else {
         return Err(PeerConnectStage::Window);
     };
+    // Connection history for `OUTPACE_PROXY_MODE=fallback`; a no-op otherwise.
+    crate::proxy::note_live_peer_connected(&infohash);
     Ok(ConnectedUpstream {
         session,
         addr,

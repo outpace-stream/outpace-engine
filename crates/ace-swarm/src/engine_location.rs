@@ -23,6 +23,10 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// address schedule the single lookup, and only when an identity is installed without a
 /// location yet. Repeated echoes from one peer (reconnects, reactivations) count once.
 pub fn note_public_address(ip: IpAddr, peer: IpAddr) {
+    // Behind a proxy peers echo the proxy's address, and the lookup itself would go direct.
+    if crate::proxy::active().is_some() {
+        return;
+    }
     let Some(identity) = engine_profile::identity() else {
         return;
     };

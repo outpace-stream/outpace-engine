@@ -1,7 +1,7 @@
 //! Private VOD scheduling. Piece credits belong to the coordinator from assignment through
 //! ordered emission; workers own sockets and never hold a caller sender.
 use super::{verify_piece, PieceBuffer, VodError, VodInfo, VodTimeouts};
-use ace_peer::session::{connect, PeerSession};
+use ace_peer::session::PeerSession;
 use ace_wire::{handshake::random_peer_id, message::PeerMessage};
 use bytes::Bytes;
 use std::{
@@ -340,9 +340,7 @@ async fn run_worker(
     } = context;
     let session = tokio::time::timeout(
         timeouts.connect,
-        peer_policy.dial_with(address, |endpoint| async move {
-            connect(&endpoint.to_string()).await
-        }),
+        peer_policy.dial_with(address, crate::proxy::connect_peer),
     )
     .await
     .map_err(|_| Failure::Peer)?

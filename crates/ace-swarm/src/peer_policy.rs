@@ -83,7 +83,7 @@ impl PeerPolicy {
     /// Private nodes never accept inbound peers; advertise no listening port.
     pub(crate) fn node_fields(&self) -> ace_wire::extended::NodeFields {
         let mut fields = crate::engine_profile::node_fields();
-        if self.is_private() {
+        if self.is_private() || crate::proxy::active().is_some() {
             fields.p = 0;
         }
         fields

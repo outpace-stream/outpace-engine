@@ -3,9 +3,9 @@
 //! Plain HTTP only; responses are bounded and may be chunked and/or gzip-encoded.
 
 use crate::http_fetch::{self, FetchPolicy};
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 /// Why an engine-style request failed. Carries no URL or response data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,11 +32,21 @@ pub async fn get(
     timeout: Duration,
 ) -> Result<Vec<u8>, EngineHttpError> {
     tokio::time::timeout(timeout, async {
-        let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
-        let addr = http_fetch::resolve_addr(host, port, FetchPolicy::default(), cancel)
-            .await
-            .map_err(|_| EngineHttpError::Resolve)?;
-        let mut stream = TcpStream::connect(addr)
+        // Through the proxy a host name is resolved remotely and the local resolver never sees
+        // it (these are fixed service hosts, not operator or peer input). Otherwise resolve
+        // locally under the global-address policy and dial the checked address.
+        let resolved;
+        let target = if crate::proxy::active().is_some() && host.parse::<IpAddr>().is_err() {
+            host
+        } else {
+            let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+            let addr = http_fetch::resolve_addr(host, port, FetchPolicy::default(), cancel)
+                .await
+                .map_err(|_| EngineHttpError::Resolve)?;
+            resolved = addr.ip().to_string();
+            &resolved
+        };
+        let mut stream = crate::proxy::connect_host(target, port)
             .await
             .map_err(|_| EngineHttpError::Connect)?;
         let host_header = if port == 80 {

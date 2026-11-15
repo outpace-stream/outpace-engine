@@ -96,7 +96,9 @@ curl http://127.0.0.1:6878/network-policy
 #  "public_discovery":false,"public_advertising":false}
 ```
 
-In public mode this returns `{"mode":"public","allowed_peer_count":null}`. The compatibility
+In public mode this returns `{"mode":"public","allowed_peer_count":null}`. Both forms also carry
+a `proxy` object describing the [outbound proxy](Outbound-Proxy) mode and path, without its
+endpoint or credentials. The compatibility
 `get_status` reports the same. Neither shows the endpoints or file paths. Peer addresses are
 also hidden in private-mode logs.
 

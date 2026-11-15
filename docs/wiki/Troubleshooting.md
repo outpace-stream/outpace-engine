@@ -167,6 +167,13 @@ with `no_peers`:
 - **Outbound UDP** must work for the DHT and trackers (replies to outbound UDP must come back).
   Some firewalls and VPNs block this.
 - **Outbound TCP** to arbitrary ports must work to reach peers.
+- **Peer-to-peer blocked on this network?** If the same stream plays from another network,
+  route Outpace's own connections through a SOCKS5 proxy with
+  `OUTPACE_PROXY` and `OUTPACE_PROXY_MODE=on` or `fallback`. See [Outbound Proxy](Outbound-Proxy).
+- **Proxy already on?** Check `network_path` in the stream's `/status`, and look for
+  `[proxy] proxy unusable` or `proxy does not support UDP ASSOCIATE` in the log. Without
+  `UDP ASSOCIATE` support and with the DHT off, a proxied start has fewer ways to find peers;
+  bootstrap peers (`OUTPACE_ACE_PEERS`) help.
 - `422` with code `unresolvable`: the id couldn't be resolved. For `ih:` infohashes, Outpace
   needs a verified descriptor; try the content id instead.
 - Compat `502 stream start failed`: resolution or discovery failed. Compat `422 stream
@@ -196,6 +203,8 @@ Work through these:
    `timeout 8 bash -c 'echo > /dev/tcp/<public-ip>/8621' && echo open`.
 5. A `WARNING ... likely double-NAT / CGNAT` line means your ISP's NAT is in the way.
 6. VPN or WARP? See [NAT and Port Mapping](NAT-and-Port-Mapping#vpns-and-cloudflare-warp).
+7. Outbound proxy active? Nothing is advertised then; see
+   [NAT and Port Mapping](NAT-and-Port-Mapping#through-a-proxy).
 
 Playback doesn't need inbound peers. You can also run download-only
 (`OUTPACE_ENABLE_INBOUND=0`).

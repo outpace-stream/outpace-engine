@@ -62,6 +62,9 @@ build.
 
 - [Casting](Casting): with `OUTPACE_ENABLE_CAST=1`, the engine finds DLNA/UPnP renderers on
   the LAN and tells one to play a live stream (`/cast/*` routes). Off by default.
+- An optional SOCKS5 [outbound proxy](Outbound-Proxy) for peer, tracker and catalog
+  connections (`OUTPACE_PROXY`, `OUTPACE_PROXY_MODE`), off by default. Stream status reports the
+  active path as `network_path`.
 
 ## v1.1.0 changes
 

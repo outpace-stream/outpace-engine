@@ -108,6 +108,7 @@ pub(super) async fn stream_status(
                 "occupied_sessions": s.manager.admission_status().0,
                 "max_sessions": s.manager.admission_status().1,
                 "peers": stats.peers,
+                "network_path": ace_swarm::proxy::path(),
                 "bitrate": stats.bitrate,
                 "livepos": native_live_position_json(stats.livepos.as_ref()),
                 "recovery": stats.recovery,
@@ -127,6 +128,7 @@ pub(super) async fn stream_status(
                 "error": attempt.error().map(StartError::to_json),
                 "clients": 0,
                 "peers": 0,
+                "network_path": ace_swarm::proxy::path(),
             }))
             .into_response(),
             None => StatusCode::NOT_FOUND.into_response(),

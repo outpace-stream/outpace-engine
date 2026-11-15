@@ -307,6 +307,12 @@ pub fn config_from_env() -> Result<Config, Box<dyn std::error::Error>> {
     if let Some(v) = bool_from_env("OUTPACE_ENABLE_CAST")? {
         config.enable_cast = v;
     }
+    config.proxy = crate::outbound_proxy::settings_from_env()?;
+    crate::outbound_proxy::normalize_proxy_env(
+        &mut config,
+        bool_from_env("OUTPACE_ENABLE_INBOUND")?,
+        bool_from_env("OUTPACE_ENABLE_PORT_MAPPING")?,
+    )?;
     // Preserve presence: explicit public-network settings conflict, implicit defaults normalize.
     let private_peers = optional_private_env("OUTPACE_PRIVATE_PEERS")?;
     let private_descriptors = optional_private_env("OUTPACE_PRIVATE_DESCRIPTORS")?;
@@ -745,6 +751,7 @@ pub async fn build_runtime(
     let srt_config = config.srt.prepare(cfg!(feature = "srt"))?;
     config.support_sources.validate(&config)?;
     crate::private_network::validate_private_config(&config, &bootstrap_peers)?;
+    crate::outbound_proxy::validate_proxy_config(&config)?;
     // Validate the complete ordered map before normalizer, filesystem, identity, or
     // runtime side effects, including when Config was constructed directly in Rust.
     let source_policy = FetchPolicy {
@@ -774,6 +781,8 @@ pub async fn build_runtime(
     // Signed handshakes advertise the port we actually listen on (`p`), not a constant.
     ace_swarm::engine_profile::set_listen_port(config.peer_listen.port());
     crate::engine_identity::apply(&config)?;
+    // Before any provider, listener or announcer opens a socket.
+    ace_swarm::proxy::install(&config.proxy);
 
     // Fail fast on a misconfigured disk cache, and start from a clean slate: wipe the cache root
     // so per-infohash dirs orphaned by a hard crash (no `Drop` ran) don't survive a restart. The
