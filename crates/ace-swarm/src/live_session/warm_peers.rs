@@ -15,6 +15,11 @@ const HEADER: &str = "OUTPACE-WARM-1\n";
 // Only the unix store persists hints; other platforms keep them in memory.
 #[cfg_attr(not(unix), allow(dead_code))]
 const FILE: &str = "recent-peers-v1";
+/// Hang guard for tests that wait on the writer thread's real disk I/O (load, or a durable
+/// write with two fsyncs). It bounds a stuck writer only: a slow disk is not a failure, and
+/// every wait it bounds is woken by the writer itself, so success never costs this long.
+#[cfg(test)]
+const TEST_IO_DEADLINE: Duration = Duration::from_secs(30);
 #[derive(Clone, Copy)]
 struct Entry {
     addr: SocketAddrV4,
@@ -317,7 +322,7 @@ impl WarmPeerCache {
             state.revision
         };
         self.0.shared.wake.notify_one();
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(TEST_IO_DEADLINE, async {
             loop {
                 let notified = self.0.shared.changed.notified();
                 tokio::pin!(notified);
@@ -802,7 +807,7 @@ mod secure {
 #[cfg(test)]
 pub(super) async fn fixture_loaded(cache: &WarmPeerCache) {
     assert!(
-        cache.wait_loaded(Duration::from_secs(2)).await,
+        cache.wait_loaded(TEST_IO_DEADLINE).await,
         "cache fixture initial load must finish"
     );
 }
@@ -810,7 +815,7 @@ pub(super) async fn fixture_loaded(cache: &WarmPeerCache) {
 #[cfg(test)]
 pub(super) async fn retired_terminal(path: &Path) -> bool {
     let identity = normalize(path).unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(TEST_IO_DEADLINE, async {
         loop {
             {
                 let mut slots = registry().lock().unwrap();
@@ -842,7 +847,7 @@ mod tests {
     async fn writer_observation(
         receiver: &std::sync::mpsc::Receiver<WriterObservation>,
     ) -> WriterObservation {
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(TEST_IO_DEADLINE, async {
             loop {
                 if let Ok(event) = receiver.try_recv() {
                     return event;
@@ -1046,12 +1051,14 @@ mod tests {
             );
             // Also exercise mkdirat through a search-only ancestor.
             for path in [existing.clone(), existing.join("new").join("cache")] {
+                // One snapshot: `valid()` stamps the current second, which a slow fsync can cross.
+                let snapshot = valid();
                 let directory = secure::Directory::open(&path)?;
-                directory.write(&valid())?;
-                assert_eq!(directory.read()?, valid());
+                directory.write(&snapshot)?;
+                assert_eq!(directory.read()?, snapshot);
                 drop(directory);
                 let reopened = secure::Directory::open(&path)?;
-                assert_eq!(reopened.read()?, valid());
+                assert_eq!(reopened.read()?, snapshot);
             }
             Ok(())
         })();
@@ -1109,8 +1116,10 @@ mod tests {
             secure::Directory::open(&root).is_err(),
             "directory inode lock must reject alias writers"
         );
-        directory.write(&valid()).unwrap();
-        assert_eq!(directory.read().unwrap(), valid());
+        // One snapshot: `valid()` stamps the current second, which a slow fsync can cross.
+        let snapshot = valid();
+        directory.write(&snapshot).unwrap();
+        assert_eq!(directory.read().unwrap(), snapshot);
         assert_eq!(
             std::fs::metadata(root.join(FILE))
                 .unwrap()
