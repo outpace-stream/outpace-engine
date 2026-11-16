@@ -1,7 +1,7 @@
 name: Android best-effort
 
-# The Android engine builds (aarch64 and armv7, used by Termux and by the Android app in
-# outpace-stream/outpace-android) are best-effort targets: checked here, and uploaded by
+# The Android engine builds (aarch64, armv7 and x86_64, used by Termux and by the Android app
+# in outpace-stream/outpace-android) are best-effort targets: checked here, and uploaded by
 # release.yml only after the release and image are published.
 on:
   pull_request:
@@ -29,7 +29,8 @@ jobs:
       fail-fast: false
       matrix:
         # armeabi-v7a matters: many Android TV devices run a 32-bit userland on 64-bit chips.
-        target: [aarch64-linux-android, armv7-linux-androideabi]
+        # x86_64 covers emulator images, ChromeOS and Intel/AMD Android TV boxes (#505).
+        target: [aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android]
     env:
       TARGET: ${{ matrix.target }}
     steps:
@@ -45,7 +46,8 @@ jobs:
           cache: false
           build-warnings: ""
 
-      # NDK with the default API level (21, Android 5), and a QEMU user-mode runner.
+      # NDK with the default API level (21, Android 5), and a QEMU user-mode runner for ARM
+      # (x86_64 runs natively against the action's Android system image).
       - name: Install Android cross toolchain
         uses: taiki-e/setup-cross-toolchain-action@v1
         with:

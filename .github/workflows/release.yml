@@ -285,7 +285,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [aarch64-linux-android, armv7-linux-androideabi]
+        target: [aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android]
     env:
       TARGET: ${{ matrix.target }}
     steps:

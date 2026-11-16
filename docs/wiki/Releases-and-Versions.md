@@ -71,6 +71,9 @@ A patch release with no new features or default changes:
   by one `Stop`, and the stream the TV has open ends when its cast is stopped, fails or is
   replaced, so a failed cast no longer leaves the TV playing (#497, #498). A failed `play` can
   take up to 5 seconds longer to answer.
+- A best-effort `x86_64-linux-android` archive was attached after publication, for x86_64
+  emulator images, ChromeOS and Intel or AMD Android TV boxes (#505). See
+  [Installation](Installation#android-with-termux-best-effort) and [Android App](Android-App).
 
 ## v1.2.0 changes
 
