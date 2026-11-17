@@ -84,6 +84,13 @@ sudo systemctl enable --now outpace
 journalctl -u outpace -f     # look for "listening on http://192.168.1.2:6878"
 ```
 
+`enable --now` starts the service only if it isn't running yet. If Outpace was already running,
+for example after an upgrade or an earlier setup, restart it so it reads the new settings:
+
+```sh
+sudo systemctl restart outpace
+```
+
 From another machine on the LAN:
 
 ```sh
