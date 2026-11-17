@@ -41,6 +41,7 @@
 - [Success stories](Success-Stories)
 - [Android TV](Android-TV)
 - [OpenWrt Router](OpenWrt-Router)
+- [NanoPi Zero2 with DietPi](NanoPi-Zero2-DietPi)
 - [Home Server Behind a VPN](Home-Server-Behind-a-VPN)
 - [Test Retransmission](Test-Retransmission)
 
