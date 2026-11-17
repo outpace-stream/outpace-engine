@@ -7,7 +7,9 @@ Every Markdown link whose target has no URL scheme is treated as a wiki page
 link: `[text](Page-Name)` or `[text](Page-Name#anchor)` or `[text](#anchor)`.
 The page must exist as `<Page-Name>.md` in WIKI_DIR, and the anchor must match
 a heading slug on that page (GitHub style: lowercase, punctuation dropped,
-spaces to hyphens). Fenced code blocks are ignored. `[[wiki-style]]` links are
+spaces to hyphens). A target with a path separator or a file extension, such
+as an image `![alt](images/page/picture.jpg)`, is a file instead: it must exist
+inside WIKI_DIR, which the publish workflow copies to the wiki as is. Fenced code blocks are ignored. `[[wiki-style]]` links are
 rejected so the folder keeps one link syntax that also renders on github.com.
 
 Exits non-zero when any link is broken.
@@ -15,6 +17,7 @@ Exits non-zero when any link is broken.
 
 import re
 import sys
+from urllib.parse import unquote
 from pathlib import Path
 
 FENCE = re.compile(r"^```.*?^```", re.S | re.M)
@@ -22,6 +25,7 @@ HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$", re.M)
 LINK = re.compile(r"\[([^\]]*)\]\(([^)\s]+)\)")
 WIKI_LINK = re.compile(r"\[\[[^\]]+\]\]")
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+FILE_EXTENSION = re.compile(r"\.[A-Za-z0-9]+$")
 
 
 def slug(heading: str) -> str:
@@ -47,6 +51,15 @@ def main() -> int:
             if SCHEME.match(target) or target.startswith(("<", "/")):
                 continue
             page, _, anchor = target.partition("#")
+            page = unquote(page.partition("?")[0])
+            if page not in pages and ("/" in page or FILE_EXTENSION.search(page)):
+                path = (root / page).resolve()
+                if not path.is_relative_to(root.resolve()) or not path.is_file():
+                    errors.append(f"{name}.md: link to missing file {target!r}")
+                elif anchor and path.suffix == ".md" and path.parent == root.resolve():
+                    if path.stem in pages and anchor not in anchors[path.stem]:
+                        errors.append(f"{name}.md: link to missing anchor {target!r}")
+                continue
             page = page or name
             if page not in pages:
                 errors.append(f"{name}.md: link to missing page {target!r}")

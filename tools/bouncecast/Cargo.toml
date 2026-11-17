@@ -1,0 +1,22 @@
+[package]
+name = "bouncecast"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Synthetic 24/7 test feed: the Outpace logo bouncing over an animated fractal"
+
+[[bin]]
+name = "bouncecast"
+path = "src/main.rs"
+
+[features]
+# GPU rendering via wgpu (Vulkan). Off by default: it is a large dependency, and GPU drivers
+# are loaded at runtime, so a GPU build cannot be a static musl binary.
+gpu = ["dep:wgpu", "dep:pollster"]
+
+[dependencies]
+png = "0.18"
+wgpu = { version = "30.0.2", optional = true, default-features = false, features = ["vulkan", "wgsl"] }
+pollster = { version = "1.0.1", optional = true }
