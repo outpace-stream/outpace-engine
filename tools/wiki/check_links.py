@@ -56,8 +56,8 @@ def main() -> int:
                 path = (root / page).resolve()
                 if not path.is_relative_to(root.resolve()) or not path.is_file():
                     errors.append(f"{name}.md: link to missing file {target!r}")
-                elif anchor and path.parent == root.resolve() and path.stem in pages:
-                    if anchor not in anchors[path.stem]:
+                elif anchor and path.suffix == ".md" and path.parent == root.resolve():
+                    if path.stem in pages and anchor not in anchors[path.stem]:
                         errors.append(f"{name}.md: link to missing anchor {target!r}")
                 continue
             page = page or name
