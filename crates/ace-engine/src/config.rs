@@ -515,6 +515,10 @@ config_with_root_redaction! {
     pub enable_cast: bool,
     /// Allow the outpace raw-transport-hash BEP-9 content-id fallback. Defaults off.
     pub bep9_content_id_fallback: bool,
+    /// Register each public broadcast's transport with the AceStream catalog, as the original
+    /// engine does on request, so its catalog `acestream://` id plays on stock clients. Sends the
+    /// transport to the catalog operator. Off by default. `OUTPACE_BROADCAST_CATALOG_REGISTER`.
+    pub broadcast_catalog_register: bool,
     /// Immutable per-name origination profiles, applied only at identity admission.
     #[serde(deserialize_with = "crate::broadcast_options::deserialize_broadcast_options")]
     pub broadcast_options: BTreeMap<String, crate::broadcast_options::BroadcastOptions>,
@@ -587,6 +591,7 @@ impl Default for Config {
             enable_cast: false,
             metrics: false,
             bep9_content_id_fallback: false,
+            broadcast_catalog_register: false,
             broadcast_options: BTreeMap::new(),
             broadcast_sources: BTreeMap::new(),
             allow_non_global_broadcast_source: false,

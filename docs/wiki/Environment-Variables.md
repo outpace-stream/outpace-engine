@@ -30,6 +30,7 @@ See [Releases and Versions](Releases-and-Versions) for publication status.
 | [`OUTPACE_BEP9_CONTENT_ID_FALLBACK`](Configuration#discovery-trackers-and-resolution) | `false` | all | Resolve content ids from peer metadata when the catalog fails. |
 | [`OUTPACE_BIND`](Configuration#network-and-listeners) | `127.0.0.1:6878` | all | HTTP API address. The container sets `0.0.0.0:6878`. [Casting](Casting) needs a LAN address. |
 | [`OUTPACE_BROADCAST_OPTIONS`](Configuration#broadcasting-and-ingest) | `{}` | all | Per-broadcast metadata profiles (JSON). |
+| [`OUTPACE_BROADCAST_CATALOG_REGISTER`](Configuration#broadcasting-and-ingest) | `false` | all | Register public broadcasts with the AceStream catalog. |
 | [`OUTPACE_BROADCAST_SOURCES`](Configuration#broadcasting-and-ingest) | `{}` | all | HTTP(S) MPEG-TS pull sources started at boot (JSON). Treat as a secret. |
 | [`OUTPACE_CACHE_DIR`](Configuration#storage-and-cache) | `<data dir>/cache` | all | Disk-cache root. Wiped at startup. |
 | [`OUTPACE_CACHE_TYPE`](Configuration#storage-and-cache) | `memory` | all | Where seeding pieces are kept: `memory` or `disk`. |

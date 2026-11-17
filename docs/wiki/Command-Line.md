@@ -68,7 +68,8 @@ Rules for these inputs:
 - Transport-file URLs are fetched over HTTP(S) with a 1 MiB limit, no redirects, and a time
   limit. Private and loopback hosts are refused unless `OUTPACE_ALLOW_NON_GLOBAL_TRANSPORT=1`.
 - The `acestream://` link of a broadcast made by **another** Outpace daemon needs
-  `OUTPACE_BEP9_CONTENT_ID_FALLBACK=1`.
+  `OUTPACE_BEP9_CONTENT_ID_FALLBACK=1`, unless you play its catalog link instead (see
+  [registering with the catalog](Broadcasting#registering-with-the-acestream-catalog)).
 
 - `play` rejects duplicate query keys and the file-selection options `_idx` and `stream_id`.
 
@@ -101,7 +102,9 @@ On standard error it prints:
 
 - the raw HTTP ingest URL, `http://<host>:<port>/broadcast/<name>`;
 - the RTMP ingest URL, `rtmp://<host>:<port>/live/<name>`;
-- the broadcast's `acestream://` link.
+- the broadcast's `acestream://` link (the descriptor hash);
+- with `OUTPACE_BROADCAST_CATALOG_REGISTER=1`, a note that the catalog link follows in the log
+  once [registration](Broadcasting#registering-with-the-acestream-catalog) succeeds.
 
 The command:
 

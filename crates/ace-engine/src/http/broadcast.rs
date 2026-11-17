@@ -64,6 +64,11 @@ pub(super) async fn broadcast_ingest(
     };
     let infohash = infohash_hex(&bc.infohash);
     let content_id = infohash_hex(&bc.content_id);
+    // Null until opt-in catalog registration has succeeded (it runs in the background).
+    let catalog_content_id = bs
+        .registry
+        .catalog_content_id(&bc.content_id)
+        .map(|id| infohash_hex(&id));
     let task_name = name.clone();
     let registered = bs
         .registry
@@ -108,7 +113,13 @@ pub(super) async fn broadcast_ingest(
     if let Err(error) = registered {
         return broadcast_error(error);
     }
-    Json(json!({ "name": name, "content_id": content_id, "infohash": infohash })).into_response()
+    Json(json!({
+        "name": name,
+        "content_id": content_id,
+        "infohash": infohash,
+        "catalog_content_id": catalog_content_id,
+    }))
+    .into_response()
 }
 
 pub(super) async fn broadcast_delete(

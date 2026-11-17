@@ -257,6 +257,12 @@ async fn run_broadcast(args: BroadcastArgs) -> Result<(), Box<dyn std::error::Er
             runtime.config.peer_listen,
         )
     );
+    if runtime.config.broadcast_catalog_register {
+        eprintln!(
+            "Catalog registration: on. The catalog acestream:// link for stock AceStream clients \
+             is logged as \"[broadcast] {name}: catalog content id ...\" once registered."
+        );
+    }
 
     crate::runtime::serve_http(runtime).await
 }
