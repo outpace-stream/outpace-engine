@@ -434,8 +434,10 @@ fn run() -> Result<(), String> {
         if args.frames.is_some_and(|max| n >= max) {
             break Ok(());
         }
-        // The scene clock is the frame count, so output timestamps and motion always agree.
-        let t = n as f32 * dt;
+        // The scene clock is the frame count, so output timestamps and motion always agree. It
+        // wraps daily in integers first: past about 100 days, `n as f32` would step 32 frames
+        // at a time and the fractal would stutter.
+        let t = (n % (86_400 * args.fps as u64)) as f32 * dt;
         let t0 = Instant::now();
         let overlay = Overlay {
             life: &life,
@@ -445,8 +447,7 @@ fn run() -> Result<(), String> {
             tint: bouncer.tint,
             flash,
         };
-        // Wrap the fractal clock so f32 keeps enough precision over months of uptime.
-        if let Err(e) = renderer.render(t % 86_400.0, &overlay, &mut frame) {
+        if let Err(e) = renderer.render(t, &overlay, &mut frame) {
             break Err(e);
         }
         render_time += t0.elapsed();

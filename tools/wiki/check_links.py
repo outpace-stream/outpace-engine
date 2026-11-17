@@ -51,6 +51,7 @@ def main() -> int:
             if SCHEME.match(target) or target.startswith(("<", "/")):
                 continue
             page, _, anchor = target.partition("#")
+            page = page.partition("?")[0]
             if "/" in page or FILE_EXTENSION.search(page):
                 path = (root / unquote(page)).resolve()
                 if not path.is_relative_to(root.resolve()) or not path.is_file():
