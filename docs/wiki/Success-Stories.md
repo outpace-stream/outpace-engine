@@ -10,6 +10,7 @@ adapting it follow.
 | [Android TV](Android-TV) | the television, through the companion app | the same television (VLC) | Maintainers, TCL 55T69C |
 | [OpenWrt Router](OpenWrt-Router) | the home router | LG and Samsung televisions on the LAN | 4PDA user, ASUS TUF-AX6000 |
 | [Home Server Behind a VPN](Home-Server-Behind-a-VPN) | a Proxmox container with a VPN, or any Linux machine | VLC and the Android app on any LAN device | Maintainers, Proxmox VE |
+| [Test Retransmission](Test-Retransmission) | a Proxmox container that broadcasts a generated 24/7 test signal | stock AceStream clients anywhere, by catalog id | Maintainers, Proxmox VE with a Radeon 780M |
 
 Which one fits:
 
@@ -18,6 +19,8 @@ Which one fits:
 - **An always-on server, several viewers, traffic through a VPN:**
   [Home Server Behind a VPN](Home-Server-Behind-a-VPN). Televisions and phones then use it as a
   remote engine.
+- **Broadcasting your own always-on stream to the whole network:**
+  [Test Retransmission](Test-Retransmission).
 
 The shared details live in [Installation](Installation), [Deployment](Deployment) and
 [Playing Streams](Playing-Streams).

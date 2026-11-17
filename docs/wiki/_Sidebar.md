@@ -42,5 +42,6 @@
 - [Android TV](Android-TV)
 - [OpenWrt Router](OpenWrt-Router)
 - [Home Server Behind a VPN](Home-Server-Behind-a-VPN)
+- [Test Retransmission](Test-Retransmission)
 
 - [Android companion app](Android-App)
