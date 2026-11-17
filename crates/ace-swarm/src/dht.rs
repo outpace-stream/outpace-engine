@@ -221,8 +221,9 @@ struct DhtWalkMetrics {
     uncorrelated_responses: usize,
     /// Queries whose slot timeout elapsed without any datagram at all from that node.
     timeouts: usize,
-    /// Queries sent by the one dead-end recovery round (#494): a fresh `get_peers` to each
-    /// bootstrap router that never answered, and a random-target `find_node` to each that did.
+    /// Queries sent by the one dead-end recovery round (#494), which runs only when the
+    /// frontier runs dry before any peer was found: a fresh `get_peers` to each bootstrap
+    /// router that never answered, and a random-target `find_node` to each that did.
     recovery_queries: usize,
     /// Peer records harvested after the recovery round started.
     recovery_peers: usize,
@@ -535,11 +536,20 @@ async fn dht_walk_owned(
             }
         }
 
-        if active == 0 && lookups.is_empty() && recovery_started_at.is_none() {
-            // The frontier ran dry inside the budget, usually because the routers' first
-            // referrals were all silent (#494). Once per walk, ask every bootstrap address
-            // again: a fresh `get_peers` where the first query got no answer, and a
-            // random-target `find_node` where it did, for a different set of nodes.
+        if active == 0
+            && lookups.is_empty()
+            && recovery_started_at.is_none()
+            && metrics.peers_discovered == 0
+        {
+            // The frontier ran dry inside the budget without a single peer, usually because
+            // the routers' first referrals were all silent (#494). Once per walk, ask every
+            // bootstrap address again: a fresh `get_peers` where the first query got no
+            // answer, and a random-target `find_node` where it did, for a different set of
+            // nodes. A walk that already holds peers ends as before: on a sparse swarm the
+            // round found nothing new and only made the walk longer. `peers_discovered` only
+            // counts correlated replies, so spoofed traffic can neither start nor suppress
+            // the round. `dht_announce_peer` walks follow the same rule; they run in the
+            // background, so the extra round costs them nothing visible.
             recovery_started_at = Some(metrics.peers_discovered);
             for node in bootstraps.iter().take(MAX_ACTIVE) {
                 if Instant::now() >= deadline {
@@ -580,7 +590,7 @@ async fn dht_walk_owned(
             }
             if active > 0 {
                 crate::alog!(
-                    "[dht] frontier dry after queried={}: recovery round sent {}",
+                    "[dht] frontier dry with no peers after queried={}: recovery round sent {}",
                     queried.len(),
                     metrics.recovery_queries
                 );
@@ -2434,6 +2444,35 @@ mod tests {
         assert_eq!(metrics.nodes_queried, 2);
         assert_eq!(metrics.recovery_queries, 1);
         assert!(metrics.uncorrelated_responses > 0);
+    }
+
+    #[tokio::test]
+    async fn walk_that_runs_dry_holding_peers_skips_the_recovery_round() {
+        // A sparse swarm: the router hands over one peer (below the target) and nothing
+        // else. The walk already has a result, so it ends at once instead of asking again.
+        let router_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let router = v4_addr(&router_sock);
+        let peer: SocketAddrV4 = "10.0.0.6:6666".parse().unwrap();
+        let (router_task, asked) = scripted_router(router_sock, move |_, _, txid| {
+            Some(response_with(txid, &[peer], &[]))
+        });
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &[0; 20],
+            Duration::from_secs(10),
+            &client,
+            vec![router],
+            |_, _| false,
+        )
+        .await;
+        let elapsed = start.elapsed();
+        router_task.abort();
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        assert_eq!(metrics.peers_discovered, 1);
+        assert_eq!(metrics.recovery_queries, 0);
+        assert!(metrics.frontier_exhausted);
+        assert!(elapsed < Duration::from_millis(300), "took {elapsed:?}");
     }
 
     #[tokio::test]
