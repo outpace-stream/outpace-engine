@@ -178,7 +178,7 @@ The HTTP API has no authentication, so keep it on `127.0.0.1` or behind a proxy.
 | Replace an existing AceStream engine | [Migrating](https://github.com/outpace-stream/outpace-engine/wiki/Migrating-from-AceStream-Engine) |
 | Publish your own stream | [Broadcasting](https://github.com/outpace-stream/outpace-engine/wiki/Broadcasting) |
 | Fix a problem | [Troubleshooting](https://github.com/outpace-stream/outpace-engine/wiki/Troubleshooting) |
-| See it running on a TV, a router or a home server | [Success stories](https://github.com/outpace-stream/outpace-engine/wiki/Success-Stories) |
+| See it running on a TV, a router, a single-board computer or a home server | [Success stories](https://github.com/outpace-stream/outpace-engine/wiki/Success-Stories) |
 
 The [user wiki](https://github.com/outpace-stream/outpace-engine/wiki) is generated from
 [`docs/wiki/`](docs/wiki); edit it there.

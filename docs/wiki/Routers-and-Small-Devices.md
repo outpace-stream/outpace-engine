@@ -109,3 +109,4 @@ firewall carefully: keep the API on `127.0.0.1` and open only the peer port.
 - [Deployment](Deployment): systemd, Docker Compose and reverse proxies.
 - [NAT and Port Mapping](NAT-and-Port-Mapping): making the peer port reachable.
 - [OpenWrt Router](OpenWrt-Router): a reported setup on an ASUS TUF-AX6000.
+- [NanoPi Zero2 with DietPi](NanoPi-Zero2-DietPi): a reported single-board computer setup under systemd.
