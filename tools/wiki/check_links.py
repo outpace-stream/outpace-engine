@@ -51,11 +51,14 @@ def main() -> int:
             if SCHEME.match(target) or target.startswith(("<", "/")):
                 continue
             page, _, anchor = target.partition("#")
-            page = page.partition("?")[0]
-            if "/" in page or FILE_EXTENSION.search(page):
-                path = (root / unquote(page)).resolve()
+            page = unquote(page.partition("?")[0])
+            if page not in pages and ("/" in page or FILE_EXTENSION.search(page)):
+                path = (root / page).resolve()
                 if not path.is_relative_to(root.resolve()) or not path.is_file():
                     errors.append(f"{name}.md: link to missing file {target!r}")
+                elif anchor and path.parent == root.resolve() and path.stem in pages:
+                    if anchor not in anchors[path.stem]:
+                        errors.append(f"{name}.md: link to missing anchor {target!r}")
                 continue
             page = page or name
             if page not in pages:
