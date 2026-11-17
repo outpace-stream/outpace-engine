@@ -995,7 +995,9 @@ impl InfohashIndex {
 }
 
 fn decode_hex20(hex: &str) -> Option<[u8; 20]> {
-    if hex.len() != 40 {
+    // ASCII first: byte-offset slicing below would panic inside a multi-byte character, and
+    // callers pass text from catalog replies.
+    if hex.len() != 40 || !hex.is_ascii() {
         return None;
     }
     let mut out = [0u8; 20];
@@ -1962,6 +1964,17 @@ mod tests {
         let info = stream_info_from_transport(&transport).unwrap();
         assert_eq!(info.piece_length, 65_536);
         assert_eq!(info.trackers, ["http://tracker.example.invalid/announce"]);
+    }
+
+    #[test]
+    fn decode_hex20_rejects_non_ascii_without_panicking() {
+        let placeholder = "0123456789abcdef0123456789abcdef01234567";
+        assert!(decode_hex20(placeholder).is_some());
+        // 40 bytes of UTF-8, but a multi-byte character straddles a two-byte boundary.
+        let wide = format!("\u{20ac}{}", "0".repeat(37));
+        assert_eq!(wide.len(), 40);
+        assert_eq!(decode_hex20(&wide), None);
+        assert!(hex20(&wide).is_err());
     }
 
     #[test]

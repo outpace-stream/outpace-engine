@@ -48,7 +48,12 @@ OP=$!
 sleep 4
 curl -s -o "$T/out/capture.acelive" http://127.0.0.1:16878/broadcast/capture-test
 kill $OP; wait $OP 2>/dev/null
-if [ -n "${CAP_TRANSPORT:-}" ]; then cp "$CAP_TRANSPORT" "$T/out/capture.acelive"; fi
+if [ -n "${CAP_TRANSPORT:-}" ]; then
+  cp "$CAP_TRANSPORT" "$T/out/capture.acelive" || {
+    echo "cannot copy CAP_TRANSPORT=$CAP_TRANSPORT" >&2
+    exit 1
+  }
+fi
 ls -la "$T/out/capture.acelive" > "$T/out/transport.txt" 2>&1
 
 # 2. Mock catalog, DNS and TLS sniffer.

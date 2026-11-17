@@ -376,6 +376,16 @@ mod tests {
         );
         let forged = present.replace(PLACEHOLDER, "1123456789abcdef0123456789abcdef01234567");
         assert!(parse_registration(forged.as_bytes(), 6, ih).is_err());
+        // 40 bytes of valid UTF-8 that are not 40 ASCII characters: an error, not a panic.
+        let wide = format!("\u{20ac}{}", "0".repeat(37));
+        assert_eq!(wide.len(), 40);
+        let wide_id = signed(&format!(
+            "<?xml version=\"1.0\"?>\n<response r=\"9\"><id>{wide}</id></response>"
+        ));
+        assert_eq!(
+            parse_registration(wide_id.as_bytes(), 9, ih),
+            Err(ResolveError::Catalog("bad catalog content id"))
+        );
     }
 
     /// A one-host mock catalog: answers each request with `reply(path, body)` signed for the
