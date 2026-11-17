@@ -23,6 +23,7 @@
 // (see the `ace_log` crate docs for the distinction).
 pub use ace_log::alog;
 
+pub mod catalog_register;
 pub mod dht;
 pub mod discover;
 pub mod engine_http;

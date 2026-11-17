@@ -66,13 +66,13 @@ const CATALOG_HOSTS: &[(&str, u16)] = &[
     ("163.172.187.185", 8081),
 ];
 const CATALOG_HOST_TIMEOUT: Duration = Duration::from_secs(4);
-const CATALOG_RESPONSE_LIMIT: usize = 1024 * 1024;
-const CATALOG_SIGNING_SECRET: &[u8] =
+pub(crate) const CATALOG_RESPONSE_LIMIT: usize = 1024 * 1024;
+pub(crate) const CATALOG_SIGNING_SECRET: &[u8] =
     b"H!+:H1NnvvX\\x0bS'(;0/A\\nR{${\\n/3%1\\x0b*[r0o>QzNGKkXT@v\\x0b3DN;gx_66L2 {`F0,\\tKm>XoG~iY(\\x0bu]6E}\\t~07&H;9qE1d?d-A7S(";
 
 // TSService.get_key(2), the response counterpart of get_key(1) above.
 // Public protocol interoperability constant, not a private server credential.
-const CATALOG_RESPONSE_KEY: &[u8] = b"CNVU\\\\w5S/HGg\"pSzY&O\"`uGCD18\\x0cfS|h2H4eJBihWumSD7zSv;8,=z2?<\\tl6ka\\n\\x0c*O<3dzOZ|MT11]f0 Xuc| R\"$D;SsYm\\rw*..8h7d4k";
+pub(crate) const CATALOG_RESPONSE_KEY: &[u8] = b"CNVU\\\\w5S/HGg\"pSzY&O\"`uGCD18\\x0cfS|h2H4eJBihWumSD7zSv;8,=z2?<\\tl6ka\\n\\x0c*O<3dzOZ|MT11]f0 Xuc| R\"$D;SsYm\\rw*..8h7d4k";
 
 /// A validated HTTP(S) HLS origin described by a transport descriptor. It is not a swarm:
 /// callers hand the URL to a player (or the opt-in managed relay) and never cache it, because
@@ -694,10 +694,55 @@ fn catalog_query_signature(
 }
 
 fn catalog_response_transport(body: &[u8], request_random: u64) -> Result<Vec<u8>, ResolveError> {
+    let xml = catalog_response_text(body)?;
+    let document = authenticated_catalog_document(xml, request_random)?;
+    let root = document.root_element();
+    let field = |tag| catalog_field(root, tag)?.ok_or(ResolveError::Catalog("missing catalog tag"));
+    let torrent = field("torrent")?.trim();
+    let checksum = field("checksum")?.trim();
+    let expected = decode_hex20(checksum).ok_or(ResolveError::Catalog("bad checksum"))?;
+    let transport = Base64::decode_vec(torrent)
+        .map_err(|_| ResolveError::Catalog("bad catalog torrent base64"))?;
+
+    if !checked_transport_file_hash(&transport, expected) {
+        return Err(ResolveError::Catalog("checksum mismatch"));
+    }
+    Ok(transport)
+}
+
+/// A catalog response body as text, within the response size bound.
+pub(crate) fn catalog_response_text(body: &[u8]) -> Result<&str, ResolveError> {
     if body.len() > CATALOG_RESPONSE_LIMIT {
         return Err(ResolveError::Catalog("catalog response too large"));
     }
-    let xml = std::str::from_utf8(body).map_err(|_| ResolveError::Catalog("bad catalog utf-8"))?;
+    std::str::from_utf8(body).map_err(|_| ResolveError::Catalog("bad catalog utf-8"))
+}
+
+/// The text of the single `tag` child of a catalog response root, `None` when absent.
+/// Duplicate or nested elements are ambiguous and rejected.
+pub(crate) fn catalog_field<'a>(
+    root: roxmltree::Node<'a, 'a>,
+    tag: &str,
+) -> Result<Option<&'a str>, ResolveError> {
+    let mut elements = root.children().filter(|child| child.has_tag_name(tag));
+    let Some(element) = elements.next() else {
+        return Ok(None);
+    };
+    if elements.next().is_some() || element.children().any(|child| child.is_element()) {
+        return Err(ResolveError::Catalog("ambiguous catalog tag"));
+    }
+    element
+        .text()
+        .map(Some)
+        .ok_or(ResolveError::Catalog("empty catalog tag"))
+}
+
+/// Parse a catalog response and authenticate it as the engine does (note 62): a `response`
+/// root whose `sig` signs the exact text, and whose `r` echoes this request's nonce.
+pub(crate) fn authenticated_catalog_document(
+    xml: &str,
+    request_random: u64,
+) -> Result<roxmltree::Document<'_>, ResolveError> {
     // Parse the whole document: substring searches can mistake comments, nested elements,
     // duplicate attributes or a second root for the response being authenticated.
     let document = roxmltree::Document::parse_with_options(
@@ -745,28 +790,7 @@ fn catalog_response_transport(body: &[u8], request_random: u64) -> Result<Vec<u8
     if response_random != request_random {
         return Err(ResolveError::Catalog("catalog random mismatch"));
     }
-    let field = |tag| {
-        let mut elements = root.children().filter(|child| child.has_tag_name(tag));
-        let element = elements
-            .next()
-            .ok_or(ResolveError::Catalog("missing catalog tag"))?;
-        if elements.next().is_some() || element.children().any(|child| child.is_element()) {
-            return Err(ResolveError::Catalog("ambiguous catalog tag"));
-        }
-        element
-            .text()
-            .ok_or(ResolveError::Catalog("empty catalog tag"))
-    };
-    let torrent = field("torrent")?.trim();
-    let checksum = field("checksum")?.trim();
-    let expected = decode_hex20(checksum).ok_or(ResolveError::Catalog("bad checksum"))?;
-    let transport = Base64::decode_vec(torrent)
-        .map_err(|_| ResolveError::Catalog("bad catalog torrent base64"))?;
-
-    if !checked_transport_file_hash(&transport, expected) {
-        return Err(ResolveError::Catalog("checksum mismatch"));
-    }
-    Ok(transport)
+    Ok(document)
 }
 
 pub(crate) fn http_response_body(response: &[u8]) -> Result<Vec<u8>, ResolveError> {
