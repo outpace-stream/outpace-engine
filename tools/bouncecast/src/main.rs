@@ -456,8 +456,8 @@ fn run() -> Result<(), String> {
         music.render((samples_end - samples_done) as usize, &mut pcm);
         pcm_bytes.clear();
         pcm_bytes.extend(pcm.iter().flat_map(|s| s.to_le_bytes()));
-        let video_ns = n * 1_000_000_000 / args.fps as u64;
-        let audio_ns = samples_done * 1_000_000_000 / SAMPLE_RATE as u64;
+        let video_ns = ns(n, args.fps);
+        let audio_ns = ns(samples_done, SAMPLE_RATE);
         samples_done = samples_end;
         let written = sink
             .mkv
@@ -535,9 +535,23 @@ fn run() -> Result<(), String> {
     result.and(finished)
 }
 
+/// `count` ticks of a `rate` Hz clock in nanoseconds. The product goes through u128 because at
+/// 48 kHz `samples * 1e9` passes `u64::MAX` after about 4.4 days of uptime.
+fn ns(count: u64, rate: u32) -> u64 {
+    (count as u128 * 1_000_000_000 / rate as u128) as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamps_survive_long_uptime() {
+        // A year of 48 kHz audio: the u64 product would have overflowed after about 4.4 days.
+        let samples = 365 * 86_400 * 48_000u64;
+        assert_eq!(ns(samples, 48_000), 365 * 86_400 * 1_000_000_000);
+        assert_eq!(ns(1, 60), 16_666_666);
+    }
 
     fn args(encoder: Encoder) -> Args {
         Args {

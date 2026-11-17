@@ -128,9 +128,11 @@ the env file:
 OUTPACE_BROADCAST_CATALOG_REGISTER=1
 ```
 
-The catalog content id then appears in the log:
+Restart the broadcaster so it reads the new setting. The catalog content id then appears in
+the log:
 
 ```bash
+systemctl restart outpace-broadcast
 journalctl -u outpace-broadcast -o cat | grep 'catalog content id'
 # [broadcast] outpace-bounce: catalog content id 0123456789abcdef0123456789abcdef01234567
 ```

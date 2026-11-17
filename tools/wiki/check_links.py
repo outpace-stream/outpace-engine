@@ -17,6 +17,7 @@ Exits non-zero when any link is broken.
 
 import re
 import sys
+from urllib.parse import unquote
 from pathlib import Path
 
 FENCE = re.compile(r"^```.*?^```", re.S | re.M)
@@ -51,7 +52,7 @@ def main() -> int:
                 continue
             page, _, anchor = target.partition("#")
             if "/" in page or FILE_EXTENSION.search(page):
-                path = (root / page).resolve()
+                path = (root / unquote(page)).resolve()
                 if not path.is_relative_to(root.resolve()) or not path.is_file():
                     errors.append(f"{name}.md: link to missing file {target!r}")
                 continue
