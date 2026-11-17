@@ -7,6 +7,8 @@ Life. The soundtrack is a generated chiptune that reacts to the bounces. Everyth
 synthetic, so the stream is safe to publish and can run forever as a reference signal for
 the whole path: ingest, signing, swarm, catalog and players.
 
+![A frame of the test retransmission: the cyan Outpace logo near the left edge, over an orange and blue Julia-set fractal and teal Game of Life cells](images/test-retransmission/hero.jpg)
+
 | Report | Details |
 | --- | --- |
 | **Source** | Outpace maintainers |
@@ -16,6 +18,31 @@ the whole path: ingest, signing, swarm, catalog and players.
 | **Signal** | 1920x1080 at 60 fps, H.264 High at 8 Mbit/s (constant bit rate), stereo AAC |
 | **Players** | The Outpace Android app on another network; a second Outpace engine using only a catalog lookup |
 | **Works on** | Any Linux machine. The GPU steps need an AMD or Intel GPU with VAAPI and Vulkan; without one, bouncecast uses the CPU. |
+
+## What it looks like
+
+Eight frames from about half a minute of the broadcast, taken from what a viewer received
+over the network after a catalog lookup. They read left to right, top to bottom:
+
+![Eight frames of the broadcast: the logo in green, red, pink, cyan, green, blue, violet and yellow at different places, while the fractal slowly changes shape and the Game of Life cells change colour](images/test-retransmission/bounces.jpg)
+
+- **The logo** moves at a constant speed and takes a new colour every time it touches an edge.
+  A corner hit makes it glow.
+- **The Game of Life** cells are born in the logo's current colour, so the board keeps a
+  record of recent bounces. Each bounce also sprays new cells where it hit, and gliders fly
+  in from the edges, so the board never dies out.
+- **The fractal** drifts through a family of Julia sets, zooming, rotating and cycling its
+  palette. It never visibly repeats.
+
+The soundtrack is part of the signal. Here is its spectrogram over 26 seconds, with time
+running left to right and low notes at the bottom:
+
+![Spectrogram of 26 seconds of the soundtrack: a steady bass line, an arpeggio pattern above it, then regular drum hits after a snare roll about halfway across](images/test-retransmission/soundtrack.jpg)
+
+The bright band is the triangle bass, and the checkered pattern above it is the arpeggio.
+Halfway across, a snare roll leads into the next phrase, and from there the vertical stripes
+are the kick and snare on every beat. Each bounce adds a short blip on a note of the current
+chord, panned to the side the logo hit.
 
 ## How it fits together
 
