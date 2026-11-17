@@ -54,10 +54,6 @@ const NODE_CACHE_MAX_AGE: Duration = Duration::from_secs(15 * 60);
 /// takes from it, so a single walk cannot crowd out what earlier walks learned.
 const NODE_CACHE_PER_WALK: usize = 8;
 
-/// How many recovery slots stay reserved for remembered nodes when the bootstrap routers
-/// alone would fill all [`MAX_ACTIVE`] of them.
-const RECOVERY_CACHED_MIN: usize = 4;
-
 /// The client version tag the official engine's DHT (pymdht `NEXTSHARE_VERSION`) puts in
 /// every KRPC message's `v` key.
 pub const CLIENT_VERSION: &[u8] = b"NS\x01\x18";
@@ -559,24 +555,16 @@ impl Answered {
     }
 }
 
-/// Which addresses the recovery round asks, at most [`MAX_ACTIVE`]: remembered nodes get
-/// whatever the routers leave free, and at least [`RECOVERY_CACHED_MIN`] slots when they
-/// would not. Routers that answered come before silent ones, since they are known to be up.
+/// Which addresses the recovery round asks, at most [`MAX_ACTIVE`]. Every bootstrap router
+/// is asked exactly as in the #494 round, in the same order; remembered nodes only take
+/// the slots the routers leave free, so a stale entry can never displace a router.
 fn recovery_targets(
     bootstraps: &[BootstrapNode],
     cached: Vec<SocketAddrV4>,
 ) -> Vec<(SocketAddrV4, RecoveryQuery)> {
-    let cached_take = cached.len().min(
-        MAX_ACTIVE
-            .saturating_sub(bootstraps.len())
-            .max(RECOVERY_CACHED_MIN),
-    );
-    let router_take = MAX_ACTIVE - cached_take;
-    let answered = bootstraps.iter().filter(|node| node.answered);
-    let silent = bootstraps.iter().filter(|node| !node.answered);
-    let mut out: Vec<(SocketAddrV4, RecoveryQuery)> = answered
-        .chain(silent)
-        .take(router_take)
+    let mut out: Vec<(SocketAddrV4, RecoveryQuery)> = bootstraps
+        .iter()
+        .take(MAX_ACTIVE)
         .map(|node| {
             let query = if node.answered {
                 RecoveryQuery::FindNode
@@ -586,7 +574,10 @@ fn recovery_targets(
             (node.addr, query)
         })
         .collect();
-    for addr in cached.into_iter().take(cached_take) {
+    for addr in cached {
+        if out.len() == MAX_ACTIVE {
+            break;
+        }
         if !out.iter().any(|(known, _)| *known == addr) {
             out.push((addr, RecoveryQuery::GetPeers));
         }
@@ -2723,29 +2714,44 @@ mod tests {
     }
 
     #[test]
-    fn recovery_targets_stay_within_max_active_and_reserve_cached_slots() {
-        let routers: Vec<BootstrapNode> = (0..8)
+    fn recovery_targets_keep_every_router_and_fill_only_free_slots_from_the_cache() {
+        let routers: Vec<BootstrapNode> = (0..5)
             .map(|i| BootstrapNode {
                 addr: addr(100 + i),
-                answered: i == 7,
+                answered: i == 3,
             })
             .collect();
         let cached: Vec<SocketAddrV4> = (0..8).map(addr).collect();
+        // Five routers, as a real walk seeds: all five keep their #494 query and order, and
+        // the cache gets the three free slots, newest first.
         let targets = recovery_targets(&routers, cached.clone());
-        assert_eq!(targets.len(), MAX_ACTIVE);
-        // The router that answered comes first and is widened with find_node.
-        assert_eq!(targets[0], (addr(107), RecoveryQuery::FindNode));
-        let from_cache = targets.iter().filter(|(a, _)| cached.contains(a)).count();
-        assert_eq!(from_cache, RECOVERY_CACHED_MIN);
-        // Few routers: the cache fills what they leave free.
-        let targets = recovery_targets(&routers[..2], cached.clone());
-        assert_eq!(targets.len(), MAX_ACTIVE);
-        assert!(targets[2..]
+        let expected: Vec<(SocketAddrV4, RecoveryQuery)> = routers
             .iter()
-            .all(|(_, q)| *q == RecoveryQuery::GetPeers));
+            .map(|node| {
+                let query = if node.answered {
+                    RecoveryQuery::FindNode
+                } else {
+                    RecoveryQuery::GetPeers
+                };
+                (node.addr, query)
+            })
+            .chain(cached[..3].iter().map(|a| (*a, RecoveryQuery::GetPeers)))
+            .collect();
+        assert_eq!(targets, expected);
+        // Routers fill every slot: the cache gets none, so silent routers are never cut.
+        let full: Vec<BootstrapNode> = (0..MAX_ACTIVE as u8)
+            .map(|i| BootstrapNode {
+                addr: addr(100 + i),
+                answered: false,
+            })
+            .collect();
+        let targets = recovery_targets(&full, cached.clone());
+        assert_eq!(targets.len(), MAX_ACTIVE);
+        assert!(targets.iter().all(|(a, _)| !cached.contains(a)));
+        // No routers resolved: the cache alone, still capped.
+        assert_eq!(recovery_targets(&[], cached.clone()).len(), MAX_ACTIVE);
         // No cache: identical to the #494 round.
-        let targets = recovery_targets(&routers[..3], Vec::new());
-        assert_eq!(targets.len(), 3);
+        assert_eq!(recovery_targets(&routers, Vec::new()).len(), 5);
     }
 
     #[tokio::test]
@@ -2973,8 +2979,9 @@ mod tests {
     }
 
     // Live check of the recovery seeds (#522): a warm-up walk with the real routers fills a
-    // cache, then a second walk toward another infohash runs with the routers replaced by a
-    // silent documentation address (TEST-NET-1), as on a network where none answers. Runs
+    // cache, then a second walk toward another infohash runs with the routers replaced by
+    // five silent documentation addresses (TEST-NET-1), as on a network where none answers.
+    // Each run uses a fresh cache, so it measures a cache filled seconds earlier. Runs
     // alternate between using the cache and not. Prints one `measured` line per walk.
     //   ACE_INFOHASHES=<40hex>,<40hex>[,...] ACE_RUNS=20 \
     //     cargo test --release -p ace-swarm dht_live_recovery_cache -- --ignored --nocapture
@@ -2998,6 +3005,18 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10);
+        let silent_routers = Resolver::controlled(|host| {
+            let last = match host.as_bytes()[0] {
+                b'a' => vec![1, 2],
+                b'b' => vec![3],
+                b'c' => vec![4],
+                _ => vec![5],
+            };
+            Ok(last
+                .into_iter()
+                .map(|i| SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, i), 6881)))
+                .collect())
+        });
         let mut rescued = [0usize; 2];
         for run in 0..runs {
             let warm = &hashes[run % hashes.len()];
@@ -3028,8 +3047,15 @@ mod tests {
                 measured,
                 Duration::from_secs(20),
                 &socket,
-                &["192.0.2.1:6881"],
-                Resolver::global(),
+                // Four hosts, one behind two addresses: the five seeds a real walk gets, so
+                // the cache only takes the three slots the routers would leave free.
+                &[
+                    "a.invalid:6881",
+                    "b.invalid:6881",
+                    "c.invalid:6881",
+                    "d.invalid:6881",
+                ],
+                silent_routers.clone(),
                 use_cache.then_some(&cache),
                 |_, response| {
                     if !response.peers.is_empty() && first_peer.is_none() {
@@ -3055,6 +3081,7 @@ mod tests {
                 start.elapsed().as_millis(),
             );
         }
+        silent_routers.finish_controlled().await;
         println!(
             "summary runs={runs} with_peers_cache={} with_peers_no_cache={}",
             rescued[1], rescued[0]
