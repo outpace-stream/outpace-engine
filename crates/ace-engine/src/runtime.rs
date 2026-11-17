@@ -298,6 +298,9 @@ pub fn config_from_env() -> Result<Config, Box<dyn std::error::Error>> {
     if let Some(v) = bool_from_env("OUTPACE_BEP9_CONTENT_ID_FALLBACK")? {
         config.bep9_content_id_fallback = v;
     }
+    if let Some(v) = bool_from_env("OUTPACE_BROADCAST_CATALOG_REGISTER")? {
+        config.broadcast_catalog_register = v;
+    }
     if let Some(v) = bool_from_env("OUTPACE_MANAGED_HLS")? {
         config.managed_hls = v;
     }
@@ -875,6 +878,10 @@ pub async fn build_runtime(
     };
 
     broadcasts.registry.set_source_policy(source_policy);
+    // A private-mode daemon never publishes descriptors to the public catalog.
+    broadcasts.registry.set_catalog_registration(
+        config.broadcast_catalog_register && !config.peer_policy.is_private(),
+    );
 
     // Reconstruct/reserve identities without starting announcements or readers. Serving
     // startup owns network work only after listeners are established.

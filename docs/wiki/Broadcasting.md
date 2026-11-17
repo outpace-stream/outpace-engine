@@ -203,11 +203,40 @@ never a problem; with tiny budgets, startup fails with `broadcast_store_too_smal
 broadcasts. Outpace announces itself only to `udp://` trackers. To announce to a tracker on a
 private address, also set `OUTPACE_TRACKER_ALLOW_NON_GLOBAL=1`.
 
+## Registering with the AceStream catalog
+
+By default a broadcast's `acestream://` link is the hash of its own descriptor. Stock AceStream
+clients can't resolve it, because they look content ids up in the AceStream catalog and the
+broadcast isn't there.
+
+Set `OUTPACE_BROADCAST_CATALOG_REGISTER=1` to register each broadcast the way the original
+engine does when you ask it for a content id:
+
+```bash
+OUTPACE_BROADCAST_CATALOG_REGISTER=1 outpace broadcast my-channel
+# later in the log:
+# [broadcast] my-channel: catalog content id 0123456789abcdef0123456789abcdef01234567
+```
+
+- Registration starts once the broadcast is announcing. It asks the catalog whether the
+  descriptor is already known and uploads it if not. The catalog **assigns** the content id;
+  it is a different value from the descriptor hash printed at startup.
+- Failures are logged and retried with backoff from 30 seconds up to 30 minutes.
+- The same descriptor always gets the same catalog id, so restarts reuse it. Deleting a
+  broadcast creates a new identity and therefore a new catalog id.
+- The raw-HTTP `PUT` response includes `catalog_content_id`, which is `null` until
+  registration has succeeded.
+- **This publishes the descriptor to the AceStream catalog operator**, including its trackers
+  and public key, and makes the broadcast discoverable by its catalog id. There is no
+  unregister call. It is off by default and never runs in
+  [private peer mode](Private-Peer-Mode).
+
 ## Watching a broadcast
 
 | From | How |
 | --- | --- |
 | The same daemon | `http://127.0.0.1:6878/streams/ace/<content_id>`. It resolves locally, with no catalog lookup. |
+| A stock AceStream client or any Outpace daemon | The catalog `acestream://` link, once the broadcast is [registered](#registering-with-the-acestream-catalog). |
 | Another Outpace daemon | Set `OUTPACE_BEP9_CONTENT_ID_FALLBACK=1` on that daemon and play the content id, or play the descriptor URL below. |
 | Any client that takes a transport-file URL | `http://<host>:6878/broadcast/<name>` serves the descriptor. |
 

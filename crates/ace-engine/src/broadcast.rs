@@ -10,6 +10,7 @@ use crate::broadcast_pull::{run_source, SourceStatus, SourceStatusWriter, Valida
 use crate::config::{CacheType, Config};
 use ace_swarm::http_fetch::FetchPolicy;
 use ace_swarm::listen::{SeedLease, SeedRegistry};
+use ace_swarm::resolve::infohash_hex;
 use ace_swarm::store::PieceStore;
 use ace_wire::bencode::Bencode;
 use ace_wire::infohash::{infohash_of_descriptor, infohash_of_transport, transport_file_hash};
@@ -478,16 +479,87 @@ pub struct BroadcastRegistry {
     cache_dir: PathBuf,
     shutdown_deadline: StdMutex<Option<tokio::time::Instant>>,
     source_policy: StdMutex<FetchPolicy>,
+    /// Opt-in AceStream catalog registration of announced broadcasts.
+    catalog_registration: AtomicBool,
+    /// Catalog content ids by the broadcast's own transport hash. Keyed by transport, so a
+    /// deleted and recreated name can never report the old identity's id.
+    catalog_ids: Arc<StdMutex<BTreeMap<[u8; 20], [u8; 20]>>>,
     #[cfg(test)]
     source_hooks: StdMutex<crate::broadcast_pull::SourceTestHooks>,
     #[cfg(test)]
     announcer: StdMutex<Option<AnnouncerFactory>>,
+    #[cfg(test)]
+    registrar: StdMutex<Option<RegistrarFactory>>,
 }
 
 type AnnounceFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 #[cfg(test)]
 pub(crate) type AnnouncerFactory =
     Arc<dyn Fn([u8; 20], Vec<String>) -> AnnounceFuture + Send + Sync>;
+type RegistrarFuture = Pin<Box<dyn Future<Output = Result<[u8; 20], String>> + Send>>;
+/// Registers one transport with the catalog. Boxed so the retry task has a single type.
+pub(crate) type RegistrarFactory = Arc<dyn Fn(Arc<Vec<u8>>) -> RegistrarFuture + Send + Sync>;
+
+fn catalog_registrar() -> RegistrarFactory {
+    Arc::new(|transport| {
+        Box::pin(async move {
+            ace_swarm::catalog_register::register_live_transport(&transport)
+                .await
+                .map_err(|error| format!("{error:?}"))
+        })
+    })
+}
+
+/// The cancellable registration task, boxed so `ensure_announcing` spawns one small type.
+#[inline(never)]
+fn catalog_registration_task(
+    name: String,
+    key: [u8; 20],
+    transport: Arc<Vec<u8>>,
+    ids: Arc<StdMutex<BTreeMap<[u8; 20], [u8; 20]>>>,
+    register: RegistrarFactory,
+    mut cancel: watch::Receiver<bool>,
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let registration = register_in_catalog(name, key, transport, ids, register);
+        tokio::select! { biased; () = cancelled(&mut cancel) => {}, () = registration => {} }
+    })
+}
+
+const CATALOG_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_secs(30);
+const CATALOG_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Register until the catalog answers with an id, backing off between failed rounds. The
+/// catalog keys registrations by transport hash, so a restart re-checks instead of duplicating.
+async fn register_in_catalog(
+    name: String,
+    key: [u8; 20],
+    transport: Arc<Vec<u8>>,
+    ids: Arc<StdMutex<BTreeMap<[u8; 20], [u8; 20]>>>,
+    register: RegistrarFactory,
+) {
+    let mut delay = CATALOG_RETRY_INITIAL;
+    loop {
+        match register(transport.clone()).await {
+            Ok(id) => {
+                ids.lock().unwrap().insert(key, id);
+                crate::alog!(
+                    "[broadcast] {name}: catalog content id {}",
+                    infohash_hex(&id)
+                );
+                return;
+            }
+            Err(error) => {
+                crate::alog!(
+                    "[broadcast] {name}: catalog registration failed ({error}); retrying in {}s",
+                    delay.as_secs()
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(CATALOG_RETRY_MAX);
+            }
+        }
+    }
+}
 
 impl BroadcastRegistry {
     pub fn new() -> Arc<Self> {
@@ -545,10 +617,14 @@ impl BroadcastRegistry {
             cache_dir,
             shutdown_deadline: StdMutex::new(None),
             source_policy: StdMutex::new(FetchPolicy::default()),
+            catalog_registration: AtomicBool::new(false),
+            catalog_ids: Arc::new(StdMutex::new(BTreeMap::new())),
             #[cfg(test)]
             source_hooks: StdMutex::new(crate::broadcast_pull::SourceTestHooks::default()),
             #[cfg(test)]
             announcer: StdMutex::new(None),
+            #[cfg(test)]
+            registrar: StdMutex::new(None),
         })
     }
     #[cfg(test)]
@@ -834,6 +910,22 @@ impl BroadcastRegistry {
     }
     pub(crate) fn source_policy(&self) -> FetchPolicy {
         *self.source_policy.lock().unwrap()
+    }
+
+    /// Enable or disable catalog registration for broadcasts that start announcing afterwards.
+    pub(crate) fn set_catalog_registration(&self, enabled: bool) {
+        self.catalog_registration.store(enabled, Ordering::SeqCst);
+    }
+
+    /// The AceStream catalog content id registered for the broadcast whose raw transport hash
+    /// is `content_id`, once registration has succeeded.
+    pub fn catalog_content_id(&self, content_id: &[u8; 20]) -> Option<[u8; 20]> {
+        self.catalog_ids.lock().unwrap().get(content_id).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_registrar(&self, registrar: RegistrarFactory) {
+        *self.registrar.lock().unwrap() = Some(registrar);
     }
 
     #[cfg(test)]
@@ -1323,6 +1415,29 @@ impl BroadcastRegistry {
             let task = tokio::spawn(async move {
                 tokio::select! { biased; () = cancelled(&mut cancel) => {}, () = announce => {} }
             });
+            entry.aborters.lock().unwrap().push(task.abort_handle());
+            tasks.push(task);
+        }
+        if self.catalog_registration.load(Ordering::SeqCst)
+            && self.catalog_content_id(&bc.content_id).is_none()
+        {
+            #[cfg(test)]
+            let register = self
+                .registrar
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(catalog_registrar);
+            #[cfg(not(test))]
+            let register = catalog_registrar();
+            let task = tokio::spawn(catalog_registration_task(
+                name.to_owned(),
+                bc.content_id,
+                bc.transport_bytes.clone(),
+                self.catalog_ids.clone(),
+                register,
+                entry.state.cancel.subscribe(),
+            ));
             entry.aborters.lock().unwrap().push(task.abort_handle());
             tasks.push(task);
         }
@@ -2004,6 +2119,8 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod tests_catalog;
 #[cfg(test)]
 mod tests_options51;
 #[cfg(test)]

@@ -480,6 +480,32 @@ pub fn engine_request_head(path_and_query: &str, host: &str, user_agent: &str) -
     head
 }
 
+/// The engine's catalog `POST` head for an `application/octet-stream` body of `content_length`
+/// bytes (the `puttorrent` registration upload). Same header set as [`engine_request_head`].
+pub fn engine_post_head(
+    path_and_query: &str,
+    host: &str,
+    user_agent: &str,
+    content_length: usize,
+) -> String {
+    let mut head = String::with_capacity(448 + path_and_query.len());
+    let _ = write!(
+        head,
+        "POST {path_and_query} HTTP/1.1\r\n\
+         sentry-trace: {}\r\n\
+         Host: {host}\r\n\
+         Content-Length: {content_length}\r\n\
+         User-Agent: {user_agent}\r\n\
+         Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n\
+         Accept-Language: en-US,en;q=0.5\r\n\
+         Accept-Encoding: gzip\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Connection: close\r\n\r\n",
+        sentry_trace()
+    );
+    head
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,10 @@
 
 Date: 2026-11-14. Issues: #177 and #178. Builds on notes 35, 45, 62, and 63.
 
+> **Update:** [note 76](76-broadcast-catalog-registration.md) captured the live BT
+> `checktorrent`/`puttorrent` exchange, confirmed it against production once, and
+> implemented it as opt-in `OUTPACE_BROADCAST_CATALOG_REGISTER`.
+
 ## Executive summary
 
 A public AceStream content id is not a hash Outpace can compute from a transport
