@@ -18,7 +18,7 @@ Use the pinned Rust toolchain in `rust-toolchain.toml` and `rustfmt`. Follow Rus
 
 ### Logging
 
-`ace-log`'s `alog!` is the only logging macro in the workspace (dependency-free by choice: no `log`, no `tracing`). Use it for **operational events** — anything read after the fact out of a log file — as `alog!("[tag] message")`, where `[tag]` names the module (`[dht]`, `[portmap]`, `[hls]`). Use plain `eprintln!` only for **user-facing output** a human reads live: the `outpace: listening on …` startup banner, `outpace play: …` CLI progress, and test-skip notices. `tools/swarmtest` is an operator-driven harness and is exempt entirely. The library crates (`ace-media`, `ace-peer`, `ace-tracker`, `ace-wire`) return errors instead of logging; keep them silent.
+`ace-log`'s `alog!` is the only logging macro in the workspace (dependency-free by choice: no `log`, no `tracing`). Use it for **operational events** — anything read after the fact out of a log file — as `alog!("[tag] message")`, where `[tag]` names the module (`[dht]`, `[portmap]`, `[hls]`). Use plain `eprintln!` only for **user-facing output** a human reads live: the `outpace: listening on …` startup banner, `outpace play: …` CLI progress, and test-skip notices. `tools/swarmtest` is an operator-driven harness and is exempt entirely, and so is `tools/bouncecast`, a standalone test-signal generator that deliberately shares no code with Outpace. The library crates (`ace-media`, `ace-peer`, `ace-tracker`, `ace-wire`) return errors instead of logging; keep them silent.
 
 ## Performance & Efficiency
 

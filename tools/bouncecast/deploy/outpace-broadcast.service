@@ -1,0 +1,25 @@
+[Unit]
+Description=Outpace broadcast outpace-bounce
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User=outpace
+Group=outpace
+EnvironmentFile=/etc/outpace-bounce.env
+# Set --public-host to this host's LAN address; it only affects the printed URLs.
+ExecStart=/usr/local/bin/outpace broadcast --public-host 192.168.1.21 outpace-bounce
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+StateDirectory=outpace
+StateDirectoryMode=0700
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
