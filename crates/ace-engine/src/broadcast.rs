@@ -28,7 +28,6 @@ use tokio::task::{AbortHandle, JoinHandle};
 
 pub const PIECE_LENGTH: u64 = 65_536;
 pub const CHUNK_LENGTH: u64 = 16_384;
-pub const DEFAULT_BROADCAST_BITRATE: i64 = 8375;
 pub const CURSOR_PERSIST_INTERVAL: u64 = 128;
 pub const CLEANUP_GRACE: Duration = Duration::from_secs(5);
 

@@ -1468,10 +1468,6 @@ pub async fn mint_broadcast(
     runtime.broadcasts.mint(name).await
 }
 
-pub async fn announce_broadcast(runtime: &EngineRuntime, name: &str) -> Result<(), BroadcastError> {
-    runtime.broadcasts.ensure_announcing(name).await
-}
-
 async fn propagate_mapped_announce_port(
     mut mapped_rx: tokio::sync::watch::Receiver<Option<ace_swarm::portmap::MappedEndpoint>>,
     announce_tx: tokio::sync::watch::Sender<Option<u16>>,
