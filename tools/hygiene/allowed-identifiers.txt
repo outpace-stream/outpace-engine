@@ -16,7 +16,6 @@
 3fe25f036fa7d30550a2c0e566a6c1005ac86906  synthetic transport-01 SHA1(pubkey)
 685edf209ccfdf88977c0d317e1407baca486067  synthetic transport-02 infohash
 ed2c05b3b022e9cc7b7c1ca46d20f10839dc4108  synthetic transport-02 transport_file_hash
-b359d6d1bb595e1a6da26369d4e033fae71a0c7f  synthetic transport-02 SHA1(pubkey)
 
 # --- Catalog signature vectors (crates/ace-swarm/src/resolve.rs test) ---
 # SHA1 outputs of the catalog signing algorithm over a synthetic content id;
@@ -36,7 +35,7 @@ ced69f36873ffbef9806f29321dbf9c68d4e52bf  git commit SHA referenced in a note
 # --- Build metadata ---
 # jemalloc's git-describe hash inside a Cargo.lock version string. Cargo.lock is
 # excluded from the scan, but list it so the value is documented as non-identifier.
-e13ca993e8ccb9ba9847cc330696e02839f328f7  jemalloc git-describe hash (tikv-jemalloc-sys version)
+81034ce1f1373e37dc865038e1bc8eeecf559ce8  jemalloc git-describe hash (tikv-jemalloc-sys version)
 
 # --- Synthetic catalog authentication fixtures (#178) ---
 fbda7c3c07e9526fbbf26b3c383c81de798c7ff0  signature/checksum of synthetic catalog fixture response.xml

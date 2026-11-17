@@ -82,7 +82,7 @@ required acceptance evidence before merging. The [1.0.0 preparation checklist](s
 records publication and post-publication steps for that release.
 
 After the preparation PR is merged and publication is authorized, tag the exact reviewed commit
-with an annotated tag (the following is an example for the planned 1.0.0 cut):
+with an annotated tag (the following example uses 1.0.0):
 
 ```bash
 git switch main
