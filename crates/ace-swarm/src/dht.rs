@@ -541,6 +541,11 @@ impl NodeCache {
 /// The answering nodes one walk hands to the [`NodeCache`]: those that returned peers first,
 /// as they sit in a populated part of the DHT, then the rest. Bootstrap routers are left out,
 /// since the recovery round asks them anyway.
+/// How many answering nodes of each kind one walk keeps as cache candidates: the per-walk
+/// limit plus every bootstrap address a walk can seed.
+const ANSWERED_CANDIDATES: usize =
+    NODE_CACHE_PER_WALK + BOOTSTRAP.len() * MAX_BOOTSTRAP_ADDRS_PER_HOST;
+
 /// Each node keeps the time its reply arrived, not the time the walk ended.
 #[derive(Default)]
 struct Answered {
@@ -555,18 +560,25 @@ impl Answered {
         } else {
             &mut self.without_peers
         };
-        if list.len() < NODE_CACHE_PER_WALK && !list.iter().any(|(known, _)| *known == addr) {
+        // Room for every bootstrap address on top of the per-walk limit: a router can be
+        // noted here before its own lookup finishes, and is filtered out only at the end.
+        if list.len() < ANSWERED_CANDIDATES && !list.iter().any(|(known, _)| *known == addr) {
             list.push((addr, at));
         }
     }
 
-    fn into_preferred_first(self) -> Vec<(SocketAddrV4, Instant)> {
-        let mut out = self.with_peers;
-        for (addr, at) in self.without_peers {
+    /// Up to [`NODE_CACHE_PER_WALK`] candidates, those with peers first, after dropping any
+    /// `skip` rejects, so a filtered-out router never costs a real responder its place.
+    fn into_preferred_first(
+        self,
+        skip: impl Fn(&SocketAddrV4) -> bool,
+    ) -> Vec<(SocketAddrV4, Instant)> {
+        let mut out: Vec<(SocketAddrV4, Instant)> = Vec::with_capacity(NODE_CACHE_PER_WALK);
+        for (addr, at) in self.with_peers.into_iter().chain(self.without_peers) {
             if out.len() == NODE_CACHE_PER_WALK {
                 break;
             }
-            if !out.iter().any(|(known, _)| *known == addr) {
+            if !skip(&addr) && !out.iter().any(|(known, _)| *known == addr) {
                 out.push((addr, at));
             }
         }
@@ -880,8 +892,8 @@ async fn dht_walk_owned(
     if let Some(cache) = cache {
         // A router can answer as a referral before its own lookup finishes and be noted
         // here; the recovery round asks routers anyway, so it takes no cache slot.
-        let mut entries = answered.into_preferred_first();
-        entries.retain(|(addr, _)| !bootstraps.iter().any(|node| node.addr == *addr));
+        let entries =
+            answered.into_preferred_first(|addr| bootstraps.iter().any(|node| node.addr == *addr));
         cache.record_answered(&entries);
     }
     crate::alog!(
@@ -2748,7 +2760,7 @@ mod tests {
         answered.note(addr(1), true, start);
         answered.note(addr(2), false, start + Duration::from_secs(20));
         let cache = NodeCache::new();
-        cache.record_answered(&answered.into_preferred_first());
+        cache.record_answered(&answered.into_preferred_first(|_| false));
         let check = start + NODE_CACHE_MAX_AGE + Duration::from_secs(10);
         assert_eq!(cache.fresh(check, usize::MAX, |_| false), vec![addr(2)]);
         // A reply recorded at once is still eligible.
@@ -2807,13 +2819,28 @@ mod tests {
     }
 
     #[test]
+    fn a_filtered_router_does_not_cost_a_responder_its_cache_place() {
+        // A router noted first, then eight real responders: once the router is filtered
+        // out, all eight responders still fit the per-walk limit.
+        let router = addr(200);
+        let mut answered = Answered::default();
+        answered.note(router, true, Instant::now());
+        for i in 0..NODE_CACHE_PER_WALK as u8 {
+            answered.note(addr(i), true, Instant::now());
+        }
+        let out = answered.into_preferred_first(|a| *a == router);
+        let expected: Vec<SocketAddrV4> = (0..NODE_CACHE_PER_WALK as u8).map(addr).collect();
+        assert_eq!(out.iter().map(|(a, _)| *a).collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
     fn answered_prefers_nodes_that_returned_peers_and_is_bounded() {
         let mut answered = Answered::default();
         for i in 0..20 {
             answered.note(addr(i), i % 2 == 1, Instant::now());
         }
         answered.note(addr(1), true, Instant::now());
-        let out = answered.into_preferred_first();
+        let out = answered.into_preferred_first(|_| false);
         assert_eq!(out.len(), NODE_CACHE_PER_WALK);
         assert!(
             out.iter().all(|(a, _)| a.ip().octets()[3] % 2 == 1),
