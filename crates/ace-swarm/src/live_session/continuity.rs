@@ -163,6 +163,7 @@ impl Continuity {
                 next_needed_since: EffectiveInstant(now),
                 head: max_piece,
                 startup_deadline: None,
+                startup_prefetch: false,
                 request_floor: Arc::new(AtomicU64::new(start)),
                 prefetch,
                 emitted: 0,
@@ -248,13 +249,23 @@ impl Continuity {
         self.requested_at.remove(&piece);
     }
 
+    /// While the startup decision withholds output, completed pieces cannot drain, so the
+    /// scheduler must remember them (#521); otherwise use the ordinary completion path.
+    pub(super) fn complete_scheduled(&mut self, piece: u64) {
+        if self.startup_deadline.is_some() {
+            self.scheduler.on_complete_withheld(piece);
+        } else {
+            self.scheduler.on_complete(piece);
+        }
+    }
+
     pub(super) fn note_chunk(&mut self, piece: u64, chunk: u16, chunks_per_piece: u16) -> bool {
         let chunks_per_piece = chunks_per_piece.max(1) as usize;
         let chunks = self.received_chunks.entry(piece).or_default();
         chunks.insert(chunk);
         if chunks.len() >= chunks_per_piece {
             self.received_chunks.remove(&piece);
-            self.scheduler.on_complete(piece);
+            self.complete_scheduled(piece);
             // The piece may have been re-requested from more than one peer (retransmission);
             // clear it from every peer's slot and stop its retransmit timer.
             self.active_peers.complete_everywhere(piece);

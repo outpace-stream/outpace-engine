@@ -200,6 +200,9 @@ impl PoolActor<'_> {
                     advance_pool_requests(&mut self.peers, self.continuity, self.chunks_per_piece)
                         .await;
                 record_pool_losses(self.candidates, &mut self.loss_count, lost);
+                // Pieces prefetched during the decision are ready now; start output
+                // here rather than waiting a request-check interval for a peer event.
+                self.start_output();
             }
             // Re-evaluate the budget after startup scheduling.
             let now = Instant::now();
@@ -921,11 +924,10 @@ impl PoolActor<'_> {
             self.continuity
                 .skip_far_behind_live(self.continuity.output_clock.now(Instant::now()));
             let piece = lc.piece as u64;
-            if self.continuity.startup_deadline.is_some()
-                || self
-                    .continuity
-                    .output_ceiling
-                    .is_some_and(|ceiling| piece >= ceiling)
+            if self
+                .continuity
+                .output_ceiling
+                .is_some_and(|ceiling| piece >= ceiling)
                 || piece < self.continuity.reasm.next_needed()
             {
                 return PieceOutcome::Skip;
@@ -996,7 +998,7 @@ impl PoolActor<'_> {
                     .note_chunk(piece, lc.chunk, self.chunks_per_piece);
             } else if self.continuity.reasm.completed_live_piece(piece).is_some() {
                 self.continuity.received_chunks.remove(&piece);
-                self.continuity.scheduler.on_complete(piece);
+                self.continuity.complete_scheduled(piece);
                 self.continuity.active_peers.complete_everywhere(piece);
                 self.continuity.requested_at.remove(&piece);
             }
@@ -1017,7 +1019,18 @@ impl PoolActor<'_> {
         }
     }
     fn start_output(&mut self) {
+        if self.output_reservation.is_none()
+            && self.continuity.startup_prefetch
+            && self.continuity.output_ceiling.is_none()
+        {
+            // Pieces prefetched during corroboration may predate a head learned while
+            // their cache publication was still pending (which defers the floor). Re-apply
+            // it before the first byte so a stale provisional window never plays (#170).
+            self.continuity
+                .skip_far_behind_live(self.continuity.output_clock.now(Instant::now()));
+        }
         if self.output_reservation.is_none() && self.continuity.output_demand() {
+            self.continuity.startup_prefetch = false;
             self.continuity.output_ceiling.get_or_insert_with(|| {
                 self.continuity
                     .reasm
