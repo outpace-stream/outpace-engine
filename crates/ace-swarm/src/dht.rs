@@ -499,17 +499,15 @@ impl NodeCache {
     fn record_answered(&self, entries: &[(SocketAddrV4, Instant)]) {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         for (addr, seen) in entries.iter().rev() {
-            // Overlapping walks can report the same node out of order: keep its newest reply.
-            let mut newest = *seen;
-            nodes.retain(|(known, at)| {
-                if known == addr {
-                    newest = newest.max(*at);
-                    false
-                } else {
-                    true
+            // Overlapping walks can report the same node out of order. A strictly older reply
+            // changes nothing: the entry keeps its newer time and its place.
+            if let Some(pos) = nodes.iter().position(|(known, _)| known == addr) {
+                if nodes[pos].1 > *seen {
+                    continue;
                 }
-            });
-            nodes.push_front((*addr, newest));
+                nodes.remove(pos);
+            }
+            nodes.push_front((*addr, *seen));
         }
         nodes.truncate(NODE_CACHE_CAP);
     }
@@ -880,7 +878,11 @@ async fn dht_walk_owned(
         metrics.recovery_peers = metrics.peers_discovered - before;
     }
     if let Some(cache) = cache {
-        cache.record_answered(&answered.into_preferred_first());
+        // A router can answer as a referral before its own lookup finishes and be noted
+        // here; the recovery round asks routers anyway, so it takes no cache slot.
+        let mut entries = answered.into_preferred_first();
+        entries.retain(|(addr, _)| !bootstraps.iter().any(|node| node.addr == *addr));
+        cache.record_answered(&entries);
     }
     crate::alog!(
         "[dht] walk done: seeded={} queried={} valid={} peers={} nodes={} malformed={} \
@@ -2766,6 +2768,22 @@ mod tests {
     }
 
     #[test]
+    fn an_older_reply_does_not_move_a_node_ahead_of_newer_ones() {
+        // A at t=10, then B at t=20, then a late report of A from t=0: B stays first, so a
+        // recovery round with one free slot asks B.
+        let start = Instant::now();
+        let cache = NodeCache::new();
+        cache.record_answered(&[(addr(1), start + Duration::from_secs(10))]);
+        cache.record_answered(&[(addr(2), start + Duration::from_secs(20))]);
+        cache.record_answered(&[(addr(1), start)]);
+        let now = start + Duration::from_secs(30);
+        assert_eq!(cache.fresh(now, 1, |_| false), vec![addr(2)]);
+        // A newer reply still promotes it.
+        cache.record_answered(&[(addr(1), start + Duration::from_secs(25))]);
+        assert_eq!(cache.fresh(now, 1, |_| false), vec![addr(1)]);
+    }
+
+    #[test]
     fn router_that_answered_before_its_lookup_finished_counts_as_answered() {
         let early = addr(1);
         let mut responded = HashSet::new();
@@ -2933,6 +2951,73 @@ mod tests {
         assert!(found, "walk with no routers ignored the cache: {metrics:?}");
         assert_eq!(metrics.bootstrap_seeded, 0);
         assert_eq!(metrics.recovery_queries, 1);
+    }
+
+    #[tokio::test]
+    async fn router_resolved_after_answering_as_a_referral_is_not_cached() {
+        // Router A refers B; B answers before B's own lookup finishes, then resolves as a
+        // router. Neither router may take a cache slot.
+        use std::sync::{Arc, Condvar, Mutex};
+        let sockets = bind_loopback(2).await;
+        let addrs: Vec<SocketAddrV4> = sockets.iter().map(v4_addr).collect();
+        let (router_a, router_b) = (addrs[0], addrs[1]);
+        let mut sockets = sockets.into_iter();
+        let peer: SocketAddrV4 = "10.0.0.2:2222".parse().unwrap();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let resolver = Resolver::controlled({
+            let gate = gate.clone();
+            move |host| {
+                if host.starts_with("late.") {
+                    let mut released = gate.0.lock().unwrap();
+                    while !*released {
+                        released = gate.1.wait(released).unwrap();
+                    }
+                    Ok(vec![SocketAddr::V4(router_b)])
+                } else {
+                    Ok(vec![SocketAddr::V4(router_a)])
+                }
+            }
+        });
+        let (a_task, _) = scripted_router(sockets.next().unwrap(), move |_, _, txid| {
+            Some(response_with(txid, &[], &[([0x20; 20], router_b)]))
+        });
+        let b_task = answer_once(sockets.next().unwrap(), move |txid| {
+            response_with(txid, &[peer], &[])
+        });
+        let release = gate.clone();
+        let cache = NodeCache::new();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let metrics = dht_walk_with_bootstraps(
+            &[0; 20],
+            Duration::from_secs(3),
+            &client,
+            &["first.invalid:1", "late.invalid:1"],
+            resolver.clone(),
+            Some(&cache),
+            |_, response| {
+                // B's reply has been accepted while B is still unresolved: only now let
+                // its lookup finish.
+                if response.peers.contains(&peer) {
+                    *release.0.lock().unwrap() = true;
+                    release.1.notify_all();
+                }
+                false
+            },
+        )
+        .await;
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        a_task.abort();
+        b_task.abort();
+        resolver.finish_controlled().await;
+        assert_eq!(metrics.peers_discovered, 1, "{metrics:?}");
+        assert_eq!(metrics.bootstrap_seeded, 2, "B never resolved: {metrics:?}");
+        assert!(
+            cache
+                .fresh(Instant::now(), usize::MAX, |_| false)
+                .is_empty(),
+            "a router took a cache slot"
+        );
     }
 
     #[tokio::test]
