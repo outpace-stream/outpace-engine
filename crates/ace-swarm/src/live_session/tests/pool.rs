@@ -2601,6 +2601,35 @@ fn rejected_malformed_block_resets_partial_bytes_with_chunk_counts() {
 }
 
 #[tokio::test]
+async fn withheld_receipt_count_without_assembled_piece_stays_requestable() {
+    let mut stream = info();
+    stream.piece_length = 8;
+    stream.chunk_length = 4;
+    stream.sig_len = 0;
+    let (mut c, _) = Continuity::fresh(&stream, 7, 7, 0, default_live_recovery());
+    c.startup_deadline = Some(Instant::now() + Duration::from_secs(1));
+    let addr = "127.0.0.1:1".parse().unwrap();
+    let (peer, mut commands) = test_pool_peer(addr);
+    let mut peers = BTreeMap::from([(1, peer)]);
+    c.register_active_peer(1, addr, live_pos(7, 7));
+    c.set_peer_unchoked(1, true);
+    advance_pool_requests(&mut peers, &mut c, 2).await;
+    commands.try_recv().unwrap();
+    // Both receipts are counted, but the reassembler holds only half the piece.
+    c.reasm.add_block(7, 0, &[1, 2, 3, 4]).unwrap();
+    assert!(!c.note_chunk(7, 0, 2));
+    assert!(c.note_chunk(7, 1, 2));
+    assert!(c.reasm.ready_piece(7).is_none());
+    advance_pool_requests(&mut peers, &mut c, 2).await;
+    let retry = commands.try_recv();
+    shutdown_peer_runtimes(&mut peers).await;
+    assert!(
+        matches!(retry, Ok(PeerCommand::RequestPiece { piece: 7, .. })),
+        "an unassembled piece must not be remembered as complete while output is withheld: {retry:?}"
+    );
+}
+
+#[tokio::test]
 async fn timed_out_piece_without_eligible_peer_retries_on_unchoke_and_keeps_partial_data() {
     let mut stream = info();
     stream.piece_length = 8;

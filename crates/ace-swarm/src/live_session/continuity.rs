@@ -251,8 +251,10 @@ impl Continuity {
 
     /// While the startup decision withholds output, completed pieces cannot drain, so the
     /// scheduler must remember them (#521); otherwise use the ordinary completion path.
+    /// Only a piece the reassembler actually holds is remembered: a receipt count that
+    /// reached the chunk total without assembling the piece must stay requestable.
     pub(super) fn complete_scheduled(&mut self, piece: u64) {
-        if self.startup_deadline.is_some() {
+        if self.startup_deadline.is_some() && self.reasm.ready_piece(piece).is_some() {
             self.scheduler.on_complete_withheld(piece);
         } else {
             self.scheduler.on_complete(piece);
