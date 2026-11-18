@@ -1253,9 +1253,12 @@ mod tests {
     async fn cache_persists_across_restart_under_symlinked_ancestor() {
         let _guard = test_guard().await;
         let root = tempfile::tempdir().unwrap();
-        let real = root.path().join("data");
+        // The platform temp dir may itself sit under a link (macOS `/var`); keep `user-0` the
+        // only link in the path.
+        let base = std::fs::canonicalize(root.path()).unwrap();
+        let real = base.join("data");
         std::fs::create_dir_all(real.join("app")).unwrap();
-        let link = root.path().join("user-0");
+        let link = base.join("user-0");
         symlink(&real, &link).unwrap();
         // The app creates `cache`; the engine creates `engine` itself here.
         let path = link.join("app").join("cache").join("engine");
@@ -1265,6 +1268,8 @@ mod tests {
         let failure = secure::Directory::open(&path).err().unwrap();
         assert_eq!(failure.stage, "open cache path");
         assert_eq!(failure.path.as_deref(), Some(link.as_path()));
+        // Other kernels reject the link with a different errno (FreeBSD: EMLINK).
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         assert_eq!(failure.error.raw_os_error(), Some(libc::ENOTDIR));
 
         let cache = WarmPeerCache::new(&path, true);
