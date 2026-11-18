@@ -8,7 +8,7 @@
 
 use crate::resolver::Resolver;
 use ace_wire::bencode::Bencode;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -38,6 +38,22 @@ const MAX_ACTIVE: usize = 8;
 /// correlatable until the TTL, so a late reply is still accepted.
 const SLOT_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// How many IPv4 addresses the walk seeds from one bootstrap hostname. Some routers sit
+/// behind several addresses (round-robin DNS), and a walk that only ever asks the first
+/// one loses that router whenever that single address drops its query.
+const MAX_BOOTSTRAP_ADDRS_PER_HOST: usize = 2;
+
+/// How many recently answering nodes the process remembers for the dead-end recovery round.
+const NODE_CACHE_CAP: usize = 32;
+
+/// How long a remembered node stays eligible. Public DHT nodes churn within hours; pymdht
+/// refreshes its routing table every 15 minutes, so a node older than that is not trusted.
+const NODE_CACHE_MAX_AGE: Duration = Duration::from_secs(15 * 60);
+
+/// How many answering nodes one walk adds to the cache, and the most the recovery round
+/// takes from it, so a single walk cannot crowd out what earlier walks learned.
+const NODE_CACHE_PER_WALK: usize = 8;
+
 /// The client version tag the official engine's DHT (pymdht `NEXTSHARE_VERSION`) puts in
 /// every KRPC message's `v` key.
 pub const CLIENT_VERSION: &[u8] = b"NS\x01\x18";
@@ -57,6 +73,23 @@ pub fn build_get_peers(node_id: &[u8; 20], infohash: &[u8; 20], txid: &[u8]) -> 
     let mut d: BTreeMap<Vec<u8>, Bencode> = BTreeMap::new();
     d.insert(b"a".to_vec(), Bencode::Dict(a));
     d.insert(b"q".to_vec(), Bencode::Bytes(b"get_peers".to_vec()));
+    d.insert(b"t".to_vec(), Bencode::Bytes(txid.to_vec()));
+    d.insert(b"v".to_vec(), Bencode::Bytes(CLIENT_VERSION.to_vec()));
+    d.insert(b"y".to_vec(), Bencode::Bytes(b"q".to_vec()));
+    Bencode::Dict(d).encode()
+}
+
+/// Build a `find_node` KRPC query for `target` from our `node_id`. The walk only sends it
+/// to a bootstrap router that already answered, during the dead-end recovery round: a
+/// random target makes the router return nodes from another part of its table, which
+/// gives a frontier whose first referrals were all silent somewhere new to start from.
+pub fn build_find_node(node_id: &[u8; 20], target: &[u8; 20], txid: &[u8]) -> Vec<u8> {
+    let mut a: BTreeMap<Vec<u8>, Bencode> = BTreeMap::new();
+    a.insert(b"id".to_vec(), Bencode::Bytes(node_id.to_vec()));
+    a.insert(b"target".to_vec(), Bencode::Bytes(target.to_vec()));
+    let mut d: BTreeMap<Vec<u8>, Bencode> = BTreeMap::new();
+    d.insert(b"a".to_vec(), Bencode::Dict(a));
+    d.insert(b"q".to_vec(), Bencode::Bytes(b"find_node".to_vec()));
     d.insert(b"t".to_vec(), Bencode::Bytes(txid.to_vec()));
     d.insert(b"v".to_vec(), Bencode::Bytes(CLIENT_VERSION.to_vec()));
     d.insert(b"y".to_vec(), Bencode::Bytes(b"q".to_vec()));
@@ -199,6 +232,12 @@ struct DhtWalkMetrics {
     uncorrelated_responses: usize,
     /// Queries whose slot timeout elapsed without any datagram at all from that node.
     timeouts: usize,
+    /// Queries sent by the one dead-end recovery round (#494), which runs only when the
+    /// frontier runs dry before any peer was found: a fresh `get_peers` to each bootstrap
+    /// router that never answered, and a random-target `find_node` to each that did.
+    recovery_queries: usize,
+    /// Peer records harvested after the recovery round started.
+    recovery_peers: usize,
     /// The walk ran out of new frontier nodes before exhausting its time budget.
     frontier_exhausted: bool,
 }
@@ -244,6 +283,7 @@ async fn dht_walk(
         sock,
         BOOTSTRAP,
         Resolver::global(),
+        Some(NodeCache::global()),
         on_response,
     )
     .await
@@ -255,6 +295,7 @@ async fn dht_walk_with_bootstraps(
     sock: &UdpSocket,
     bootstraps: &[&str],
     resolver: Resolver,
+    cache: Option<&NodeCache>,
     on_response: impl FnMut(SocketAddrV4, &GetPeersResponse) -> bool,
 ) -> DhtWalkMetrics {
     let deadline = tokio::time::Instant::now() + budget;
@@ -269,27 +310,36 @@ async fn dht_walk_with_bootstraps(
         deadline.into_std(),
         sock,
         BTreeMap::new(),
+        Vec::new(),
         lookups,
+        cache,
         on_response,
     )
     .await
 }
 
+/// Resolve one bootstrap hostname to at most [`MAX_BOOTSTRAP_ADDRS_PER_HOST`] distinct IPv4
+/// addresses, in resolver order. Empty if the lookup fails or misses `deadline`.
 pub(crate) async fn resolve_bootstrap(
     host: String,
     resolver: Resolver,
     deadline: tokio::time::Instant,
-) -> Option<SocketAddrV4> {
-    tokio::time::timeout_at(deadline, resolver.lookup(&host))
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .and_then(|addresses| {
-            addresses.into_iter().find_map(|addr| match addr {
-                SocketAddr::V4(v4) => Some(v4),
-                _ => None,
-            })
-        })
+) -> Vec<SocketAddrV4> {
+    let Ok(Ok(addresses)) = tokio::time::timeout_at(deadline, resolver.lookup(&host)).await else {
+        return Vec::new();
+    };
+    let mut out: Vec<SocketAddrV4> = Vec::with_capacity(MAX_BOOTSTRAP_ADDRS_PER_HOST);
+    for addr in addresses {
+        if let SocketAddr::V4(v4) = addr {
+            if !out.contains(&v4) {
+                out.push(v4);
+                if out.len() == MAX_BOOTSTRAP_ADDRS_PER_HOST {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -309,6 +359,41 @@ async fn dht_walk_from_seeds(
     dht_walk_frontier(infohash, budget, sock, frontier, on_response).await
 }
 
+/// Like [`dht_walk_from_seeds`], but the seeds stand in for resolved bootstrap routers, so
+/// they are eligible for the dead-end recovery round.
+#[cfg(test)]
+async fn dht_walk_from_bootstrap_seeds(
+    infohash: &[u8; 20],
+    budget: Duration,
+    sock: &UdpSocket,
+    seeds: Vec<SocketAddrV4>,
+    cache: Option<&NodeCache>,
+    on_response: impl FnMut(SocketAddrV4, &GetPeersResponse) -> bool,
+) -> DhtWalkMetrics {
+    let mut frontier: BTreeMap<[u8; 20], SocketAddrV4> = BTreeMap::new();
+    let mut bootstraps = Vec::new();
+    for (i, seed) in seeds.into_iter().enumerate() {
+        let mut key = [0xffu8; 20];
+        key[19] = i as u8;
+        frontier.insert(key, seed);
+        bootstraps.push(BootstrapNode {
+            addr: seed,
+            answered: false,
+        });
+    }
+    dht_walk_owned(
+        infohash,
+        Instant::now() + budget,
+        sock,
+        frontier,
+        bootstraps,
+        tokio::task::JoinSet::new(),
+        cache,
+        on_response,
+    )
+    .await
+}
+
 #[cfg(test)]
 async fn dht_walk_frontier(
     infohash: &[u8; 20],
@@ -322,30 +407,59 @@ async fn dht_walk_frontier(
         Instant::now() + budget,
         sock,
         frontier,
+        Vec::new(),
         tokio::task::JoinSet::new(),
+        None,
         on_response,
     )
     .await
 }
 
+/// A resolved bootstrap router address. Kept apart from the frontier, whose 64-entry cap
+/// evicts the far-away bootstrap keys first, so the recovery round can still reach it.
+struct BootstrapNode {
+    addr: SocketAddrV4,
+    /// Whether a correlated, well-formed response came back from this address.
+    answered: bool,
+}
+
+type BootstrapLookups = tokio::task::JoinSet<(usize, Vec<SocketAddrV4>)>;
+
 fn add_bootstrap(
-    result: Result<(usize, Option<SocketAddrV4>), tokio::task::JoinError>,
+    result: Result<(usize, Vec<SocketAddrV4>), tokio::task::JoinError>,
     frontier: &mut BTreeMap<[u8; 20], SocketAddrV4>,
+    bootstraps: &mut Vec<BootstrapNode>,
+    responded: &HashSet<SocketAddrV4>,
     metrics: &mut DhtWalkMetrics,
 ) {
-    if let Ok((i, Some(addr))) = result {
-        let mut key = [0xff; 20];
-        key[19] = i as u8;
-        frontier.insert(key, addr);
-        metrics.bootstrap_seeded += 1;
-        while frontier.len() > 64 {
-            let key = *frontier.keys().next_back().unwrap();
-            frontier.remove(&key);
+    let Ok((i, addrs)) = result else {
+        return;
+    };
+    for (j, addr) in addrs.into_iter().enumerate() {
+        if bootstraps.iter().any(|node| node.addr == addr) {
+            continue;
         }
+        // One key per (host, address), still in the farthest-possible key range.
+        let mut key = [0xff; 20];
+        key[18] = i as u8;
+        key[19] = j as u8;
+        frontier.insert(key, addr);
+        // A router can be referred to, asked and answer before its own lookup finishes;
+        // it still counts as answered, so recovery widens it with `find_node`.
+        bootstraps.push(BootstrapNode {
+            addr,
+            answered: responded.contains(&addr),
+        });
+        metrics.bootstrap_seeded += 1;
+    }
+    while frontier.len() > 64 {
+        let key = *frontier.keys().next_back().unwrap();
+        frontier.remove(&key);
     }
 }
-/// One outstanding `get_peers` query. A node is queried at most once per walk, so the
-/// destination alone identifies it; the transaction id is checked on every reply.
+/// One outstanding query. A node has at most one live query at a time, so the destination
+/// alone identifies it; the transaction id is checked on every reply. Only the recovery
+/// round asks a node twice, and its fresh query replaces the released first one.
 struct Inflight {
     txid: [u8; 2],
     /// When the query stops holding one of the [`MAX_ACTIVE`] slots. A reply after this is
@@ -359,21 +473,186 @@ struct Inflight {
     heard: bool,
 }
 
+/// Nodes that recently gave a correlated, well-formed reply (#522), newest first. Only the
+/// dead-end recovery round reads it, next to the bootstrap routers, so a walk that never
+/// dead-ends is not slowed by stale entries (the startup cost that ruled out #42). Bounded
+/// at [`NODE_CACHE_CAP`] entries and kept in memory only.
+pub(crate) struct NodeCache {
+    nodes: std::sync::Mutex<VecDeque<(SocketAddrV4, Instant)>>,
+}
+
+impl NodeCache {
+    pub(crate) const fn new() -> Self {
+        Self {
+            nodes: std::sync::Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// The process-wide cache the real walks share.
+    fn global() -> &'static Self {
+        static CACHE: NodeCache = NodeCache::new();
+        &CACHE
+    }
+
+    /// Remember each `(address, answered at)` pair, keeping the time the node actually
+    /// answered so its age is never understated. The cache stays ordered by reply time,
+    /// newest first; among equal times the first entry goes in front.
+    fn record_answered(&self, entries: &[(SocketAddrV4, Instant)]) {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        for (addr, seen) in entries.iter().rev() {
+            // Overlapping walks can report the same node out of order. A strictly older reply
+            // changes nothing: the entry keeps its newer time and its place.
+            if let Some(pos) = nodes.iter().position(|(known, _)| known == addr) {
+                if nodes[pos].1 > *seen {
+                    continue;
+                }
+                nodes.remove(pos);
+            }
+            // Keep the whole cache ordered by reply time, newest first, whichever walk
+            // finishes first: ahead of every entry no newer than this reply.
+            let at = nodes
+                .iter()
+                .position(|(_, other)| *other <= *seen)
+                .unwrap_or(nodes.len());
+            nodes.insert(at, (*addr, *seen));
+        }
+        nodes.truncate(NODE_CACHE_CAP);
+    }
+
+    /// Remember `addrs` as all answering at `now`, the first one at the front.
+    #[cfg(test)]
+    fn record(&self, addrs: &[SocketAddrV4], now: Instant) {
+        let entries: Vec<(SocketAddrV4, Instant)> = addrs.iter().map(|a| (*a, now)).collect();
+        self.record_answered(&entries);
+    }
+
+    /// Up to `limit` remembered nodes still younger than [`NODE_CACHE_MAX_AGE`] at `now`,
+    /// newest first, skipping any `skip` rejects. Expired entries are dropped.
+    fn fresh(
+        &self,
+        now: Instant,
+        limit: usize,
+        skip: impl Fn(&SocketAddrV4) -> bool,
+    ) -> Vec<SocketAddrV4> {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes.retain(|(_, seen)| now.saturating_duration_since(*seen) < NODE_CACHE_MAX_AGE);
+        nodes
+            .iter()
+            .map(|(addr, _)| *addr)
+            .filter(|addr| !skip(addr))
+            .take(limit)
+            .collect()
+    }
+}
+
+/// The answering nodes one walk hands to the [`NodeCache`]: those that returned peers first,
+/// as they sit in a populated part of the DHT, then the rest. Bootstrap routers are left out,
+/// since the recovery round asks them anyway.
+/// How many answering nodes of each kind one walk keeps as cache candidates: the per-walk
+/// limit plus every bootstrap address a walk can seed.
+const ANSWERED_CANDIDATES: usize =
+    NODE_CACHE_PER_WALK + BOOTSTRAP.len() * MAX_BOOTSTRAP_ADDRS_PER_HOST;
+
+/// Each node keeps the time its reply arrived, not the time the walk ended.
+#[derive(Default)]
+struct Answered {
+    with_peers: Vec<(SocketAddrV4, Instant)>,
+    without_peers: Vec<(SocketAddrV4, Instant)>,
+}
+
+impl Answered {
+    fn note(&mut self, addr: SocketAddrV4, had_peers: bool, at: Instant) {
+        let list = if had_peers {
+            &mut self.with_peers
+        } else {
+            &mut self.without_peers
+        };
+        // Room for every bootstrap address on top of the per-walk limit: a router can be
+        // noted here before its own lookup finishes, and is filtered out only at the end.
+        if list.len() < ANSWERED_CANDIDATES && !list.iter().any(|(known, _)| *known == addr) {
+            list.push((addr, at));
+        }
+    }
+
+    /// Up to [`NODE_CACHE_PER_WALK`] candidates, those with peers first, after dropping any
+    /// `skip` rejects, so a filtered-out router never costs a real responder its place.
+    fn into_preferred_first(
+        self,
+        skip: impl Fn(&SocketAddrV4) -> bool,
+    ) -> Vec<(SocketAddrV4, Instant)> {
+        let mut out: Vec<(SocketAddrV4, Instant)> = Vec::with_capacity(NODE_CACHE_PER_WALK);
+        for (addr, at) in self.with_peers.into_iter().chain(self.without_peers) {
+            if out.len() == NODE_CACHE_PER_WALK {
+                break;
+            }
+            if !skip(&addr) && !out.iter().any(|(known, _)| *known == addr) {
+                out.push((addr, at));
+            }
+        }
+        out
+    }
+}
+
+/// Which addresses the recovery round asks, at most [`MAX_ACTIVE`]. Every bootstrap router
+/// is asked exactly as in the #494 round, in the same order; remembered nodes only take
+/// the slots the routers leave free, so a stale entry can never displace a router.
+fn recovery_targets(
+    bootstraps: &[BootstrapNode],
+    cached: Vec<SocketAddrV4>,
+) -> Vec<(SocketAddrV4, RecoveryQuery)> {
+    let mut out: Vec<(SocketAddrV4, RecoveryQuery)> = bootstraps
+        .iter()
+        .take(MAX_ACTIVE)
+        .map(|node| {
+            let query = if node.answered {
+                RecoveryQuery::FindNode
+            } else {
+                RecoveryQuery::GetPeers
+            };
+            (node.addr, query)
+        })
+        .collect();
+    for addr in cached {
+        if out.len() == MAX_ACTIVE {
+            break;
+        }
+        if !out.iter().any(|(known, _)| *known == addr) {
+            out.push((addr, RecoveryQuery::GetPeers));
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryQuery {
+    GetPeers,
+    FindNode,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn dht_walk_owned(
     infohash: &[u8; 20],
     deadline: Instant,
     sock: &UdpSocket,
     mut frontier: BTreeMap<[u8; 20], SocketAddrV4>,
-    mut lookups: tokio::task::JoinSet<(usize, Option<SocketAddrV4>)>,
+    mut bootstraps: Vec<BootstrapNode>,
+    mut lookups: BootstrapLookups,
+    cache: Option<&NodeCache>,
     mut on_response: impl FnMut(SocketAddrV4, &GetPeersResponse) -> bool,
 ) -> DhtWalkMetrics {
     let node_id = session_node_id();
+    let mut answered = Answered::default();
     let mut metrics = DhtWalkMetrics {
         bootstrap_seeded: frontier.len(),
         ..Default::default()
     };
+    // Peers harvested when the recovery round started; `None` until it runs. One round per
+    // walk bounds its extra traffic to one datagram per bootstrap address.
+    let mut recovery_started_at: Option<usize> = None;
 
     let mut queried: HashSet<SocketAddrV4> = HashSet::new();
+    // Every source of a correlated, well-formed reply, bounded by the queries sent.
+    let mut responded: HashSet<SocketAddrV4> = HashSet::new();
     // Public DHT UDP is untrusted, so a reply is only trusted if it arrives from the exact node
     // we asked and echoes the exact transaction id we generated for that query.
     let mut inflight: HashMap<SocketAddrV4, Inflight> = HashMap::new();
@@ -389,7 +668,13 @@ async fn dht_walk_owned(
     // nothing more goes out directly.
     'walk: while Instant::now() < deadline && crate::proxy::active().is_none() {
         while let Some(result) = lookups.try_join_next() {
-            add_bootstrap(result, &mut frontier, &mut metrics);
+            add_bootstrap(
+                result,
+                &mut frontier,
+                &mut bootstraps,
+                &responded,
+                &mut metrics,
+            );
         }
         let now = Instant::now();
         for query in inflight.values_mut() {
@@ -438,6 +723,76 @@ async fn dht_walk_owned(
             }
         }
 
+        if active == 0
+            && lookups.is_empty()
+            && recovery_started_at.is_none()
+            && metrics.peers_discovered == 0
+        {
+            // The frontier ran dry inside the budget without a single peer, usually because
+            // the routers' first referrals were all silent (#494). Once per walk, ask every
+            // bootstrap address again: a fresh `get_peers` where the first query got no
+            // answer, and a random-target `find_node` where it did, for a different set of
+            // nodes. A walk that already holds peers ends as before: on a sparse swarm the
+            // round found nothing new and only made the walk longer. `peers_discovered` only
+            // counts correlated replies, so spoofed traffic can neither start nor suppress
+            // the round. `dht_announce_peer` walks follow the same rule; they run in the
+            // background, so the extra round costs them nothing visible.
+            //
+            // Nodes that answered earlier walks (#522) join the round, so a network where
+            // the routers are slow or unreachable still has somewhere live to restart from.
+            // Nodes this walk already asked are skipped: their answer led here.
+            recovery_started_at = Some(metrics.peers_discovered);
+            let queried_before = queried.len();
+            let cached = cache.map_or_else(Vec::new, |cache| {
+                cache.fresh(Instant::now(), NODE_CACHE_PER_WALK, |addr| {
+                    queried.contains(addr) || bootstraps.iter().any(|node| node.addr == *addr)
+                })
+            });
+            for (addr, kind) in recovery_targets(&bootstraps, cached) {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let txid = next_txid.to_be_bytes();
+                next_txid = next_txid.wrapping_add(1);
+                let query = match kind {
+                    RecoveryQuery::FindNode => build_find_node(&node_id, &rand::random(), &txid),
+                    RecoveryQuery::GetPeers => build_get_peers(&node_id, infohash, &txid),
+                };
+                let sent = tokio::time::timeout_at(
+                    tokio_deadline,
+                    sock.send_to(&query, SocketAddr::V4(addr)),
+                )
+                .await
+                .is_ok_and(|sent| sent.is_ok());
+                if sent {
+                    metrics.nodes_queried += 1;
+                    metrics.recovery_queries += 1;
+                    queried.insert(addr);
+                    let sent_at = Instant::now();
+                    // Replaces the first query's entry, whose slot was already released: a
+                    // late reply to the old txid is now uncorrelated, and only the fresh txid
+                    // from this exact address is accepted.
+                    inflight.insert(
+                        addr,
+                        Inflight {
+                            txid,
+                            release: sent_at + SLOT_TIMEOUT,
+                            expires: sent_at + INFLIGHT_TTL,
+                            active: true,
+                            heard: false,
+                        },
+                    );
+                    active += 1;
+                }
+            }
+            if active > 0 {
+                crate::alog!(
+                    "[dht] frontier dry with no peers after queried={}: recovery round sent {}",
+                    queried_before,
+                    metrics.recovery_queries
+                );
+            }
+        }
         if active == 0 && lookups.is_empty() {
             // Nothing left to ask and nothing outstanding that could add to the frontier.
             metrics.frontier_exhausted = true;
@@ -455,7 +810,13 @@ async fn dht_walk_owned(
         let received = tokio::select! {
             result = lookups.join_next(), if !lookups.is_empty() => {
                 if let Some(result) = result {
-                    add_bootstrap(result, &mut frontier, &mut metrics);
+                    add_bootstrap(
+                result,
+                &mut frontier,
+                &mut bootstraps,
+                &responded,
+                &mut metrics,
+            );
                 }
                 continue;
             }
@@ -511,6 +872,12 @@ async fn dht_walk_owned(
             }
         }
         metrics.valid_responses += 1;
+        responded.insert(src);
+        if let Some(node) = bootstraps.iter_mut().find(|node| node.addr == src) {
+            node.answered = true;
+        } else {
+            answered.note(src, !resp.peers.is_empty(), Instant::now());
+        }
         metrics.peers_discovered += resp.peers.len();
         metrics.nodes_discovered += resp.nodes.len();
         for (id, addr) in &resp.nodes {
@@ -526,9 +893,20 @@ async fn dht_walk_owned(
         }
     }
 
+    if let Some(before) = recovery_started_at {
+        metrics.recovery_peers = metrics.peers_discovered - before;
+    }
+    if let Some(cache) = cache {
+        // A router can answer as a referral before its own lookup finishes and be noted
+        // here; the recovery round asks routers anyway, so it takes no cache slot.
+        let entries =
+            answered.into_preferred_first(|addr| bootstraps.iter().any(|node| node.addr == *addr));
+        cache.record_answered(&entries);
+    }
     crate::alog!(
         "[dht] walk done: seeded={} queried={} valid={} peers={} nodes={} malformed={} \
-         krpc_err={} uncorrelated={} timeouts={} frontier_exhausted={}",
+         krpc_err={} uncorrelated={} timeouts={} recovery_queries={} recovery_peers={} \
+         frontier_exhausted={}",
         metrics.bootstrap_seeded,
         metrics.nodes_queried,
         metrics.valid_responses,
@@ -538,6 +916,8 @@ async fn dht_walk_owned(
         metrics.krpc_errors,
         metrics.uncorrelated_responses,
         metrics.timeouts,
+        metrics.recovery_queries,
+        metrics.recovery_peers,
         metrics.frontier_exhausted,
     );
     metrics
@@ -735,6 +1115,7 @@ mod tests {
                 &socket,
                 hosts,
                 resolver,
+                None,
                 |_, response| {
                     if response.peers.contains(&peer) {
                         let _ = publication.try_send(peer);
@@ -825,6 +1206,7 @@ mod tests {
             &socket,
             &["first.invalid:1", "late.invalid:1"],
             resolver.clone(),
+            None,
             |_, response| {
                 published |= response.peers.contains(&peer);
                 published
@@ -1617,6 +1999,7 @@ mod tests {
         eprintln!("multi-hop first peer after {first_peer:?}");
         assert_eq!(metrics.nodes_queried, 4);
         assert_eq!(metrics.valid_responses, 4);
+        assert_eq!(metrics.recovery_queries, 0);
         assert!(
             first_peer < Duration::from_millis(300),
             "4-hop walk took {first_peer:?}; it is waiting out fixed rounds"
@@ -1650,7 +2033,7 @@ mod tests {
         let mut lookups = tokio::task::JoinSet::new();
         lookups.spawn(async {
             std::future::pending::<()>().await;
-            (0, None)
+            (0, Vec::new())
         });
         let mut frontier = BTreeMap::new();
         frontier.insert([0xff; 20], seed);
@@ -1661,7 +2044,9 @@ mod tests {
             Instant::now() + INFLIGHT_TTL + Duration::from_millis(600),
             &client,
             frontier,
+            Vec::new(),
             lookups,
+            None,
             |_src, resp| {
                 accepted |= resp.peers.contains(&peer);
                 false
@@ -1954,6 +2339,852 @@ mod tests {
         handle.await.unwrap();
     }
 
+    // --- Bootstrap dead-end recovery (#494) ---
+
+    /// The KRPC method name (`q`) of a query datagram.
+    fn query_method(buf: &[u8]) -> Vec<u8> {
+        Bencode::parse(buf)
+            .ok()
+            .and_then(|v| v.get(b"q").and_then(Bencode::as_bytes).map(<[u8]>::to_vec))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn find_node_query_roundtrips() {
+        let q = build_find_node(&[1u8; 20], &[2u8; 20], b"ab");
+        let v = Bencode::parse(&q).unwrap();
+        assert_eq!(
+            v.get(b"y").and_then(Bencode::as_bytes),
+            Some(b"q".as_slice())
+        );
+        assert_eq!(query_method(&q), b"find_node");
+        assert_eq!(
+            v.get(b"t").and_then(Bencode::as_bytes),
+            Some(b"ab".as_slice())
+        );
+        assert_eq!(
+            v.get(b"v").and_then(Bencode::as_bytes),
+            Some(CLIENT_VERSION)
+        );
+        let a = v.get(b"a").unwrap();
+        assert_eq!(
+            a.get(b"id").and_then(Bencode::as_bytes),
+            Some([1u8; 20].as_slice())
+        );
+        assert_eq!(
+            a.get(b"target").and_then(Bencode::as_bytes),
+            Some([2u8; 20].as_slice())
+        );
+        assert!(a.get(b"info_hash").is_none());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_resolution_keeps_distinct_ipv4_addresses_up_to_the_cap() {
+        let resolver = Resolver::controlled(|_| {
+            Ok(vec![
+                "[::1]:6881".parse().unwrap(),
+                "10.0.0.1:6881".parse().unwrap(),
+                "10.0.0.1:6881".parse().unwrap(),
+                "10.0.0.2:6881".parse().unwrap(),
+                "10.0.0.3:6881".parse().unwrap(),
+            ])
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let addrs =
+            resolve_bootstrap("router.invalid:6881".into(), resolver.clone(), deadline).await;
+        resolver.finish_controlled().await;
+        let expected: Vec<SocketAddrV4> = vec![
+            "10.0.0.1:6881".parse().unwrap(),
+            "10.0.0.2:6881".parse().unwrap(),
+        ];
+        assert_eq!(addrs, expected);
+    }
+
+    #[tokio::test]
+    async fn every_address_behind_a_bootstrap_host_is_seeded() {
+        // A router behind two addresses: the first drops every query, the second answers.
+        // Asking only the first address would lose the router outright.
+        let dead = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let live = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addrs = vec![
+            SocketAddr::V4(v4_addr(&dead)),
+            SocketAddr::V4(v4_addr(&live)),
+        ];
+        let peer: SocketAddrV4 = "10.0.0.9:9999".parse().unwrap();
+        let server = answer_once(live, move |txid| response_with(txid, &[peer], &[]));
+        let resolver = Resolver::controlled(move |_| Ok(addrs.clone()));
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut found = false;
+        let metrics = dht_walk_with_bootstraps(
+            &[0; 20],
+            Duration::from_secs(2),
+            &socket,
+            &["router.invalid:1"],
+            resolver.clone(),
+            None,
+            |_, response| {
+                found |= response.peers.contains(&peer);
+                found
+            },
+        )
+        .await;
+        server.abort();
+        resolver.finish_controlled().await;
+        drop(dead);
+        assert!(
+            found,
+            "second address behind the bootstrap host was never asked"
+        );
+        assert_eq!(metrics.bootstrap_seeded, 2);
+        assert_eq!(metrics.recovery_queries, 0);
+    }
+
+    /// The KRPC methods a [`scripted_router`] was asked, in arrival order.
+    type AskedLog = std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
+
+    /// A bootstrap router fixture: answers each query it receives with `reply(n, method, txid)`
+    /// (`n` counts queries from zero), or stays silent when that returns `None`. Records the
+    /// methods it was asked.
+    fn scripted_router(
+        server: UdpSocket,
+        reply: impl Fn(usize, &[u8], &[u8]) -> Option<Vec<u8>> + Send + 'static,
+    ) -> (tokio::task::JoinHandle<()>, AskedLog) {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let handle = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            for n in 0.. {
+                let Ok((len, caller)) = server.recv_from(&mut buf).await else {
+                    return;
+                };
+                let method = query_method(&buf[..len]);
+                log.lock().unwrap().push(method.clone());
+                if let Some(resp) = reply(n, &method, &buf_txid(&buf[..len])) {
+                    let _ = server.send_to(&resp, caller).await;
+                }
+            }
+        });
+        (handle, asked)
+    }
+
+    #[tokio::test]
+    async fn dead_end_walk_recovers_by_widening_at_an_answering_router() {
+        // The failure from #494: the router answers, but its only referral is silent, so the
+        // frontier runs dry after one hop. The recovery `find_node` gets a fresh referral
+        // that does hold peers.
+        let target = [0u8; 20];
+        let sockets = bind_loopback(3).await;
+        let addrs: Vec<SocketAddrV4> = sockets.iter().map(v4_addr).collect();
+        let (router, silent_referral, good_referral) = (addrs[0], addrs[1], addrs[2]);
+        let mut sockets = sockets.into_iter();
+        let router_sock = sockets.next().unwrap();
+        let silent_sock = sockets.next().unwrap();
+        let good_sock = sockets.next().unwrap();
+        let peer: SocketAddrV4 = "10.0.0.7:7777".parse().unwrap();
+        let (router_task, asked) = scripted_router(router_sock, move |_, method, txid| {
+            let referral = if method == b"find_node" {
+                ([0x60; 20], good_referral)
+            } else {
+                ([0x40; 20], silent_referral)
+            };
+            Some(response_with(txid, &[], &[referral]))
+        });
+        let good_task = answer_once(good_sock, move |txid| response_with(txid, &[peer], &[]));
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let mut found = false;
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &target,
+            Duration::from_secs(10),
+            &client,
+            vec![router],
+            None,
+            |_, response| {
+                found |= response.peers.contains(&peer);
+                found
+            },
+        )
+        .await;
+        let elapsed = start.elapsed();
+        router_task.abort();
+        good_task.abort();
+        drop(silent_sock);
+        assert!(
+            found,
+            "recovery round did not rescue the dead-end walk: {metrics:?}"
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![b"get_peers".to_vec(), b"find_node".to_vec()]
+        );
+        assert_eq!(metrics.recovery_queries, 1);
+        assert_eq!(metrics.recovery_peers, 1);
+        assert_eq!(metrics.nodes_queried, 4);
+        assert!(!metrics.frontier_exhausted);
+        // One slot timeout for the silent referral, then network speed.
+        assert!(
+            elapsed < SLOT_TIMEOUT + Duration::from_millis(500),
+            "took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_router_is_asked_once_more_with_a_fresh_transaction() {
+        // A router that dropped the first query (loss, rate limiting) gets one fresh
+        // `get_peers` and answers it.
+        let router_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let router = v4_addr(&router_sock);
+        let peer: SocketAddrV4 = "10.0.0.8:8888".parse().unwrap();
+        let txids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = txids.clone();
+        let (router_task, asked) = scripted_router(router_sock, move |n, _, txid| {
+            seen.lock().unwrap().push(txid.to_vec());
+            (n == 1).then(|| response_with(txid, &[peer], &[]))
+        });
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut found = false;
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &[0; 20],
+            Duration::from_secs(10),
+            &client,
+            vec![router],
+            None,
+            |_, response| {
+                found |= response.peers.contains(&peer);
+                found
+            },
+        )
+        .await;
+        router_task.abort();
+        assert!(
+            found,
+            "re-asked router's answer was not accepted: {metrics:?}"
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![b"get_peers".to_vec(), b"get_peers".to_vec()]
+        );
+        let txids = txids.lock().unwrap();
+        assert_ne!(
+            txids[0], txids[1],
+            "re-query reused the first transaction id"
+        );
+        assert_eq!(metrics.recovery_queries, 1);
+        assert_eq!(metrics.timeouts, 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_runs_once_and_a_truly_dead_walk_still_ends() {
+        // Every router and referral silent: one recovery query per bootstrap, then the walk
+        // ends exhausted well inside its budget instead of retrying forever.
+        let sockets = bind_loopback(2).await;
+        let seeds: Vec<SocketAddrV4> = sockets.iter().map(v4_addr).collect();
+        let mut tasks = Vec::new();
+        let mut logs = Vec::new();
+        for sock in sockets {
+            let (task, asked) = scripted_router(sock, |_, _, _| None);
+            tasks.push(task);
+            logs.push(asked);
+        }
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &[0; 20],
+            Duration::from_secs(10),
+            &client,
+            seeds,
+            None,
+            |_, _| false,
+        )
+        .await;
+        let elapsed = start.elapsed();
+        for task in tasks {
+            task.abort();
+        }
+        for asked in logs {
+            assert_eq!(
+                asked.lock().unwrap().len(),
+                2,
+                "each router is asked exactly twice"
+            );
+        }
+        assert_eq!(metrics.recovery_queries, 2);
+        assert_eq!(metrics.nodes_queried, 4);
+        assert_eq!(metrics.timeouts, 4);
+        assert!(metrics.frontier_exhausted);
+        assert!(
+            elapsed < 2 * SLOT_TIMEOUT + Duration::from_millis(500),
+            "took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spoofed_traffic_cannot_mark_a_router_answered_or_add_queries() {
+        // A spoofer floods the client with well-formed responses naming the router's txid
+        // space and a referral of its own. None correlates, so the router still counts as
+        // unanswered (re-asked with `get_peers`, not widened), and the spoofed referral is
+        // never queried.
+        let router_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let router = v4_addr(&router_sock);
+        let lure = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let lure_addr = v4_addr(&lure);
+        let lure_log = scripted_router(lure, |_, _, _| None);
+        let (router_task, asked) = scripted_router(router_sock, |_, _, _| None);
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_addr = v4_addr(&client);
+        let spoofer = tokio::spawn(async move {
+            let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            for i in 0u16..64 {
+                let resp = response_with(&i.to_be_bytes(), &[], &[([0x11; 20], lure_addr)]);
+                let _ = sock.send_to(&resp, client_addr).await;
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        });
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &[0; 20],
+            Duration::from_secs(10),
+            &client,
+            vec![router],
+            None,
+            |_, _| false,
+        )
+        .await;
+        spoofer.abort();
+        router_task.abort();
+        lure_log.0.abort();
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![b"get_peers".to_vec(), b"get_peers".to_vec()]
+        );
+        assert!(
+            lure_log.1.lock().unwrap().is_empty(),
+            "spoofed referral was queried"
+        );
+        assert_eq!(metrics.valid_responses, 0);
+        assert_eq!(metrics.nodes_queried, 2);
+        assert_eq!(metrics.recovery_queries, 1);
+        assert!(metrics.uncorrelated_responses > 0);
+    }
+
+    #[tokio::test]
+    async fn walk_that_runs_dry_holding_peers_skips_the_recovery_round() {
+        // A sparse swarm: the router hands over one peer (below the target) and nothing
+        // else. The walk already has a result, so it ends at once instead of asking again.
+        let router_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let router = v4_addr(&router_sock);
+        let peer: SocketAddrV4 = "10.0.0.6:6666".parse().unwrap();
+        let (router_task, asked) = scripted_router(router_sock, move |_, _, txid| {
+            Some(response_with(txid, &[peer], &[]))
+        });
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &[0; 20],
+            Duration::from_secs(10),
+            &client,
+            vec![router],
+            None,
+            |_, _| false,
+        )
+        .await;
+        let elapsed = start.elapsed();
+        router_task.abort();
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        assert_eq!(metrics.peers_discovered, 1);
+        assert_eq!(metrics.recovery_queries, 0);
+        assert!(metrics.frontier_exhausted);
+        assert!(elapsed < Duration::from_millis(300), "took {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn walk_that_reaches_its_deadline_sends_no_recovery_round() {
+        // The silent router's slot outlives the budget, so the walk ends on its deadline and
+        // never runs dry inside it: nothing more may be sent.
+        let router_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let router = v4_addr(&router_sock);
+        let (router_task, asked) = scripted_router(router_sock, |_, _, _| None);
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &[0; 20],
+            SLOT_TIMEOUT - Duration::from_millis(500),
+            &client,
+            vec![router],
+            None,
+            |_, _| false,
+        )
+        .await;
+        router_task.abort();
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        assert_eq!(metrics.recovery_queries, 0);
+        assert!(!metrics.frontier_exhausted);
+    }
+
+    // --- Recovery seeds from recently answering nodes (#522) ---
+
+    fn addr(last: u8) -> SocketAddrV4 {
+        SocketAddrV4::new(Ipv4Addr::new(10, 0, 1, last), 6881)
+    }
+
+    #[test]
+    fn node_cache_keeps_newest_first_without_duplicates_up_to_the_cap() {
+        let cache = NodeCache::new();
+        let now = Instant::now();
+        cache.record(&[addr(1), addr(2)], now);
+        cache.record(&[addr(3), addr(1)], now);
+        assert_eq!(
+            cache.fresh(now, usize::MAX, |_| false),
+            vec![addr(3), addr(1), addr(2)]
+        );
+        let many: Vec<SocketAddrV4> = (0..=NODE_CACHE_CAP as u8 + 4).map(addr).collect();
+        cache.record(&many, now);
+        let kept = cache.fresh(now, usize::MAX, |_| false);
+        assert_eq!(kept.len(), NODE_CACHE_CAP);
+        assert_eq!(kept[0], addr(0));
+        assert_eq!(
+            cache.fresh(now, 2, |a| *a == addr(0)),
+            vec![addr(1), addr(2)]
+        );
+    }
+
+    #[test]
+    fn node_cache_drops_entries_older_than_the_max_age() {
+        let cache = NodeCache::new();
+        let then = Instant::now();
+        cache.record(&[addr(1)], then);
+        cache.record(&[addr(2)], then + Duration::from_secs(60));
+        let later = then + NODE_CACHE_MAX_AGE + Duration::from_secs(1);
+        assert_eq!(cache.fresh(later, usize::MAX, |_| false), vec![addr(2)]);
+        assert_eq!(cache.nodes.lock().unwrap().len(), 1, "expired entry kept");
+    }
+
+    #[test]
+    fn cached_age_counts_from_the_reply_not_the_end_of_the_walk() {
+        // A node that answered at the start of a 20 s walk expires 15 minutes after that
+        // reply, not 15 minutes after the walk ended.
+        let start = Instant::now();
+        let mut answered = Answered::default();
+        answered.note(addr(1), true, start);
+        answered.note(addr(2), false, start + Duration::from_secs(20));
+        let cache = NodeCache::new();
+        cache.record_answered(&answered.into_preferred_first(|_| false));
+        let check = start + NODE_CACHE_MAX_AGE + Duration::from_secs(10);
+        assert_eq!(cache.fresh(check, usize::MAX, |_| false), vec![addr(2)]);
+        // A reply recorded at once is still eligible.
+        let cache = NodeCache::new();
+        cache.record_answered(&[(addr(3), start)]);
+        assert_eq!(cache.fresh(start, usize::MAX, |_| false), vec![addr(3)]);
+    }
+
+    #[test]
+    fn an_older_reply_never_replaces_a_newer_one_in_the_cache() {
+        let start = Instant::now();
+        let cache = NodeCache::new();
+        cache.record_answered(&[(addr(1), start + Duration::from_secs(10))]);
+        cache.record_answered(&[(addr(1), start)]);
+        let check = start + NODE_CACHE_MAX_AGE + Duration::from_secs(5);
+        assert_eq!(cache.fresh(check, usize::MAX, |_| false), vec![addr(1)]);
+    }
+
+    #[test]
+    fn an_older_reply_does_not_move_a_node_ahead_of_newer_ones() {
+        // A at t=10, then B at t=20, then a late report of A from t=0: B stays first, so a
+        // recovery round with one free slot asks B.
+        let start = Instant::now();
+        let cache = NodeCache::new();
+        cache.record_answered(&[(addr(1), start + Duration::from_secs(10))]);
+        cache.record_answered(&[(addr(2), start + Duration::from_secs(20))]);
+        cache.record_answered(&[(addr(1), start)]);
+        let now = start + Duration::from_secs(30);
+        assert_eq!(cache.fresh(now, 1, |_| false), vec![addr(2)]);
+        // A newer reply still promotes it.
+        cache.record_answered(&[(addr(1), start + Duration::from_secs(25))]);
+        assert_eq!(cache.fresh(now, 1, |_| false), vec![addr(1)]);
+    }
+
+    #[test]
+    fn cache_order_follows_reply_time_not_which_walk_finished_first() {
+        // B replied at t=20 in a walk that finished first; A replied at t=10 in a walk that
+        // finished later. With one free slot, recovery must ask B.
+        let start = Instant::now();
+        let cache = NodeCache::new();
+        cache.record_answered(&[(addr(2), start + Duration::from_secs(20))]);
+        cache.record_answered(&[(addr(1), start + Duration::from_secs(10))]);
+        let now = start + Duration::from_secs(30);
+        assert_eq!(cache.fresh(now, 1, |_| false), vec![addr(2)]);
+        assert_eq!(
+            cache.fresh(now, usize::MAX, |_| false),
+            vec![addr(2), addr(1)]
+        );
+    }
+
+    #[test]
+    fn router_that_answered_before_its_lookup_finished_counts_as_answered() {
+        let early = addr(1);
+        let mut responded = HashSet::new();
+        responded.insert(early);
+        let mut frontier = BTreeMap::new();
+        let mut bootstraps = Vec::new();
+        let mut metrics = DhtWalkMetrics::default();
+        add_bootstrap(
+            Ok((0, vec![early, addr(2)])),
+            &mut frontier,
+            &mut bootstraps,
+            &responded,
+            &mut metrics,
+        );
+        let answered: Vec<bool> = bootstraps.iter().map(|node| node.answered).collect();
+        assert_eq!(answered, vec![true, false]);
+        assert_eq!(
+            recovery_targets(&bootstraps, Vec::new())[0],
+            (early, RecoveryQuery::FindNode)
+        );
+    }
+
+    #[test]
+    fn a_filtered_router_does_not_cost_a_responder_its_cache_place() {
+        // A router noted first, then eight real responders: once the router is filtered
+        // out, all eight responders still fit the per-walk limit.
+        let router = addr(200);
+        let mut answered = Answered::default();
+        answered.note(router, true, Instant::now());
+        for i in 0..NODE_CACHE_PER_WALK as u8 {
+            answered.note(addr(i), true, Instant::now());
+        }
+        let out = answered.into_preferred_first(|a| *a == router);
+        let expected: Vec<SocketAddrV4> = (0..NODE_CACHE_PER_WALK as u8).map(addr).collect();
+        assert_eq!(out.iter().map(|(a, _)| *a).collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn answered_prefers_nodes_that_returned_peers_and_is_bounded() {
+        let mut answered = Answered::default();
+        for i in 0..20 {
+            answered.note(addr(i), i % 2 == 1, Instant::now());
+        }
+        answered.note(addr(1), true, Instant::now());
+        let out = answered.into_preferred_first(|_| false);
+        assert_eq!(out.len(), NODE_CACHE_PER_WALK);
+        assert!(
+            out.iter().all(|(a, _)| a.ip().octets()[3] % 2 == 1),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn recovery_targets_keep_every_router_and_fill_only_free_slots_from_the_cache() {
+        let routers: Vec<BootstrapNode> = (0..5)
+            .map(|i| BootstrapNode {
+                addr: addr(100 + i),
+                answered: i == 3,
+            })
+            .collect();
+        let cached: Vec<SocketAddrV4> = (0..8).map(addr).collect();
+        // Five routers, as a real walk seeds: all five keep their #494 query and order, and
+        // the cache gets the three free slots, newest first.
+        let targets = recovery_targets(&routers, cached.clone());
+        let expected: Vec<(SocketAddrV4, RecoveryQuery)> = routers
+            .iter()
+            .map(|node| {
+                let query = if node.answered {
+                    RecoveryQuery::FindNode
+                } else {
+                    RecoveryQuery::GetPeers
+                };
+                (node.addr, query)
+            })
+            .chain(cached[..3].iter().map(|a| (*a, RecoveryQuery::GetPeers)))
+            .collect();
+        assert_eq!(targets, expected);
+        // Routers fill every slot: the cache gets none, so silent routers are never cut.
+        let full: Vec<BootstrapNode> = (0..MAX_ACTIVE as u8)
+            .map(|i| BootstrapNode {
+                addr: addr(100 + i),
+                answered: false,
+            })
+            .collect();
+        let targets = recovery_targets(&full, cached.clone());
+        assert_eq!(targets.len(), MAX_ACTIVE);
+        assert!(targets.iter().all(|(a, _)| !cached.contains(a)));
+        // No routers resolved: the cache alone, still capped.
+        assert_eq!(recovery_targets(&[], cached.clone()).len(), MAX_ACTIVE);
+        // No cache: identical to the #494 round.
+        assert_eq!(recovery_targets(&routers, Vec::new()).len(), 5);
+    }
+
+    #[tokio::test]
+    async fn silent_routers_recover_through_a_remembered_node() {
+        // Routers that stay silent even when asked again, but a node that answered an
+        // earlier walk is still up and points at the swarm.
+        let router_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let router = v4_addr(&router_sock);
+        let (router_task, router_asked) = scripted_router(router_sock, |_, _, _| None);
+        let remembered_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remembered = v4_addr(&remembered_sock);
+        let peer: SocketAddrV4 = "10.0.0.5:5555".parse().unwrap();
+        let (remembered_task, remembered_asked) =
+            scripted_router(remembered_sock, move |_, _, txid| {
+                Some(response_with(txid, &[peer], &[]))
+            });
+        let cache = NodeCache::new();
+        cache.record(&[remembered], Instant::now());
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let mut found = false;
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &[0; 20],
+            Duration::from_secs(10),
+            &client,
+            vec![router],
+            Some(&cache),
+            |_, response| {
+                found |= response.peers.contains(&peer);
+                found
+            },
+        )
+        .await;
+        let elapsed = start.elapsed();
+        router_task.abort();
+        remembered_task.abort();
+        assert!(
+            found,
+            "remembered node did not rescue the walk: {metrics:?}"
+        );
+        assert_eq!(router_asked.lock().unwrap().len(), 2);
+        assert_eq!(
+            *remembered_asked.lock().unwrap(),
+            vec![b"get_peers".to_vec()]
+        );
+        assert_eq!(metrics.recovery_queries, 2);
+        assert_eq!(metrics.recovery_peers, 1);
+        assert!(
+            elapsed < SLOT_TIMEOUT + Duration::from_millis(500),
+            "took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolvable_routers_recover_through_a_remembered_node() {
+        // Every bootstrap hostname fails to resolve, so the walk starts with nothing to ask.
+        // Before #522 it ended at once with no peers.
+        let remembered_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remembered = v4_addr(&remembered_sock);
+        let peer: SocketAddrV4 = "10.0.0.4:4444".parse().unwrap();
+        let server = answer_once(remembered_sock, move |txid| {
+            response_with(txid, &[peer], &[])
+        });
+        let cache = NodeCache::new();
+        cache.record(&[remembered], Instant::now());
+        let resolver = Resolver::controlled(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such host",
+            ))
+        });
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut found = false;
+        let metrics = dht_walk_with_bootstraps(
+            &[0; 20],
+            Duration::from_secs(2),
+            &client,
+            &["router.invalid:1"],
+            resolver.clone(),
+            Some(&cache),
+            |_, response| {
+                found |= response.peers.contains(&peer);
+                found
+            },
+        )
+        .await;
+        server.abort();
+        resolver.finish_controlled().await;
+        assert!(found, "walk with no routers ignored the cache: {metrics:?}");
+        assert_eq!(metrics.bootstrap_seeded, 0);
+        assert_eq!(metrics.recovery_queries, 1);
+    }
+
+    #[tokio::test]
+    async fn router_resolved_after_answering_as_a_referral_is_not_cached() {
+        // Router A refers B; B answers before B's own lookup finishes, then resolves as a
+        // router. Neither router may take a cache slot.
+        use std::sync::{Arc, Condvar, Mutex};
+        let sockets = bind_loopback(2).await;
+        let addrs: Vec<SocketAddrV4> = sockets.iter().map(v4_addr).collect();
+        let (router_a, router_b) = (addrs[0], addrs[1]);
+        let mut sockets = sockets.into_iter();
+        let peer: SocketAddrV4 = "10.0.0.2:2222".parse().unwrap();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let resolver = Resolver::controlled({
+            let gate = gate.clone();
+            move |host| {
+                if host.starts_with("late.") {
+                    let mut released = gate.0.lock().unwrap();
+                    while !*released {
+                        released = gate.1.wait(released).unwrap();
+                    }
+                    Ok(vec![SocketAddr::V4(router_b)])
+                } else {
+                    Ok(vec![SocketAddr::V4(router_a)])
+                }
+            }
+        });
+        let (a_task, _) = scripted_router(sockets.next().unwrap(), move |_, _, txid| {
+            Some(response_with(txid, &[], &[([0x20; 20], router_b)]))
+        });
+        let b_task = answer_once(sockets.next().unwrap(), move |txid| {
+            response_with(txid, &[peer], &[])
+        });
+        let release = gate.clone();
+        let cache = NodeCache::new();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let metrics = dht_walk_with_bootstraps(
+            &[0; 20],
+            Duration::from_secs(3),
+            &client,
+            &["first.invalid:1", "late.invalid:1"],
+            resolver.clone(),
+            Some(&cache),
+            |_, response| {
+                // B's reply has been accepted while B is still unresolved: only now let
+                // its lookup finish.
+                if response.peers.contains(&peer) {
+                    *release.0.lock().unwrap() = true;
+                    release.1.notify_all();
+                }
+                false
+            },
+        )
+        .await;
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        a_task.abort();
+        b_task.abort();
+        resolver.finish_controlled().await;
+        assert_eq!(metrics.peers_discovered, 1, "{metrics:?}");
+        assert_eq!(metrics.bootstrap_seeded, 2, "B never resolved: {metrics:?}");
+        assert!(
+            cache
+                .fresh(Instant::now(), usize::MAX, |_| false)
+                .is_empty(),
+            "a router took a cache slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn healthy_walk_never_asks_the_cache_but_teaches_it() {
+        // The router hands over a referral that returns peers. The remembered node must not
+        // be asked, and the referral that answered is remembered for later walks.
+        let sockets = bind_loopback(3).await;
+        let addrs: Vec<SocketAddrV4> = sockets.iter().map(v4_addr).collect();
+        let (router, referral, remembered) = (addrs[0], addrs[1], addrs[2]);
+        let mut sockets = sockets.into_iter();
+        let peer: SocketAddrV4 = "10.0.0.3:3333".parse().unwrap();
+        let (router_task, _) = scripted_router(sockets.next().unwrap(), move |_, _, txid| {
+            Some(response_with(txid, &[], &[([0x20; 20], referral)]))
+        });
+        let (referral_task, _) = scripted_router(sockets.next().unwrap(), move |_, _, txid| {
+            Some(response_with(txid, &[peer], &[]))
+        });
+        let (remembered_task, remembered_asked) =
+            scripted_router(sockets.next().unwrap(), |_, _, _| None);
+        let cache = NodeCache::new();
+        cache.record(&[remembered], Instant::now());
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &[0; 20],
+            Duration::from_secs(5),
+            &client,
+            vec![router],
+            Some(&cache),
+            |_, response| response.peers.contains(&peer),
+        )
+        .await;
+        router_task.abort();
+        referral_task.abort();
+        remembered_task.abort();
+        assert_eq!(metrics.peers_discovered, 1);
+        assert_eq!(metrics.recovery_queries, 0);
+        assert!(remembered_asked.lock().unwrap().is_empty());
+        assert_eq!(
+            cache.fresh(Instant::now(), usize::MAX, |_| false),
+            vec![referral, remembered],
+            "the router is not cached, the answering referral is, newest first"
+        );
+    }
+
+    #[tokio::test]
+    async fn spoofed_replies_never_enter_the_cache() {
+        // A flood of well-formed but uncorrelated responses during a dead walk leaves the
+        // cache empty: only a reply to a query we sent can add a node.
+        let router_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let router = v4_addr(&router_sock);
+        let (router_task, _) = scripted_router(router_sock, |_, _, _| None);
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_addr = v4_addr(&client);
+        let spoofer = tokio::spawn(async move {
+            let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            for i in 0u16..64 {
+                let resp = response_with(&i.to_be_bytes(), &[addr(9)], &[]);
+                let _ = sock.send_to(&resp, client_addr).await;
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        });
+        let cache = NodeCache::new();
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &[0; 20],
+            Duration::from_secs(10),
+            &client,
+            vec![router],
+            Some(&cache),
+            |_, _| false,
+        )
+        .await;
+        spoofer.abort();
+        router_task.abort();
+        assert!(metrics.uncorrelated_responses > 0);
+        assert_eq!(metrics.valid_responses, 0);
+        assert!(cache
+            .fresh(Instant::now(), usize::MAX, |_| false)
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn remembered_node_already_asked_this_walk_is_not_asked_again() {
+        // The router's referral is also in the cache. It answered without peers, so asking it
+        // the same question in the recovery round would only repeat that answer.
+        let sockets = bind_loopback(2).await;
+        let addrs: Vec<SocketAddrV4> = sockets.iter().map(v4_addr).collect();
+        let (router, referral) = (addrs[0], addrs[1]);
+        let mut sockets = sockets.into_iter();
+        let (router_task, _) = scripted_router(sockets.next().unwrap(), move |n, _, txid| {
+            (n == 0).then(|| response_with(txid, &[], &[([0x20; 20], referral)]))
+        });
+        let (referral_task, referral_asked) =
+            scripted_router(sockets.next().unwrap(), |_, _, txid| {
+                Some(response_with(txid, &[], &[]))
+            });
+        let cache = NodeCache::new();
+        cache.record(&[referral], Instant::now());
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let metrics = dht_walk_from_bootstrap_seeds(
+            &[0; 20],
+            Duration::from_secs(10),
+            &client,
+            vec![router],
+            Some(&cache),
+            |_, _| false,
+        )
+        .await;
+        router_task.abort();
+        referral_task.abort();
+        assert_eq!(referral_asked.lock().unwrap().len(), 1);
+        assert_eq!(
+            metrics.recovery_queries, 1,
+            "only the router is asked again"
+        );
+        assert!(metrics.frontier_exhausted);
+    }
+
     // Live DHT lookup against a real infohash:
     //   ACE_INFOHASH=50e935...2d6e47 cargo test -p ace-swarm dht_live -- --ignored --nocapture
     #[tokio::test]
@@ -1970,6 +3201,121 @@ mod tests {
             println!("  {p}");
         }
         assert!(!peers.is_empty(), "DHT returned no peers");
+    }
+
+    // Live check of the recovery seeds (#522): a warm-up walk with the real routers fills a
+    // cache, then a second walk toward another infohash runs with the routers replaced by
+    // five silent documentation addresses (TEST-NET-1), as on a network where none answers.
+    // Each run uses a fresh cache, so it measures a cache filled seconds earlier. Every run
+    // measures the same channel twice, once with the cache and once without; which arm goes
+    // first flips on each full pass over the channels, independently of the channel.
+    // Prints one `measured` line per walk.
+    //   ACE_INFOHASHES=<40hex>,<40hex>[,...] ACE_RUNS=20 \
+    //     cargo test --release -p ace-swarm dht_live_recovery_cache -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn dht_live_recovery_cache_rescues_walks_without_routers() {
+        let parse = |hex: &str| {
+            let mut ih = [0u8; 20];
+            for (i, byte) in ih.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+            }
+            ih
+        };
+        let hashes: Vec<[u8; 20]> = std::env::var("ACE_INFOHASHES")
+            .expect("set ACE_INFOHASHES=40hex,40hex,...")
+            .split(',')
+            .map(|hex| parse(hex.trim()))
+            .collect();
+        assert!(hashes.len() >= 2, "need at least two infohashes");
+        let runs: usize = std::env::var("ACE_RUNS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let silent_routers = Resolver::controlled(|host| {
+            let last = match host.as_bytes()[0] {
+                b'a' => vec![1, 2],
+                b'b' => vec![3],
+                b'c' => vec![4],
+                _ => vec![5],
+            };
+            Ok(last
+                .into_iter()
+                .map(|i| SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, i), 6881)))
+                .collect())
+        });
+        let mut rescued = [0usize; 2];
+        for run in 0..runs {
+            let warm = &hashes[run % hashes.len()];
+            let measured = &hashes[(run + 1) % hashes.len()];
+            let cache_first = (run / hashes.len()).is_multiple_of(2);
+            let cache = NodeCache::new();
+            let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+            let mut warm_peers = 0;
+            dht_walk_with_bootstraps(
+                warm,
+                Duration::from_secs(20),
+                &socket,
+                BOOTSTRAP,
+                Resolver::global(),
+                Some(&cache),
+                |_, response| {
+                    warm_peers += response.peers.len();
+                    warm_peers >= DHT_PEER_TARGET
+                },
+            )
+            .await;
+            let cached = cache.fresh(Instant::now(), usize::MAX, |_| false).len();
+            for use_cache in [cache_first, !cache_first] {
+                let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+                let start = Instant::now();
+                let mut first_peer = None;
+                let mut peers = 0;
+                let metrics = dht_walk_with_bootstraps(
+                    measured,
+                    Duration::from_secs(20),
+                    &socket,
+                    // Four hosts, one behind two addresses: the five seeds a real walk gets, so
+                    // the cache only takes the three slots the routers would leave free.
+                    &[
+                        "a.invalid:6881",
+                        "b.invalid:6881",
+                        "c.invalid:6881",
+                        "d.invalid:6881",
+                    ],
+                    silent_routers.clone(),
+                    use_cache.then_some(&cache),
+                    |_, response| {
+                        if !response.peers.is_empty() && first_peer.is_none() {
+                            first_peer = Some(start.elapsed());
+                        }
+                        peers += response.peers.len();
+                        peers >= DHT_PEER_TARGET
+                    },
+                )
+                .await;
+                if metrics.peers_discovered > 0 {
+                    rescued[usize::from(use_cache)] += 1;
+                }
+                println!(
+                    "measured run={run} channel={} cache={use_cache} cached={cached} warm_peers={warm_peers} \
+                     peers={} queried={} valid={} recovery_queries={} first_peer_ms={} \
+                     walk_ms={}",
+                    (run + 1) % hashes.len(),
+                    metrics.peers_discovered,
+                    metrics.nodes_queried,
+                    metrics.valid_responses,
+                    metrics.recovery_queries,
+                    first_peer.map_or(-1, |d| d.as_millis() as i64),
+                    start.elapsed().as_millis(),
+                );
+            }
+        }
+        silent_routers.finish_controlled().await;
+        println!(
+            "summary runs={runs} with_peers_cache={} with_peers_no_cache={}",
+            rescued[1], rescued[0]
+        );
     }
 
     // Live DHT self-announce against a real infohash — confirms we can get tokens from real

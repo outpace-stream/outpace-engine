@@ -185,7 +185,11 @@ with `no_peers`:
 - A content id of a broadcast made by another Outpace daemon only resolves with
   `OUTPACE_BEP9_CONTENT_ID_FALLBACK=1`. See [Broadcasting](Broadcasting#watching-a-broadcast).
 
-`[dht] walk done: ... peers=N` tells you how many peers the DHT found.
+`[dht] walk done: ... peers=N` tells you how many peers the DHT found. When a search runs
+out of nodes to ask before finding any peer, it asks the bootstrap routers once more,
+together with up to a few DHT nodes that answered earlier searches in the last 15 minutes
+(remembered in memory only, so a fresh process starts with none):
+`recovery_queries` counts those extra queries and `recovery_peers` the peers they led to.
 
 ## No inbound peers
 
