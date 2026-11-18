@@ -546,20 +546,83 @@ async fn catalog_transport_bytes_query(
     parameter: &str,
     value: &str,
 ) -> Result<Vec<u8>, ResolveError> {
-    let mut last = ResolveError::CatalogNetwork("catalog request failed");
-    for &(host, port) in CATALOG_HOSTS {
-        match tokio::time::timeout(
-            CATALOG_HOST_TIMEOUT,
-            fetch_catalog_transport_query(host, port, parameter, value),
+    catalog_transport_bytes_from(CATALOG_HOSTS, CATALOG_HOST_TIMEOUT, parameter, value).await
+}
+
+/// Why one catalog host gave no transport.
+#[derive(Debug)]
+enum CatalogHostFailure {
+    /// No usable reply: unreachable, timed out, or an HTTP reply that is not a readable `200`
+    /// (a wrong status, broken framing, an oversized body). It says nothing about the id.
+    Unavailable(ResolveError),
+    /// The host replied and the reply was rejected: its verdict on this request.
+    Rejected(ResolveError),
+}
+
+#[cfg(test)]
+impl CatalogHostFailure {
+    fn into_error(self) -> ResolveError {
+        match self {
+            Self::Unavailable(error) | Self::Rejected(error) => error,
+        }
+    }
+}
+
+/// The error for a lookup that every host failed (#526). A rejected reply wins: it is the only
+/// failure that is about the id. Otherwise a network failure wins over an unusable HTTP reply,
+/// so one host that answers every request with a non-`200` status cannot turn an unreachable
+/// catalog into a rejection.
+fn catalog_lookup_error(failures: Vec<CatalogHostFailure>) -> ResolveError {
+    let mut rejected = None;
+    let mut network = None;
+    let mut unavailable = None;
+    for failure in failures {
+        match failure {
+            CatalogHostFailure::Rejected(error) => rejected = Some(error),
+            CatalogHostFailure::Unavailable(error @ ResolveError::CatalogNetwork(_)) => {
+                network.get_or_insert(error);
+            }
+            CatalogHostFailure::Unavailable(error) => unavailable = Some(error),
+        }
+    }
+    rejected
+        .or(network)
+        .or(unavailable)
+        .unwrap_or(ResolveError::CatalogNetwork("catalog request failed"))
+}
+
+async fn catalog_transport_bytes_from(
+    hosts: &[(&str, u16)],
+    host_timeout: Duration,
+    parameter: &str,
+    value: &str,
+) -> Result<Vec<u8>, ResolveError> {
+    let mut failures = Vec::with_capacity(hosts.len());
+    for &(host, port) in hosts {
+        let failure = match tokio::time::timeout(
+            host_timeout,
+            fetch_catalog_host(host, port, parameter, value),
         )
         .await
         {
             Ok(Ok(transport)) => return Ok(transport),
-            Ok(Err(e)) => last = e,
-            Err(_) => last = ResolveError::CatalogNetwork("catalog timeout"),
-        }
+            Ok(Err(failure)) => failure,
+            Err(_) => {
+                CatalogHostFailure::Unavailable(ResolveError::CatalogNetwork("catalog timeout"))
+            }
+        };
+        failures.push(failure);
     }
-    Err(last)
+    // One line per failed lookup names each host's cause. Hosts are the public catalog
+    // constants and causes are static strings; the requested id is never logged.
+    let summary = hosts
+        .iter()
+        .zip(&failures)
+        .map(|((host, port), failure)| format!("{host}:{port}={failure:?}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::alog!("[catalog] lookup failed on every host: {summary}");
+    Err(catalog_lookup_error(failures))
 }
 
 #[cfg(test)]
@@ -571,12 +634,25 @@ async fn fetch_catalog_transport(
     fetch_catalog_transport_query(host, port, "pid", content_id).await
 }
 
+#[cfg(test)]
 async fn fetch_catalog_transport_query(
     host: &str,
     port: u16,
     parameter: &str,
     value: &str,
 ) -> Result<Vec<u8>, ResolveError> {
+    fetch_catalog_host(host, port, parameter, value)
+        .await
+        .map_err(CatalogHostFailure::into_error)
+}
+
+async fn fetch_catalog_host(
+    host: &str,
+    port: u16,
+    parameter: &str,
+    value: &str,
+) -> Result<Vec<u8>, CatalogHostFailure> {
+    use CatalogHostFailure::{Rejected, Unavailable};
     let request_random = {
         let mut rng = rand::rng();
         rng.random_range(1..=i64::MAX as u64)
@@ -619,11 +695,11 @@ async fn fetch_catalog_transport_query(
 
     let mut stream = crate::proxy::connect_host(host, port)
         .await
-        .map_err(|_| ResolveError::CatalogNetwork("catalog connect failed"))?;
+        .map_err(|_| Unavailable(ResolveError::CatalogNetwork("catalog connect failed")))?;
     stream
         .write_all(request.as_bytes())
         .await
-        .map_err(|_| ResolveError::CatalogNetwork("catalog write failed"))?;
+        .map_err(|_| Unavailable(ResolveError::CatalogNetwork("catalog write failed")))?;
 
     let mut response = Vec::new();
     let mut buf = [0u8; 8192];
@@ -631,18 +707,21 @@ async fn fetch_catalog_transport_query(
         let n = stream
             .read(&mut buf)
             .await
-            .map_err(|_| ResolveError::CatalogNetwork("catalog read failed"))?;
+            .map_err(|_| Unavailable(ResolveError::CatalogNetwork("catalog read failed")))?;
         if n == 0 {
             break;
         }
         if response.len() + n > CATALOG_RESPONSE_LIMIT {
-            return Err(ResolveError::Catalog("catalog response too large"));
+            return Err(Unavailable(ResolveError::Catalog(
+                "catalog response too large",
+            )));
         }
         response.extend_from_slice(&buf[..n]);
     }
 
-    let body = http_response_body(&response)?;
-    catalog_response_transport(&body, request_random)
+    // HTTP framing and status say whether the host could answer, not what it answered.
+    let body = http_response_body(&response).map_err(Unavailable)?;
+    catalog_response_transport(&body, request_random).map_err(Rejected)
 }
 
 fn catalog_infohash_info(bytes: &[u8], requested: [u8; 20]) -> Result<StreamInfo, ResolveError> {
@@ -2357,6 +2436,113 @@ async fn private_metadata_wire_does_not_advertise_inbound_port() {
 #[cfg(test)]
 mod failure_cause_tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A local catalog host. `None` accepts and never answers; `Some` answers every request.
+    async fn local_catalog(reply: Option<&'static [u8]>) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let Some(reply) = reply else {
+                    held.push(socket);
+                    continue;
+                };
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    match socket.read_u8().await {
+                        Ok(byte) => request.push(byte),
+                        Err(_) => break,
+                    }
+                }
+                let _ = socket.write_all(reply).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (port, task)
+    }
+
+    const NOT_FOUND: &[u8] =
+        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const BAD_XML: &[u8] =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot <xml>";
+    const ID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[tokio::test]
+    async fn timeouts_then_a_non_200_host_report_a_network_failure() {
+        // #526: hosts that time out, then one that answers every request with a non-200
+        // status. The lookup must report the unreachable catalog, not a rejection.
+        let (silent_a, a) = local_catalog(None).await;
+        let (silent_b, b) = local_catalog(None).await;
+        let (status, c) = local_catalog(Some(NOT_FOUND)).await;
+        let hosts = [
+            ("127.0.0.1", silent_a),
+            ("127.0.0.1", silent_b),
+            ("127.0.0.1", status),
+        ];
+        let error = catalog_transport_bytes_from(&hosts, Duration::from_millis(150), "pid", ID)
+            .await
+            .unwrap_err();
+        assert_eq!(format!("{error:?}"), "Catalog(\"catalog timeout\")");
+        assert_eq!(error.failure_kind(), ResolveFailureKind::Network);
+        for task in [a, b, c] {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_reply_outranks_unavailable_hosts() {
+        let (silent, a) = local_catalog(None).await;
+        let (rejecting, b) = local_catalog(Some(BAD_XML)).await;
+        let (status, c) = local_catalog(Some(NOT_FOUND)).await;
+        let hosts = [
+            ("127.0.0.1", silent),
+            ("127.0.0.1", rejecting),
+            ("127.0.0.1", status),
+        ];
+        let error = catalog_transport_bytes_from(&hosts, Duration::from_millis(150), "pid", ID)
+            .await
+            .unwrap_err();
+        assert_eq!(format!("{error:?}"), "Catalog(\"bad catalog xml\")");
+        assert_eq!(error.failure_kind(), ResolveFailureKind::RejectedMetadata);
+        for task in [a, b, c] {
+            task.abort();
+        }
+    }
+
+    #[test]
+    fn lookup_error_precedence_is_rejected_then_network_then_unavailable() {
+        use CatalogHostFailure::{Rejected, Unavailable};
+        let status = || Unavailable(ResolveError::Catalog("catalog http status"));
+        let timeout = || Unavailable(ResolveError::CatalogNetwork("catalog timeout"));
+        let connect = || Unavailable(ResolveError::CatalogNetwork("catalog connect failed"));
+        let rejected = || Rejected(ResolveError::Catalog("bad catalog xml"));
+        let debug = |failures| format!("{:?}", catalog_lookup_error(failures));
+        assert_eq!(
+            debug(vec![timeout(), timeout(), timeout(), status()]),
+            "Catalog(\"catalog timeout\")"
+        );
+        assert_eq!(
+            debug(vec![connect(), timeout()]),
+            "Catalog(\"catalog connect failed\")"
+        );
+        assert_eq!(
+            debug(vec![status(), rejected(), timeout()]),
+            "Catalog(\"bad catalog xml\")"
+        );
+        assert_eq!(
+            catalog_lookup_error(vec![status(), status()]).failure_kind(),
+            ResolveFailureKind::RejectedMetadata
+        );
+        assert_eq!(
+            catalog_lookup_error(Vec::new()).failure_kind(),
+            ResolveFailureKind::Network
+        );
+    }
     #[tokio::test]
     async fn catalog_connect_failure_retains_network_cause_before_formatting() {
         let error = tokio::time::timeout(
