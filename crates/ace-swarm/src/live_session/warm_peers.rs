@@ -492,6 +492,74 @@ fn parse(bytes: &[u8], allow_loopback: bool) -> io::Result<BTreeMap<[u8; 20], Ve
     }
     Ok(entries)
 }
+/// A failed cache filesystem step: which stage failed, the path it acted on when that helps
+/// the operator, and the OS error. Built on the error path only.
+#[derive(Debug)]
+struct Failure {
+    stage: &'static str,
+    path: Option<PathBuf>,
+    error: io::Error,
+}
+impl From<Failure> for io::Error {
+    fn from(failure: Failure) -> Self {
+        failure.error
+    }
+}
+type FailureKey = (&'static str, io::ErrorKind, Option<i32>);
+impl Failure {
+    fn key(&self) -> FailureKey {
+        (self.stage, self.error.kind(), self.error.raw_os_error())
+    }
+}
+trait Stage<T> {
+    fn stage(self, stage: &'static str) -> Result<T, Failure>;
+}
+impl<T> Stage<T> for io::Result<T> {
+    fn stage(self, stage: &'static str) -> Result<T, Failure> {
+        self.map_err(|error| Failure {
+            stage,
+            path: None,
+            error,
+        })
+    }
+}
+/// Reports each distinct failure once: a retry that fails the same way stays silent, and a
+/// successful write re-arms reporting.
+#[derive(Default)]
+struct FailureLog {
+    last: Option<FailureKey>,
+}
+impl FailureLog {
+    /// Whether `failure` differs from the last reported one; records it if so.
+    fn first(&mut self, failure: &Failure) -> bool {
+        let key = failure.key();
+        if self.last == Some(key) {
+            return false;
+        }
+        self.last = Some(key);
+        true
+    }
+    fn succeeded(&mut self) {
+        self.last = None;
+    }
+}
+fn report(failure: &Failure) {
+    let errno = failure
+        .error
+        .raw_os_error()
+        .map_or_else(|| "none".to_owned(), |errno| errno.to_string());
+    let path = failure
+        .path
+        .as_ref()
+        .map(|path| format!(" ({})", path.display()))
+        .unwrap_or_default();
+    crate::alog!(
+        "[ace] warm peer cache I/O failed at {}{path}: {} (kind {:?}, errno {errno}); streaming continues without durable hints, and repeats of this error are not logged",
+        failure.stage,
+        failure.error,
+        failure.error.kind(),
+    );
+}
 #[cfg(test)]
 fn observe_writer(shared: &Shared, event: WriterObservation) {
     if let Some(observer) = &*shared.observations.lock().unwrap() {
@@ -499,7 +567,9 @@ fn observe_writer(shared: &Shared, event: WriterObservation) {
     }
 }
 fn worker(shared: Arc<Shared>, path: PathBuf) {
-    let directory = secure::Directory::open(&path);
+    // Resolve operator-given ancestor symlinks once, here, before the strict no-follow walk.
+    let directory = secure::Directory::open(&secure::resolve_ancestors(&path));
+    let mut failures = FailureLog::default();
     let loaded = directory
         .as_ref()
         .ok()
@@ -555,19 +625,30 @@ fn worker(shared: Arc<Shared>, path: PathBuf) {
             state.flush = false;
             (encode(&state.entries), state.revision, state.stop)
         };
-        let success = directory
-            .as_ref()
-            .is_ok_and(|directory| directory.write(&snapshot).is_ok());
+        let written;
+        let failure = match &directory {
+            Ok(directory) => {
+                written = directory.write(&snapshot);
+                written.as_ref().err()
+            }
+            // A failed open is reported on the first write, then deduplicated like any other.
+            Err(failure) => Some(failure),
+        };
+        let success = failure.is_none();
         last_write = Instant::now();
         #[cfg(test)]
         observe_writer(&shared, WriterObservation::Write { success });
-        if success {
-            shared.state.lock().unwrap().persisted = revision;
-            shared.changed.notify_waiters();
-        } else {
-            crate::alog!(
-                "[ace] warm peer cache I/O failed; streaming continues without durable hints"
-            );
+        match failure {
+            None => {
+                failures.succeeded();
+                shared.state.lock().unwrap().persisted = revision;
+                shared.changed.notify_waiters();
+            }
+            Some(failure) => {
+                if failures.first(failure) {
+                    report(failure);
+                }
+            }
         }
         if stop {
             break;
@@ -604,6 +685,43 @@ mod secure {
         dir: File,
         _lock: File,
     }
+    /// Resolve symlinks in the ancestors of the configured cache directory, never in the
+    /// directory itself, so the strict [`Directory::open`] walk can run on the result.
+    ///
+    /// Ancestors are operator-chosen and were never ownership-checked: anyone able to place a
+    /// symlink there could place a real directory instead. Android app storage depends on this,
+    /// because in an app's mount namespace `/data/user/0` is a symlink to `/data/data`. Links
+    /// are resolved once, before the walk; the walk itself still refuses every symlink, so one
+    /// swapped in afterwards fails closed, and the final directory and its files keep their
+    /// no-follow, ownership and mode checks. A missing suffix is appended unresolved and created
+    /// by the walk. Should resolution fail outright (for example, no `/proc` for `realpath`), the
+    /// path is returned unchanged and the walk decides.
+    pub(super) fn resolve_ancestors(path: &Path) -> PathBuf {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return path.to_owned();
+        };
+        let mut existing = parent;
+        let mut missing = Vec::new();
+        loop {
+            match std::fs::canonicalize(existing) {
+                Ok(mut resolved) => {
+                    resolved.extend(missing.iter().rev());
+                    resolved.push(name);
+                    return resolved;
+                }
+                // A dangling link also lands here; the walk then rejects it.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    let (Some(up), Some(component)) = (existing.parent(), existing.file_name())
+                    else {
+                        return path.to_owned();
+                    };
+                    missing.push(component);
+                    existing = up;
+                }
+                Err(_) => return path.to_owned(),
+            }
+        }
+    }
     fn openat(dir: i32, name: &std::ffi::OsStr, flags: i32, mode: u32) -> io::Result<File> {
         let name = CString::new(name.as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
@@ -637,7 +755,7 @@ mod secure {
         Ok(())
     }
     impl Directory {
-        pub(super) fn open(path: &Path) -> io::Result<Self> {
+        pub(super) fn open(path: &Path) -> Result<Self, Failure> {
             // Ancestors need search permission only (notably Android's /data).
             // The final directory stays readable for sync_all after atomic replacement.
             #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -651,17 +769,26 @@ mod secure {
                     _ => None,
                 })
                 .peekable();
+            // The walk names the prefix it failed on, so a symlinked or unreadable ancestor shows.
+            let at = |stage, prefix: &Path, error| Failure {
+                stage,
+                path: Some(prefix.to_owned()),
+                error,
+            };
+            let mut prefix = PathBuf::from("/");
             let mut dir = openat(
                 libc::AT_FDCWD,
-                Path::new("/").as_os_str(),
+                prefix.as_os_str(),
                 if components.peek().is_some() {
                     TRAVERSE
                 } else {
                     libc::O_RDONLY | libc::O_DIRECTORY
                 },
                 0,
-            )?;
+            )
+            .map_err(|error| at("open cache path", &prefix, error))?;
             while let Some(name) = components.next() {
+                prefix.push(name);
                 let flags = if components.peek().is_some() {
                     TRAVERSE
                 } else {
@@ -670,35 +797,41 @@ mod secure {
                 dir = match openat(dir.as_raw_fd(), name, flags, 0) {
                     Ok(next) => next,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        let name_c = CString::new(name.as_bytes())
-                            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-                        if unsafe { libc::mkdirat(dir.as_raw_fd(), name_c.as_ptr(), 0o700) } < 0
-                            && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
-                        {
-                            return Err(io::Error::last_os_error());
+                        let name_c = CString::new(name.as_bytes()).map_err(|_| {
+                            let error = io::Error::new(io::ErrorKind::InvalidInput, "NUL path");
+                            at("open cache path", &prefix, error)
+                        })?;
+                        if unsafe { libc::mkdirat(dir.as_raw_fd(), name_c.as_ptr(), 0o700) } < 0 {
+                            let error = io::Error::last_os_error();
+                            if error.kind() != io::ErrorKind::AlreadyExists {
+                                return Err(at("create cache directory", &prefix, error));
+                            }
                         }
-                        openat(dir.as_raw_fd(), name, flags, 0)?
+                        openat(dir.as_raw_fd(), name, flags, 0)
+                            .map_err(|error| at("open cache path", &prefix, error))?
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(at("open cache path", &prefix, error)),
                 };
             }
-            let metadata = dir.metadata()?;
+            let metadata = dir.metadata().stage("check cache directory")?;
             if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "unsafe cache directory",
-                ));
+                ))
+                .stage("check cache directory");
             }
             let lock = openat(
                 dir.as_raw_fd(),
                 std::ffi::OsStr::new("recent-peers-v1.lock"),
                 libc::O_RDWR | libc::O_CREAT,
                 0o600,
-            )?;
-            validate(&lock)?;
+            )
+            .stage("open lock file")?;
+            validate(&lock).stage("check lock file")?;
             // This inode lock also prevents directory aliases from creating concurrent writers.
             if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
-                return Err(io::Error::last_os_error());
+                return Err(io::Error::last_os_error()).stage("lock cache");
             }
             Ok(Self { dir, _lock: lock })
         }
@@ -726,12 +859,13 @@ mod secure {
             }
             Ok(bytes)
         }
-        pub(super) fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        pub(super) fn write(&self, bytes: &[u8]) -> Result<(), Failure> {
             if bytes.len() > MAX_BYTES {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "oversized snapshot",
-                ));
+                ))
+                .stage("encode snapshot");
             }
             // Reject a poisoned existing target rather than replacing its untrusted inode.
             match openat(
@@ -740,9 +874,9 @@ mod secure {
                 libc::O_RDONLY,
                 0,
             ) {
-                Ok(file) => validate(&file)?,
+                Ok(file) => validate(&file).stage("check cache file")?,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+                Err(error) => return Err(error).stage("check cache file"),
             }
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let temp = format!(
@@ -757,11 +891,12 @@ mod secure {
                 std::ffi::OsStr::new(&temp),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                 0o600,
-            )?;
+            )
+            .stage("create temp file")?;
             let result = (|| {
-                validate(&file)?;
-                file.write_all(bytes)?;
-                file.sync_all()?;
+                validate(&file).stage("check temp file")?;
+                file.write_all(bytes).stage("write temp file")?;
+                file.sync_all().stage("sync temp file")?;
                 if unsafe {
                     libc::renameat(
                         self.dir.as_raw_fd(),
@@ -771,9 +906,9 @@ mod secure {
                     )
                 } < 0
                 {
-                    return Err(io::Error::last_os_error());
+                    return Err(io::Error::last_os_error()).stage("replace cache file");
                 }
-                self.dir.sync_all()
+                self.dir.sync_all().stage("sync cache directory")
             })();
             if result.is_err() {
                 unsafe { libc::unlinkat(self.dir.as_raw_fd(), temp_c.as_ptr(), 0) };
@@ -786,17 +921,21 @@ mod secure {
 mod secure {
     use super::*;
     pub(super) struct Directory;
+    pub(super) fn resolve_ancestors(path: &Path) -> PathBuf {
+        path.to_owned()
+    }
     impl Directory {
-        pub(super) fn open(_: &Path) -> io::Result<Self> {
+        pub(super) fn open(_: &Path) -> Result<Self, Failure> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "private cache requires Unix inode validation",
             ))
+            .stage("open cache path")
         }
         pub(super) fn read(&self) -> io::Result<Vec<u8>> {
             unreachable!()
         }
-        pub(super) fn write(&self, _: &[u8]) -> io::Result<()> {
+        pub(super) fn write(&self, _: &[u8]) -> Result<(), Failure> {
             unreachable!()
         }
     }
@@ -1107,6 +1246,102 @@ mod tests {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(secure::Directory::open(&root).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+    /// Android app storage: in an app's mount namespace `/data/user/0` is a symlink to
+    /// `/data/data`, so `Context.getCacheDir()` has a symlinked ancestor (issue #525).
+    #[tokio::test]
+    async fn cache_persists_across_restart_under_symlinked_ancestor() {
+        let _guard = test_guard().await;
+        let root = tempfile::tempdir().unwrap();
+        // The platform temp dir may itself sit under a link (macOS `/var`); keep `user-0` the
+        // only link in the path.
+        let base = std::fs::canonicalize(root.path()).unwrap();
+        let real = base.join("data");
+        std::fs::create_dir_all(real.join("app")).unwrap();
+        let link = base.join("user-0");
+        symlink(&real, &link).unwrap();
+        // The app creates `cache`; the engine creates `engine` itself here.
+        let path = link.join("app").join("cache").join("engine");
+
+        // The strict walk alone reports the link as a non-directory ancestor: this is the
+        // stage and errno an affected build logs.
+        let failure = secure::Directory::open(&path).err().unwrap();
+        assert_eq!(failure.stage, "open cache path");
+        assert_eq!(failure.path.as_deref(), Some(link.as_path()));
+        // Other kernels reject the link with a different errno (FreeBSD: EMLINK).
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(failure.error.raw_os_error(), Some(libc::ENOTDIR));
+
+        let cache = WarmPeerCache::new(&path, true);
+        fixture_loaded(&cache).await;
+        cache.record_productive([0; 20], peer(34571), CandidateKind::Source);
+        assert!(
+            cache.flush().await,
+            "hints must persist under a linked ancestor"
+        );
+        drop(cache);
+        assert!(retired_terminal(&path).await);
+        let persisted = real.join("app").join("cache").join("engine").join(FILE);
+        assert!(std::fs::symlink_metadata(&persisted).unwrap().is_file());
+
+        let restarted = WarmPeerCache::new(&path, true);
+        fixture_loaded(&restarted).await;
+        assert_eq!(
+            restarted.candidate_addresses(&[0; 20]),
+            vec![peer(34571)],
+            "a restart must reload hints written through the linked ancestor"
+        );
+        drop(restarted);
+        assert!(retired_terminal(&path).await);
+    }
+    #[test]
+    fn ancestor_resolution_keeps_final_and_dangling_links_strict() {
+        let root = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(root.path()).unwrap();
+        let real = base.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = base.join("alias");
+        symlink(&real, &alias).unwrap();
+        assert_eq!(
+            secure::resolve_ancestors(&alias),
+            alias,
+            "the cache directory itself is never resolved"
+        );
+        assert!(secure::Directory::open(&secure::resolve_ancestors(&alias)).is_err());
+        assert_eq!(
+            secure::resolve_ancestors(&alias.join("child").join("cache")),
+            real.join("child").join("cache"),
+            "linked ancestors resolve; the missing suffix is kept for the walk to create"
+        );
+        let dangling = base.join("dangling");
+        symlink(base.join("missing"), &dangling).unwrap();
+        let path = dangling.join("cache");
+        assert_eq!(secure::resolve_ancestors(&path), path);
+        let failure = secure::Directory::open(&path).err().unwrap();
+        assert_eq!(failure.path.as_deref(), Some(dangling.as_path()));
+        assert!(
+            std::fs::symlink_metadata(base.join("missing")).is_err(),
+            "a dangling ancestor must not be followed into creating its target"
+        );
+    }
+    #[test]
+    fn failure_log_reports_each_distinct_error_once_until_success() {
+        let failure = |stage, errno| Failure {
+            stage,
+            path: None,
+            error: io::Error::from_raw_os_error(errno),
+        };
+        let mut log = FailureLog::default();
+        assert!(log.first(&failure("open cache path", libc::ENOTDIR)));
+        assert!(!log.first(&failure("open cache path", libc::ENOTDIR)));
+        assert!(log.first(&failure("open cache path", libc::EACCES)));
+        assert!(log.first(&failure("lock cache", libc::EACCES)));
+        assert!(!log.first(&failure("lock cache", libc::EACCES)));
+        log.succeeded();
+        assert!(
+            log.first(&failure("lock cache", libc::EACCES)),
+            "a success re-arms reporting"
+        );
     }
     #[test]
     fn atomic_private_replacement_and_alias_writer_lock() {
