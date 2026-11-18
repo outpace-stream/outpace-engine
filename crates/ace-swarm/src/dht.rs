@@ -429,6 +429,7 @@ fn add_bootstrap(
     result: Result<(usize, Vec<SocketAddrV4>), tokio::task::JoinError>,
     frontier: &mut BTreeMap<[u8; 20], SocketAddrV4>,
     bootstraps: &mut Vec<BootstrapNode>,
+    responded: &HashSet<SocketAddrV4>,
     metrics: &mut DhtWalkMetrics,
 ) {
     let Ok((i, addrs)) = result else {
@@ -443,9 +444,11 @@ fn add_bootstrap(
         key[18] = i as u8;
         key[19] = j as u8;
         frontier.insert(key, addr);
+        // A router can be referred to, asked and answer before its own lookup finishes;
+        // it still counts as answered, so recovery widens it with `find_node`.
         bootstraps.push(BootstrapNode {
             addr,
-            answered: false,
+            answered: responded.contains(&addr),
         });
         metrics.bootstrap_seeded += 1;
     }
@@ -496,8 +499,17 @@ impl NodeCache {
     fn record_answered(&self, entries: &[(SocketAddrV4, Instant)]) {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         for (addr, seen) in entries.iter().rev() {
-            nodes.retain(|(known, _)| known != addr);
-            nodes.push_front((*addr, *seen));
+            // Overlapping walks can report the same node out of order: keep its newest reply.
+            let mut newest = *seen;
+            nodes.retain(|(known, at)| {
+                if known == addr {
+                    newest = newest.max(*at);
+                    false
+                } else {
+                    true
+                }
+            });
+            nodes.push_front((*addr, newest));
         }
         nodes.truncate(NODE_CACHE_CAP);
     }
@@ -622,6 +634,8 @@ async fn dht_walk_owned(
     let mut recovery_started_at: Option<usize> = None;
 
     let mut queried: HashSet<SocketAddrV4> = HashSet::new();
+    // Every source of a correlated, well-formed reply, bounded by the queries sent.
+    let mut responded: HashSet<SocketAddrV4> = HashSet::new();
     // Public DHT UDP is untrusted, so a reply is only trusted if it arrives from the exact node
     // we asked and echoes the exact transaction id we generated for that query.
     let mut inflight: HashMap<SocketAddrV4, Inflight> = HashMap::new();
@@ -637,7 +651,13 @@ async fn dht_walk_owned(
     // nothing more goes out directly.
     'walk: while Instant::now() < deadline && crate::proxy::active().is_none() {
         while let Some(result) = lookups.try_join_next() {
-            add_bootstrap(result, &mut frontier, &mut bootstraps, &mut metrics);
+            add_bootstrap(
+                result,
+                &mut frontier,
+                &mut bootstraps,
+                &responded,
+                &mut metrics,
+            );
         }
         let now = Instant::now();
         for query in inflight.values_mut() {
@@ -773,7 +793,13 @@ async fn dht_walk_owned(
         let received = tokio::select! {
             result = lookups.join_next(), if !lookups.is_empty() => {
                 if let Some(result) = result {
-                    add_bootstrap(result, &mut frontier, &mut bootstraps, &mut metrics);
+                    add_bootstrap(
+                result,
+                &mut frontier,
+                &mut bootstraps,
+                &responded,
+                &mut metrics,
+            );
                 }
                 continue;
             }
@@ -829,6 +855,7 @@ async fn dht_walk_owned(
             }
         }
         metrics.valid_responses += 1;
+        responded.insert(src);
         if let Some(node) = bootstraps.iter_mut().find(|node| node.addr == src) {
             node.answered = true;
         } else {
@@ -2726,6 +2753,39 @@ mod tests {
         let cache = NodeCache::new();
         cache.record_answered(&[(addr(3), start)]);
         assert_eq!(cache.fresh(start, usize::MAX, |_| false), vec![addr(3)]);
+    }
+
+    #[test]
+    fn an_older_reply_never_replaces_a_newer_one_in_the_cache() {
+        let start = Instant::now();
+        let cache = NodeCache::new();
+        cache.record_answered(&[(addr(1), start + Duration::from_secs(10))]);
+        cache.record_answered(&[(addr(1), start)]);
+        let check = start + NODE_CACHE_MAX_AGE + Duration::from_secs(5);
+        assert_eq!(cache.fresh(check, usize::MAX, |_| false), vec![addr(1)]);
+    }
+
+    #[test]
+    fn router_that_answered_before_its_lookup_finished_counts_as_answered() {
+        let early = addr(1);
+        let mut responded = HashSet::new();
+        responded.insert(early);
+        let mut frontier = BTreeMap::new();
+        let mut bootstraps = Vec::new();
+        let mut metrics = DhtWalkMetrics::default();
+        add_bootstrap(
+            Ok((0, vec![early, addr(2)])),
+            &mut frontier,
+            &mut bootstraps,
+            &responded,
+            &mut metrics,
+        );
+        let answered: Vec<bool> = bootstraps.iter().map(|node| node.answered).collect();
+        assert_eq!(answered, vec![true, false]);
+        assert_eq!(
+            recovery_targets(&bootstraps, Vec::new())[0],
+            (early, RecoveryQuery::FindNode)
+        );
     }
 
     #[test]
