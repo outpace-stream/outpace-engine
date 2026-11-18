@@ -36,6 +36,12 @@ impl PeerView {
 pub struct Scheduler {
     max_in_flight: usize,
     requested: BTreeSet<u64>,
+    /// Pieces completed while output was withheld (startup corroboration, #521). The
+    /// reassembler owns them at or beyond `next_needed` until output drains past them,
+    /// and they must not be requested again meanwhile. Bounded by the
+    /// reassembly window; pruned with `requested`. A sorted `Vec` rather than a set: it
+    /// is usually empty or tiny and keeps its capacity, so steady state never allocates.
+    completed: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +236,7 @@ impl Scheduler {
         Scheduler {
             max_in_flight: max_in_flight.max(1),
             requested: BTreeSet::new(),
+            completed: Vec::new(),
         }
     }
 
@@ -262,6 +269,10 @@ impl Scheduler {
     ) -> Vec<(u64, u64)> {
         // Drop bookkeeping for pieces we've moved past.
         self.requested.retain(|&p| p >= next_needed);
+        let passed = self.completed.partition_point(|&p| p < next_needed);
+        if passed > 0 {
+            self.completed.drain(..passed);
+        }
 
         // Remaining capacity per peer for this tick (only unchoked peers can serve).
         let mut cap: Vec<(PeerView, usize, usize)> = peers
@@ -295,7 +306,9 @@ impl Scheduler {
         let mut out = Vec::new();
         let mut piece = next_needed;
         while piece <= ceiling {
-            if self.requested.contains(&piece) {
+            if self.requested.contains(&piece)
+                || (!self.completed.is_empty() && self.completed.binary_search(&piece).is_ok())
+            {
                 // A prior admission used policy capacity, not a new scan position.
                 // For unconstrained calls scan_ceiling equals the original ceiling.
                 ceiling = ceiling.saturating_add(1).min(scan_ceiling);
@@ -331,9 +344,22 @@ impl Scheduler {
         self.requested.remove(&piece);
     }
 
+    /// A request completed while output is withheld (the startup decision, #521): the
+    /// cursor cannot pass this piece yet, so remember it rather than re-request it on
+    /// every turn. Ordinary completions keep the cheaper `on_complete`.
+    pub fn on_complete_withheld(&mut self, piece: u64) {
+        self.requested.remove(&piece);
+        if let Err(at) = self.completed.binary_search(&piece) {
+            self.completed.insert(at, piece);
+        }
+    }
+
     /// A request failed / the peer dropped: requeue the piece for reassignment.
     pub fn on_drop(&mut self, piece: u64) {
         self.requested.remove(&piece);
+        if let Ok(at) = self.completed.binary_search(&piece) {
+            self.completed.remove(at);
+        }
     }
 
     /// Every outstanding request was tied to a peer that dropped. Requeue all pieces so
@@ -360,6 +386,50 @@ mod tests {
             unchoked,
             in_flight,
         }
+    }
+
+    /// Bounded synthetic measurement of the steady-state scheduling turn: assign up to the
+    /// head, complete every assignment, and drain the cursor past them (as output does).
+    /// Run with `cargo test --release --locked -p ace-swarm scheduler_assignment_measurement
+    /// -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "bounded synthetic measurement; run in release with --ignored --nocapture"]
+    fn scheduler_assignment_measurement() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        const TURNS: u64 = 2_000_000;
+        const RUNS: usize = 7;
+        let peers: Vec<PeerView> = (1..=4)
+            .map(|id| peer(id, 0, u64::MAX / 2, true, 0))
+            .collect();
+        let mut per_turn = Vec::with_capacity(RUNS);
+        let mut assigned_total = 0usize;
+        for _ in 0..RUNS {
+            let mut s = Scheduler::new(256);
+            let (mut next, mut head) = (0u64, 8u64);
+            let start = Instant::now();
+            for turn in 0..TURNS {
+                let got = s.assign(black_box(next), black_box(head), black_box(&peers));
+                assigned_total += got.len();
+                let mut drained = next;
+                for &(_, piece) in &got {
+                    s.on_complete(piece);
+                    drained = drained.max(piece + 1);
+                }
+                next = drained;
+                // About one new live piece per two turns.
+                head += turn & 1;
+            }
+            per_turn.push(start.elapsed().as_nanos() as f64 / TURNS as f64);
+        }
+        per_turn.sort_by(f64::total_cmp);
+        eprintln!(
+            "scheduler_assignment_measurement: turns={TURNS} runs={RUNS} ns/turn min={:.1} median={:.1} max={:.1} assigned={}",
+            per_turn[0],
+            per_turn[RUNS / 2],
+            per_turn[RUNS - 1],
+            black_box(assigned_total)
+        );
     }
 
     #[test]
@@ -508,6 +578,30 @@ mod tests {
         s.on_complete(0);
         let next = s.assign(1, 10, &[peer(1, 0, 10, true, 0)]);
         assert_eq!(next, vec![(1, 1)]);
+    }
+
+    #[test]
+    fn withheld_completion_ahead_of_cursor_is_not_requested_again() {
+        // #521: while the startup decision withholds output, a completed piece stays at
+        // or beyond next_needed. It must not be requested again.
+        let mut s = Scheduler::new(1);
+        let peers = [peer(1, 0, 10, true, 0)];
+        assert_eq!(s.assign(0, 10, &peers), vec![(1, 0)]);
+        s.on_complete_withheld(0);
+        assert_eq!(s.assign(0, 10, &peers), vec![(1, 1)]);
+        assert_eq!(s.in_flight_count(), 1, "completed pieces are not in flight");
+        // A completed piece later rejected or lost is dropped and becomes requestable.
+        s.on_complete_withheld(1);
+        s.on_drop(0);
+        assert_eq!(s.assign(0, 10, &peers), vec![(1, 0)]);
+        // Once the cursor passes completed pieces, their bookkeeping is pruned.
+        s.on_complete_withheld(0);
+        assert_eq!(s.assign(2, 10, &peers), vec![(1, 2)]);
+        assert!(s.completed.is_empty());
+        // Retained completions survive clearing in-flight work on reconnect.
+        s.on_complete_withheld(2);
+        s.clear_in_flight();
+        assert_eq!(s.assign(2, 10, &peers), vec![(1, 3)]);
     }
 
     #[test]

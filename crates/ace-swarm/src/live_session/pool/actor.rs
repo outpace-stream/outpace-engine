@@ -200,6 +200,9 @@ impl PoolActor<'_> {
                     advance_pool_requests(&mut self.peers, self.continuity, self.chunks_per_piece)
                         .await;
                 record_pool_losses(self.candidates, &mut self.loss_count, lost);
+                // Pieces prefetched during the decision are ready now; start output
+                // here rather than waiting a request-check interval for a peer event.
+                self.start_output();
             }
             // Re-evaluate the budget after startup scheduling.
             let now = Instant::now();
@@ -921,11 +924,10 @@ impl PoolActor<'_> {
             self.continuity
                 .skip_far_behind_live(self.continuity.output_clock.now(Instant::now()));
             let piece = lc.piece as u64;
-            if self.continuity.startup_deadline.is_some()
-                || self
-                    .continuity
-                    .output_ceiling
-                    .is_some_and(|ceiling| piece >= ceiling)
+            if self
+                .continuity
+                .output_ceiling
+                .is_some_and(|ceiling| piece >= ceiling)
                 || piece < self.continuity.reasm.next_needed()
             {
                 return PieceOutcome::Skip;
@@ -996,7 +998,7 @@ impl PoolActor<'_> {
                     .note_chunk(piece, lc.chunk, self.chunks_per_piece);
             } else if self.continuity.reasm.completed_live_piece(piece).is_some() {
                 self.continuity.received_chunks.remove(&piece);
-                self.continuity.scheduler.on_complete(piece);
+                self.continuity.complete_scheduled(piece);
                 self.continuity.active_peers.complete_everywhere(piece);
                 self.continuity.requested_at.remove(&piece);
             }
@@ -1017,6 +1019,9 @@ impl PoolActor<'_> {
         }
     }
     fn start_output(&mut self) {
+        if self.output_reservation.is_none() {
+            self.continuity.settle_prefetch_floor();
+        }
         if self.output_reservation.is_none() && self.continuity.output_demand() {
             self.continuity.output_ceiling.get_or_insert_with(|| {
                 self.continuity
@@ -1223,6 +1228,12 @@ pub(in crate::live_session) async fn drain_retained(
         c.output_budget(Instant::now());
         c.advance_stats(seed.metrics.is_some(), info.metadata.bitrate);
         publish_live_stats(c, seed.metrics.as_ref(), info);
+        if reservation.is_none() {
+            c.settle_prefetch_floor();
+            if !c.has_delivery_work() {
+                break;
+            }
+        }
         publication::start_operation(&mut publication, c, store);
         if reservation.is_none() && c.output_demand() {
             c.output_ceiling.get_or_insert(

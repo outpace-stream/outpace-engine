@@ -227,6 +227,11 @@ fn stale_teardown_count(source: &dyn TsSource) -> u64 {
         .map_or(0, |recovery| recovery.stale_teardowns)
 }
 
+/// The lone-peer start decision (`LIVE_START_CORROBORATION`). Since #521 the first
+/// request is sent when the decision begins, so `first request + DECISION` marks its end:
+/// the instant the original first-output budget is armed.
+const DECISION: Duration = Duration::from_secs(1);
+
 #[derive(Debug)]
 struct StartupProgressObservation {
     delivered: bool,
@@ -237,15 +242,15 @@ struct StartupProgressObservation {
     first_request_after_ms: Option<u128>,
     survived_post_output_window: bool,
     late_admission_peers: u32,
-    late_admission_published_after_request_ms: Option<u128>,
-    late_admission_activated_after_request_ms: Option<u128>,
-    late_admission_first_closed_after_request_ms: Option<u128>,
+    late_admission_published_after_decision_ms: Option<u128>,
+    late_admission_activated_after_decision_ms: Option<u128>,
+    late_admission_first_closed_after_decision_ms: Option<u128>,
     late_admission_closed_by_original_bound: bool,
     stale_teardowns_after_admission: u64,
     stale_teardowns_before_original_expiry: u64,
     stale_teardowns_at_first_b_close: u64,
     stale_teardown_observed_in_original_window: bool,
-    stale_teardown_after_request_ms: Option<u128>,
+    stale_teardown_after_decision_ms: Option<u128>,
     late_admission_head_updates: u32,
     late_admission_requests: u32,
 }
@@ -360,7 +365,8 @@ async fn startup_progress_recovery(
                             && !delayed_first_output
                         {
                             delayed_first_output = true;
-                            tokio::time::sleep(Duration::from_millis(1800)).await;
+                            // Reply 1.8 s after the decision ends: just before T = 2 s.
+                            tokio::time::sleep(DECISION + Duration::from_millis(1800)).await;
                         }
                         if matches!(
                             mode,
@@ -516,15 +522,15 @@ async fn startup_progress_recovery(
                 sender.closed().await;
                 return;
             }
-            // The first request occurs only after the lone-peer corroboration window.
-            // Publish B 1.2 seconds later, while A still occupies the active slot(s).
+            // The first request starts the lone-peer decision (#521). Publish B 1.2 s
+            // after the decision ends, while A still occupies the active slot(s).
             active.notified().await;
             let admission_delay = if matches!(mode, StartupPeerMode::ChatterLateAdmission) {
                 600
             } else {
                 1200
             };
-            tokio::time::sleep(Duration::from_millis(admission_delay)).await;
+            tokio::time::sleep(DECISION + Duration::from_millis(admission_delay)).await;
             *published_at.lock().unwrap() = Some(Instant::now());
             published.store(true, Ordering::Release);
             published_notify.notify_one();
@@ -590,18 +596,21 @@ async fn startup_progress_recovery(
             let activated = tokio::time::timeout(Duration::from_secs(2), b_active.notified()).await;
             late_admission_peers = source.stats().peers;
             stale_teardowns_after_admission = stale_teardown_count(source.as_ref());
-            let first_request = *first_request_at.lock().unwrap();
+            let decision_end = first_request_at
+                .lock()
+                .unwrap()
+                .map(|first| first + DECISION);
             if activated.is_ok() {
-                if let Some(first_request) = first_request {
-                    // The admission is scheduled 600 ms after the original request. Allow
+                if let Some(decision_end) = decision_end {
+                    // The admission is scheduled 600 ms after the decision ends. Allow
                     // 250 ms past T for cooperative loop scheduling, still 350 ms before a
                     // mistaken admission-time renewal could expire.
-                    let before_expiry = first_request + Duration::from_millis(stale_ms - 250);
+                    let before_expiry = decision_end + Duration::from_millis(stale_ms - 250);
                     tokio::time::sleep_until(tokio::time::Instant::from_std(before_expiry)).await;
                     stale_teardowns_before_original_expiry = stale_teardown_count(source.as_ref());
                     let remained_zero =
                         stale_teardowns_before_original_expiry == stale_teardowns_after_admission;
-                    let original_bound = first_request + Duration::from_millis(stale_ms + 250);
+                    let original_bound = decision_end + Duration::from_millis(stale_ms + 250);
                     let observed_stale = tokio::time::timeout_at(
                         tokio::time::Instant::from_std(original_bound),
                         async {
@@ -685,17 +694,20 @@ async fn startup_progress_recovery(
         .lock()
         .unwrap()
         .map(|first| first.duration_since(opened_at).as_millis());
-    let first_request = *first_request_at.lock().unwrap();
-    let late_admission_published_after_request_ms = first_request
+    let first_request = first_request_at
+        .lock()
+        .unwrap()
+        .map(|first| first + DECISION);
+    let late_admission_published_after_decision_ms = first_request
         .zip(*b_published_at.lock().unwrap())
         .map(|(first, published)| published.duration_since(first).as_millis());
-    let late_admission_activated_after_request_ms = first_request
+    let late_admission_activated_after_decision_ms = first_request
         .zip(*b_activated_at.lock().unwrap())
         .map(|(first, activated)| activated.duration_since(first).as_millis());
-    let late_admission_first_closed_after_request_ms = first_request
+    let late_admission_first_closed_after_decision_ms = first_request
         .zip(*b_first_closed_at.lock().unwrap())
         .map(|(first, closed)| closed.duration_since(first).as_millis());
-    let stale_teardown_after_request_ms = first_request
+    let stale_teardown_after_decision_ms = first_request
         .zip(stale_teardown_at)
         .map(|(first, teardown)| teardown.duration_since(first).as_millis());
     drop(source);
@@ -710,15 +722,15 @@ async fn startup_progress_recovery(
         first_request_after_ms,
         survived_post_output_window,
         late_admission_peers,
-        late_admission_published_after_request_ms,
-        late_admission_activated_after_request_ms,
-        late_admission_first_closed_after_request_ms,
+        late_admission_published_after_decision_ms,
+        late_admission_activated_after_decision_ms,
+        late_admission_first_closed_after_decision_ms,
         late_admission_closed_by_original_bound,
         stale_teardowns_after_admission,
         stale_teardowns_before_original_expiry,
         stale_teardowns_at_first_b_close,
         stale_teardown_observed_in_original_window,
-        stale_teardown_after_request_ms,
+        stale_teardown_after_decision_ms,
         late_admission_head_updates: b_head_updates.load(Ordering::Relaxed),
         late_admission_requests: b_first_requests.load(Ordering::Relaxed),
     }
@@ -814,19 +826,19 @@ async fn startup_progress_chatter_and_late_admission_do_not_reset_bound() {
     assert!(
         observed
             .first_request_after_ms
-            .is_some_and(|elapsed| elapsed >= 900),
-        "the original request barrier must follow the lone-peer corroboration gate; {observed:?}"
+            .is_some_and(|elapsed| elapsed < 900),
+        "requests must begin during the lone-peer decision (#521); {observed:?}"
     );
     assert!(observed.published_b, "real discovery must publish late B");
     assert!(
         observed
-            .late_admission_published_after_request_ms
+            .late_admission_published_after_decision_ms
             .is_some_and(|elapsed| (500..STALE_MS).contains(&elapsed)),
-        "B must be published after the original request barrier but before its T; {observed:?}"
+        "B must be published after the decision ends but before its T; {observed:?}"
     );
     assert!(
         observed
-            .late_admission_activated_after_request_ms
+            .late_admission_activated_after_decision_ms
             .is_some_and(|elapsed| elapsed < STALE_MS),
         "the new B must complete activation before the original first-output expiry; {observed:?}"
     );
@@ -852,9 +864,9 @@ async fn startup_progress_chatter_and_late_admission_do_not_reset_bound() {
     );
     assert!(
         observed
-            .late_admission_first_closed_after_request_ms
+            .late_admission_first_closed_after_decision_ms
             .is_some_and(|elapsed| (STALE_MS - 250..=STALE_MS + 250).contains(&elapsed)),
-        "the unproductive B connection should close around the original T, not admission + T; {observed:?}"
+        "the unproductive B connection should close around the original T (decision end + T), not admission + T; {observed:?}"
     );
     assert!(
         observed.late_admission_closed_by_original_bound,
@@ -867,9 +879,9 @@ async fn startup_progress_chatter_and_late_admission_do_not_reset_bound() {
     assert!(
         observed.stale_teardown_observed_in_original_window
             && observed
-                .stale_teardown_after_request_ms
+                .stale_teardown_after_decision_ms
                 .is_some_and(|elapsed| (STALE_MS - 250..=STALE_MS + 250).contains(&elapsed)),
-        "source recovery stats must report StaleTeardown inside the original request+T window; {observed:?}"
+        "source recovery stats must report StaleTeardown inside the original decision+T window; {observed:?}"
     );
     assert!(
         observed.delivered && !observed.from_a && observed.tried_b,
@@ -891,8 +903,8 @@ async fn startup_progress_healthy_peer_just_before_bound_survives_past_it() {
     assert!(
         observed
             .first_request_after_ms
-            .is_some_and(|elapsed| elapsed >= 900),
-        "first output budget opportunity begins after the lone-peer corroboration gate; observed={observed:?}"
+            .is_some_and(|elapsed| elapsed < 900),
+        "healthy A must be prefetched during the lone-peer decision (#521); observed={observed:?}"
     );
     assert!(
         observed.delivered && observed.from_a,
@@ -915,8 +927,8 @@ async fn startup_progress_healthy_video_just_before_bound_is_not_rebuilt() {
     assert!(
         observed
             .first_request_after_ms
-            .is_some_and(|elapsed| elapsed >= 900),
-        "the video request opportunity begins after the lone-peer corroboration gate; observed={observed:?}"
+            .is_some_and(|elapsed| elapsed < 900),
+        "video A must be prefetched during the lone-peer decision (#521); observed={observed:?}"
     );
     assert!(
         observed.published_b,
@@ -943,8 +955,8 @@ async fn startup_progress_healthy_audio_just_before_bound_is_not_rebuilt() {
     assert!(
         observed
             .first_request_after_ms
-            .is_some_and(|elapsed| elapsed >= 900),
-        "the audio request opportunity begins after the lone-peer corroboration gate; observed={observed:?}"
+            .is_some_and(|elapsed| elapsed < 900),
+        "audio A must be prefetched during the lone-peer decision (#521); observed={observed:?}"
     );
     assert!(
         observed.published_b,
@@ -974,8 +986,8 @@ async fn startup_progress_short_stale_interval_starts_after_corroboration() {
     assert!(
         observed
             .first_request_after_ms
-            .is_some_and(|elapsed| elapsed >= 900),
-        "200 ms stale interval must not expire during the existing corroboration gate; observed={observed:?}"
+            .is_some_and(|elapsed| elapsed < 900),
+        "A must be prefetched during the decision; a 200 ms stale interval must not expire inside it; observed={observed:?}"
     );
     assert!(
         observed.delivered && observed.from_a,
@@ -3275,10 +3287,19 @@ async fn unchoke_ordering_early_incoming_does_not_suppress_reciprocal_seed_uncho
         );
         session.send(&PeerMessage::Interested).await.unwrap();
         activated_tx.send(()).unwrap();
-        let reciprocal = tokio::time::timeout(Duration::from_secs(2), session.read_message())
-            .await
-            .ok()
-            .and_then(Result::ok);
+        // We unchoked them early, so piece requests may precede the reciprocal Unchoke
+        // now that the lone-peer decision prefetches (#521); only the Unchoke matters.
+        let reciprocal = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match session.read_message().await {
+                    Ok(PeerMessage::Unknown { id: 6, .. }) => continue,
+                    other => return other.ok(),
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
         let _ = reciprocal_tx.send(matches!(reciprocal, Some(PeerMessage::Unchoke)));
     });
 
