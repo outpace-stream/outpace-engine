@@ -491,14 +491,22 @@ impl NodeCache {
         &CACHE
     }
 
-    /// Remember `addrs` as answering at `now`, the first one newest.
-    fn record(&self, addrs: &[SocketAddrV4], now: Instant) {
+    /// Remember each `(address, answered at)` pair, keeping the time the node actually
+    /// answered so its age is never understated. The first entry goes to the front.
+    fn record_answered(&self, entries: &[(SocketAddrV4, Instant)]) {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        for addr in addrs.iter().rev() {
+        for (addr, seen) in entries.iter().rev() {
             nodes.retain(|(known, _)| known != addr);
-            nodes.push_front((*addr, now));
+            nodes.push_front((*addr, *seen));
         }
         nodes.truncate(NODE_CACHE_CAP);
+    }
+
+    /// Remember `addrs` as all answering at `now`, the first one at the front.
+    #[cfg(test)]
+    fn record(&self, addrs: &[SocketAddrV4], now: Instant) {
+        let entries: Vec<(SocketAddrV4, Instant)> = addrs.iter().map(|a| (*a, now)).collect();
+        self.record_answered(&entries);
     }
 
     /// Up to `limit` remembered nodes still younger than [`NODE_CACHE_MAX_AGE`] at `now`,
@@ -523,32 +531,33 @@ impl NodeCache {
 /// The answering nodes one walk hands to the [`NodeCache`]: those that returned peers first,
 /// as they sit in a populated part of the DHT, then the rest. Bootstrap routers are left out,
 /// since the recovery round asks them anyway.
+/// Each node keeps the time its reply arrived, not the time the walk ended.
 #[derive(Default)]
 struct Answered {
-    with_peers: Vec<SocketAddrV4>,
-    without_peers: Vec<SocketAddrV4>,
+    with_peers: Vec<(SocketAddrV4, Instant)>,
+    without_peers: Vec<(SocketAddrV4, Instant)>,
 }
 
 impl Answered {
-    fn note(&mut self, addr: SocketAddrV4, had_peers: bool) {
+    fn note(&mut self, addr: SocketAddrV4, had_peers: bool, at: Instant) {
         let list = if had_peers {
             &mut self.with_peers
         } else {
             &mut self.without_peers
         };
-        if list.len() < NODE_CACHE_PER_WALK && !list.contains(&addr) {
-            list.push(addr);
+        if list.len() < NODE_CACHE_PER_WALK && !list.iter().any(|(known, _)| *known == addr) {
+            list.push((addr, at));
         }
     }
 
-    fn into_newest_first(self) -> Vec<SocketAddrV4> {
+    fn into_preferred_first(self) -> Vec<(SocketAddrV4, Instant)> {
         let mut out = self.with_peers;
-        for addr in self.without_peers {
+        for (addr, at) in self.without_peers {
             if out.len() == NODE_CACHE_PER_WALK {
                 break;
             }
-            if !out.contains(&addr) {
-                out.push(addr);
+            if !out.iter().any(|(known, _)| *known == addr) {
+                out.push((addr, at));
             }
         }
         out
@@ -823,7 +832,7 @@ async fn dht_walk_owned(
         if let Some(node) = bootstraps.iter_mut().find(|node| node.addr == src) {
             node.answered = true;
         } else {
-            answered.note(src, !resp.peers.is_empty());
+            answered.note(src, !resp.peers.is_empty(), Instant::now());
         }
         metrics.peers_discovered += resp.peers.len();
         metrics.nodes_discovered += resp.nodes.len();
@@ -844,7 +853,7 @@ async fn dht_walk_owned(
         metrics.recovery_peers = metrics.peers_discovered - before;
     }
     if let Some(cache) = cache {
-        cache.record(&answered.into_newest_first(), Instant::now());
+        cache.record_answered(&answered.into_preferred_first());
     }
     crate::alog!(
         "[dht] walk done: seeded={} queried={} valid={} peers={} nodes={} malformed={} \
@@ -2702,15 +2711,36 @@ mod tests {
     }
 
     #[test]
+    fn cached_age_counts_from_the_reply_not_the_end_of_the_walk() {
+        // A node that answered at the start of a 20 s walk expires 15 minutes after that
+        // reply, not 15 minutes after the walk ended.
+        let start = Instant::now();
+        let mut answered = Answered::default();
+        answered.note(addr(1), true, start);
+        answered.note(addr(2), false, start + Duration::from_secs(20));
+        let cache = NodeCache::new();
+        cache.record_answered(&answered.into_preferred_first());
+        let check = start + NODE_CACHE_MAX_AGE + Duration::from_secs(10);
+        assert_eq!(cache.fresh(check, usize::MAX, |_| false), vec![addr(2)]);
+        // A reply recorded at once is still eligible.
+        let cache = NodeCache::new();
+        cache.record_answered(&[(addr(3), start)]);
+        assert_eq!(cache.fresh(start, usize::MAX, |_| false), vec![addr(3)]);
+    }
+
+    #[test]
     fn answered_prefers_nodes_that_returned_peers_and_is_bounded() {
         let mut answered = Answered::default();
         for i in 0..20 {
-            answered.note(addr(i), i % 2 == 1);
+            answered.note(addr(i), i % 2 == 1, Instant::now());
         }
-        answered.note(addr(1), true);
-        let out = answered.into_newest_first();
+        answered.note(addr(1), true, Instant::now());
+        let out = answered.into_preferred_first();
         assert_eq!(out.len(), NODE_CACHE_PER_WALK);
-        assert!(out.iter().all(|a| a.ip().octets()[3] % 2 == 1), "{out:?}");
+        assert!(
+            out.iter().all(|(a, _)| a.ip().octets()[3] % 2 == 1),
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -2981,8 +3011,10 @@ mod tests {
     // Live check of the recovery seeds (#522): a warm-up walk with the real routers fills a
     // cache, then a second walk toward another infohash runs with the routers replaced by
     // five silent documentation addresses (TEST-NET-1), as on a network where none answers.
-    // Each run uses a fresh cache, so it measures a cache filled seconds earlier. Runs
-    // alternate between using the cache and not. Prints one `measured` line per walk.
+    // Each run uses a fresh cache, so it measures a cache filled seconds earlier. Every run
+    // measures the same channel twice, once with the cache and once without; which arm goes
+    // first flips on each full pass over the channels, independently of the channel.
+    // Prints one `measured` line per walk.
     //   ACE_INFOHASHES=<40hex>,<40hex>[,...] ACE_RUNS=20 \
     //     cargo test --release -p ace-swarm dht_live_recovery_cache -- --ignored --nocapture
     #[tokio::test]
@@ -3021,7 +3053,7 @@ mod tests {
         for run in 0..runs {
             let warm = &hashes[run % hashes.len()];
             let measured = &hashes[(run + 1) % hashes.len()];
-            let use_cache = run % 2 == 0;
+            let cache_first = (run / hashes.len()).is_multiple_of(2);
             let cache = NodeCache::new();
             let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
             let mut warm_peers = 0;
@@ -3039,47 +3071,50 @@ mod tests {
             )
             .await;
             let cached = cache.fresh(Instant::now(), usize::MAX, |_| false).len();
-            let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-            let start = Instant::now();
-            let mut first_peer = None;
-            let mut peers = 0;
-            let metrics = dht_walk_with_bootstraps(
-                measured,
-                Duration::from_secs(20),
-                &socket,
-                // Four hosts, one behind two addresses: the five seeds a real walk gets, so
-                // the cache only takes the three slots the routers would leave free.
-                &[
-                    "a.invalid:6881",
-                    "b.invalid:6881",
-                    "c.invalid:6881",
-                    "d.invalid:6881",
-                ],
-                silent_routers.clone(),
-                use_cache.then_some(&cache),
-                |_, response| {
-                    if !response.peers.is_empty() && first_peer.is_none() {
-                        first_peer = Some(start.elapsed());
-                    }
-                    peers += response.peers.len();
-                    peers >= DHT_PEER_TARGET
-                },
-            )
-            .await;
-            if metrics.peers_discovered > 0 {
-                rescued[usize::from(use_cache)] += 1;
+            for use_cache in [cache_first, !cache_first] {
+                let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+                let start = Instant::now();
+                let mut first_peer = None;
+                let mut peers = 0;
+                let metrics = dht_walk_with_bootstraps(
+                    measured,
+                    Duration::from_secs(20),
+                    &socket,
+                    // Four hosts, one behind two addresses: the five seeds a real walk gets, so
+                    // the cache only takes the three slots the routers would leave free.
+                    &[
+                        "a.invalid:6881",
+                        "b.invalid:6881",
+                        "c.invalid:6881",
+                        "d.invalid:6881",
+                    ],
+                    silent_routers.clone(),
+                    use_cache.then_some(&cache),
+                    |_, response| {
+                        if !response.peers.is_empty() && first_peer.is_none() {
+                            first_peer = Some(start.elapsed());
+                        }
+                        peers += response.peers.len();
+                        peers >= DHT_PEER_TARGET
+                    },
+                )
+                .await;
+                if metrics.peers_discovered > 0 {
+                    rescued[usize::from(use_cache)] += 1;
+                }
+                println!(
+                    "measured run={run} channel={} cache={use_cache} cached={cached} warm_peers={warm_peers} \
+                     peers={} queried={} valid={} recovery_queries={} first_peer_ms={} \
+                     walk_ms={}",
+                    (run + 1) % hashes.len(),
+                    metrics.peers_discovered,
+                    metrics.nodes_queried,
+                    metrics.valid_responses,
+                    metrics.recovery_queries,
+                    first_peer.map_or(-1, |d| d.as_millis() as i64),
+                    start.elapsed().as_millis(),
+                );
             }
-            println!(
-                "measured run={run} cache={use_cache} cached={cached} warm_peers={warm_peers} \
-                 peers={} queried={} valid={} recovery_queries={} first_peer_ms={} \
-                 walk_ms={}",
-                metrics.peers_discovered,
-                metrics.nodes_queried,
-                metrics.valid_responses,
-                metrics.recovery_queries,
-                first_peer.map_or(-1, |d| d.as_millis() as i64),
-                start.elapsed().as_millis(),
-            );
         }
         silent_routers.finish_controlled().await;
         println!(
