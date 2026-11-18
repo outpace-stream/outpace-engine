@@ -200,6 +200,16 @@ fn run_healthcheck(args: HealthcheckArgs) -> Result<(), Box<dyn std::error::Erro
 }
 
 async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
+    let result = serve_from_env().await;
+    // Exit code 0 after a clean stop, 1 when serving ends with an error (main returns it).
+    match &result {
+        Ok(()) => crate::alog!("[serve] stopped; exit code 0"),
+        Err(error) => crate::alog!("[serve] fatal: {error}; exit code 1"),
+    }
+    result
+}
+
+async fn serve_from_env() -> Result<(), Box<dyn std::error::Error>> {
     let config = crate::runtime::config_from_env()?;
     let peers = crate::runtime::bootstrap_peers_from_env();
     let runtime = crate::runtime::build_runtime(config, peers).await?;

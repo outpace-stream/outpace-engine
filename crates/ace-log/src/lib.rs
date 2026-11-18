@@ -47,6 +47,15 @@ macro_rules! alog {
     };
 }
 
+/// Write one [`alog!`]-formatted line straight to stderr and report a failed write instead of
+/// panicking. [`alog!`] expands to `eprintln!`, which panics when stderr is gone (for example a
+/// closed pipe), and a panic raised inside a panic hook aborts the process. The panic hook uses
+/// this so it cannot turn a panic into an abort; everything else keeps using [`alog!`].
+pub fn try_log(args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+    use std::io::Write as _;
+    writeln!(std::io::stderr().lock(), "{} {}", now(), args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::now;
