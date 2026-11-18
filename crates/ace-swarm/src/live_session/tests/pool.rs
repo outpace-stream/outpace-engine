@@ -2949,3 +2949,26 @@ async fn peer_destruction_at_pool_return(retire_first: bool) {
         "shutdown returned after requesting abort but before worker destruction"
     );
 }
+
+#[test]
+fn prefetch_floor_stays_armed_until_a_media_byte_is_emitted() {
+    let mut stream = info();
+    stream.piece_length = 8;
+    stream.chunk_length = 4;
+    stream.sig_len = 0;
+    let (mut c, _) = Continuity::fresh(&stream, 7, 7, 2, default_live_recovery());
+    c.startup_prefetch = true;
+    // An output step began and ended without emitting a segment.
+    c.output_ceiling = Some(7 + c.live_recovery.max_reasm_pieces_ahead);
+    c.settle_prefetch_floor();
+    c.output_ceiling = None;
+    assert!(c.startup_prefetch, "no byte was emitted yet");
+    // A newer head learned meanwhile must still be applied before the next output.
+    c.head = 100;
+    c.settle_prefetch_floor();
+    assert_eq!(c.reasm.next_needed(), 98);
+    // Once media has been emitted, ordinary floor gating takes over.
+    c.emitted = 1;
+    c.settle_prefetch_floor();
+    assert!(!c.startup_prefetch);
+}

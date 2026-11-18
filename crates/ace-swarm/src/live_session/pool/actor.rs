@@ -1023,7 +1023,6 @@ impl PoolActor<'_> {
             self.continuity.settle_prefetch_floor();
         }
         if self.output_reservation.is_none() && self.continuity.output_demand() {
-            self.continuity.startup_prefetch = false;
             self.continuity.output_ceiling.get_or_insert_with(|| {
                 self.continuity
                     .reasm
@@ -1237,7 +1236,6 @@ pub(in crate::live_session) async fn drain_retained(
         }
         publication::start_operation(&mut publication, c, store);
         if reservation.is_none() && c.output_demand() {
-            c.startup_prefetch = false;
             c.output_ceiling.get_or_insert(
                 c.reasm
                     .next_needed()

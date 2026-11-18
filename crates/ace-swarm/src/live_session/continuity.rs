@@ -281,8 +281,13 @@ impl Continuity {
     /// Pieces prefetched during corroboration may predate a head learned while their
     /// cache publication was still pending (which defers the floor). Every output path
     /// re-applies the floor before a prefetched start's first byte, so a stale
-    /// provisional window never plays (#170, #521).
+    /// provisional window never plays (#170, #521). The check stays armed until a media
+    /// byte is actually emitted: an output step that produced no segments must not
+    /// disarm it.
     pub(super) fn settle_prefetch_floor(&mut self) {
+        if self.emitted > 0 {
+            self.startup_prefetch = false;
+        }
         if self.startup_prefetch && self.output_ceiling.is_none() {
             self.skip_far_behind_live(self.output_clock.now(Instant::now()));
         }
