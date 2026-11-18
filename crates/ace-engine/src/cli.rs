@@ -202,10 +202,11 @@ fn run_healthcheck(args: HealthcheckArgs) -> Result<(), Box<dyn std::error::Erro
 async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
     let result = serve_from_env().await;
     // Exit code 0 after a clean stop, 1 when serving ends with an error (main returns it).
-    match &result {
-        Ok(()) => crate::alog!("[serve] stopped; exit code 0"),
-        Err(error) => crate::alog!("[serve] fatal: {error}; exit code 1"),
-    }
+    // Non-panicking writes: a closed stderr must not turn exit code 1 into a 101 panic here.
+    let _ = match &result {
+        Ok(()) => ace_log::try_log(format_args!("[serve] stopped; exit code 0")),
+        Err(error) => ace_log::try_log(format_args!("[serve] fatal: {error}; exit code 1")),
+    };
     result
 }
 

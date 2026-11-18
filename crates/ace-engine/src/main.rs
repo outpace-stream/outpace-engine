@@ -93,10 +93,14 @@ mod allocator_config {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Before anything else can panic, so a panic on any thread reaches the log (#526).
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Before the runtime is built, so a panic on any thread, including during runtime
+    // construction, reaches the log (#526).
     ace_engine::panic_log::install();
-    // An `Err` here prints `Error: ...` and exits with code 1; a main-thread panic exits 101.
-    ace_engine::cli::run().await
+    // Same runtime `#[tokio::main]` builds. An `Err` from `run` prints `Error: ...` and exits
+    // with code 1; a main-thread panic exits 101.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(ace_engine::cli::run())
 }

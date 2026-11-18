@@ -232,8 +232,9 @@ Check the exit code and the last log lines before the exit:
 | `101` | A panic on the main thread. Look for the `[panic] thread 'main' ...` line. |
 | `128` + signal number | Killed by a signal: `137` is `SIGKILL` (something outside Outpace, such as an out-of-memory killer), `134` is `SIGABRT`. |
 
-A `[panic]` line on any other thread means that one task or thread ended and the daemon kept
-running. Report it either way, with the line and the log just before it.
+A `[panic]` line on any other thread usually means that one task or thread ended and the daemon
+kept running. When Outpace runs as a Windows service, a panic in the service thread stops the
+service. Report a `[panic]` line either way, with the log just before it.
 
 ## Reading the logs
 
