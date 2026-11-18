@@ -26,7 +26,7 @@ Out of scope:
 - LAN-only behavior (the engine's multicast discovery on `239.255.17.18:32968`, mDNS,
   SSDP browsing).
 - Emulating the engine's background chatter with AceStream's servers. See
-  [Open questions](#open-questions).
+  [Decisions](#decisions).
 
 ## Evidence
 

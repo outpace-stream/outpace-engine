@@ -300,8 +300,9 @@ pub(super) async fn follow_peer_pool_with_discovery(
     let live_recovery = continuity.live_recovery;
     if lone_fresh {
         continuity.startup_deadline = Some(Instant::now() + LIVE_START_CORROBORATION);
+        continuity.startup_prefetch = true;
         crate::alog!(
-            "[ace] live start: withholding media for independent window evidence (up to 1000 ms)"
+            "[ace] live start: prefetching but withholding output for independent window evidence (up to 1000 ms)"
         );
     }
     let (event_capacity, refill_capacity) = match recovery_channel_capacities(live_recovery) {

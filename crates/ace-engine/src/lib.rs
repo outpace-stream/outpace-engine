@@ -47,6 +47,7 @@ pub mod manager;
 pub mod metrics;
 pub mod origin_hls;
 pub mod outbound_proxy;
+pub mod panic_log;
 pub mod private_network;
 pub mod provider;
 pub mod routes;

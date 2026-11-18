@@ -45,10 +45,13 @@ Outpace keeps recent productive peer hints in its cache directory (`OUTPACE_CACH
 `<data dir>/cache` by default) to help later starts. With `OUTPACE_CACHE_TYPE=disk` the
 startup cache wipe clears them, so they help only within one run.
 On Linux and Android, this works through execute-only parent directories, including
-Android app storage and Termux. The cache directory must still belong to the daemon
-user, must not be group- or world-writable, and must have no symlinks in its path.
-If the log says `warm peer cache I/O failed`, check those permissions and that no
-other daemon is using the same directory. Streaming continues without durable hints.
+Android app storage and Termux. Symlinks among the parent directories (such as Android's
+`/data/user/0`, a link to `/data/data` inside each app) are resolved once at startup. The
+cache directory itself must still belong to the daemon user, must not be group- or
+world-writable, and must not be a symlink; nor may the hint files inside it.
+If the log says `warm peer cache I/O failed at <stage>`, it names the failing step and the
+OS error (`kind`, `errno`); check those permissions and that no other daemon is using the
+same directory. Each distinct error is logged once. Streaming continues without durable hints.
 
 A cold start has three stages:
 
@@ -151,7 +154,7 @@ curl "http://127.0.0.1:6878/streams/ace/${CONTENT_ID:?set a content id}/status"
 | `phase` stays `connecting` | No peer connected yet. See [No peers, or discovery fails](#no-peers-or-discovery-fails). |
 | `phase` stays `buffering` | Peers are connected but media isn't arriving. See [Slow startup](#slow-startup). |
 | `no_peers` | Nobody is sharing the stream right now. Try a stream you know is live. |
-| `network` | The catalog couldn't be reached. Check VPNs, WARP and firewalls. |
+| `network` | The catalog couldn't be reached. Check VPNs, WARP and firewalls. The log line `[catalog] lookup failed on every host:` gives each catalog host's cause, such as `Catalog("catalog timeout")`. |
 | `unresolvable` | The id has no verified descriptor; `message` says what to try (often the `cid:` content id). |
 | `protected` | Encrypted content. Outpace doesn't play it. |
 | `capacity` | The session cap, the catalog resolver or audio conversion is at capacity. Retry shortly; see [Too many streams](#too-many-streams). |
@@ -225,6 +228,21 @@ Shutdown ends viewer connections first, then gives broadcasts up to 5 seconds to
 stop that still takes long usually means a stuck filesystem operation; the log names the step
 that gave up. See [Deployment](Deployment#graceful-shutdown).
 
+## The daemon exits unexpectedly
+
+Check the exit code and the last log lines before the exit:
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | A clean stop after `SIGTERM` or Ctrl+C. The log ends with `[serve] stopped; exit code 0`. |
+| `1` | `serve` ended with an error. The log ends with `[serve] fatal: <error>; exit code 1`. |
+| `101` | A panic on the main thread. Look for the `[panic] thread 'main' ...` line. |
+| `128` + signal number | Killed by a signal: `137` is `SIGKILL` (something outside Outpace, such as an out-of-memory killer), `134` is `SIGABRT`. |
+
+A `[panic]` line on any other thread usually means that one task or thread ended and the daemon
+kept running. When Outpace runs as a Windows service, a panic in the service thread stops the
+service. Report a `[panic]` line either way, with the log just before it.
+
 ## Reading the logs
 
 Each line looks like `HH:MM:SS.mmm [tag] message`, where the time is UTC. The tag says which part
@@ -251,6 +269,9 @@ of Outpace logged it:
 | `[rtmp]`, `[srt]` | Ingest listeners. |
 | `[support]` | Support sources. |
 | `[runtime]` | Daemon start and shutdown. |
+| `[serve]` | How `serve` ended: `stopped; exit code 0`, or `fatal: <error>; exit code 1`. |
+| `[catalog]` | Content-id catalog lookups that failed on every catalog host, with each host's cause. |
+| `[panic]` | A panic: thread, source location and message. See [The daemon exits unexpectedly](#the-daemon-exits-unexpectedly). |
 
 Lines without a tag are messages for the person at the terminal, such as
 `outpace: listening on ...` at startup.

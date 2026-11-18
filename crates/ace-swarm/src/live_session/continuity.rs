@@ -163,6 +163,7 @@ impl Continuity {
                 next_needed_since: EffectiveInstant(now),
                 head: max_piece,
                 startup_deadline: None,
+                startup_prefetch: false,
                 request_floor: Arc::new(AtomicU64::new(start)),
                 prefetch,
                 emitted: 0,
@@ -248,13 +249,25 @@ impl Continuity {
         self.requested_at.remove(&piece);
     }
 
+    /// While the startup decision withholds output, completed pieces cannot drain, so the
+    /// scheduler must remember them (#521); otherwise use the ordinary completion path.
+    /// Only a piece the reassembler actually holds is remembered: a receipt count that
+    /// reached the chunk total without assembling the piece must stay requestable.
+    pub(super) fn complete_scheduled(&mut self, piece: u64) {
+        if self.startup_deadline.is_some() && self.reasm.ready_piece(piece).is_some() {
+            self.scheduler.on_complete_withheld(piece);
+        } else {
+            self.scheduler.on_complete(piece);
+        }
+    }
+
     pub(super) fn note_chunk(&mut self, piece: u64, chunk: u16, chunks_per_piece: u16) -> bool {
         let chunks_per_piece = chunks_per_piece.max(1) as usize;
         let chunks = self.received_chunks.entry(piece).or_default();
         chunks.insert(chunk);
         if chunks.len() >= chunks_per_piece {
             self.received_chunks.remove(&piece);
-            self.scheduler.on_complete(piece);
+            self.complete_scheduled(piece);
             // The piece may have been re-requested from more than one peer (retransmission);
             // clear it from every peer's slot and stop its retransmit timer.
             self.active_peers.complete_everywhere(piece);
@@ -262,6 +275,21 @@ impl Continuity {
             true
         } else {
             false
+        }
+    }
+
+    /// Pieces prefetched during corroboration may predate a head learned while their
+    /// cache publication was still pending (which defers the floor). Every output path
+    /// re-applies the floor before a prefetched start's first byte, so a stale
+    /// provisional window never plays (#170, #521). The check stays armed until a media
+    /// byte is actually emitted: an output step that produced no segments must not
+    /// disarm it.
+    pub(super) fn settle_prefetch_floor(&mut self) {
+        if self.emitted > 0 {
+            self.startup_prefetch = false;
+        }
+        if self.startup_prefetch && self.output_ceiling.is_none() {
+            self.skip_far_behind_live(self.output_clock.now(Instant::now()));
         }
     }
 

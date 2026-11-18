@@ -324,3 +324,125 @@ async fn schedule(replace: bool) {
     }
     assert_eq!(store.lock().await.publication_budget(), (0, 1));
 }
+
+/// #521: the startup decision prefetches its provisional window. If a newer head arrives
+/// while those pieces' cache publication is still pending (which defers the live floor),
+/// they must still never be published as playback. `schedule(false)` is the control: the
+/// same sequence without a startup decision keeps its committed-publication behavior.
+#[tokio::test]
+async fn startup_prefetch_with_pending_publication_never_plays_stale_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = ace_wire::live_auth::LiveSourceAuth::generate();
+    let wires: Vec<Vec<u8>> = (0..2u8)
+        .map(|piece| {
+            let mut payload: Vec<u8> = (0..4)
+                .flat_map(|cc| {
+                    let mut p = vec![0x55 + piece; 188];
+                    p[..4].copy_from_slice(&[0x47, 1, 0, 0x10 | (piece * 4 + cc)]);
+                    p
+                })
+                .collect();
+            let signature = auth.sign(&payload);
+            payload.extend(signature);
+            payload
+        })
+        .collect();
+    let info = StreamInfo {
+        protection: None,
+        infohash: [0; 20],
+        piece_length: wires[0].len() as u64,
+        chunk_length: (wires[0].len() / 2) as u64,
+        trackers: vec![],
+        metadata: StreamMetadata::default(),
+        sig_len: auth.signature_len(),
+        source_pubkey: auth.pubkey_der(),
+    };
+    let policy = LiveRecoveryConfig {
+        max_active_upstreams: 1,
+        max_piece_advance: 2,
+        request_timeout_ms: 5000,
+        ..default_live_recovery()
+    };
+    let (mut continuity, _) = Continuity::fresh(&info, 7, 8, 1, policy);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+    continuity.startup_deadline = Some(deadline.into_std());
+    continuity.startup_prefetch = true;
+    let (events, mut observed) = mpsc::unbounded_channel();
+    continuity.contribution_observer = Some(events);
+    let store = Arc::new(tokio::sync::Mutex::new(
+        PieceStore::with_backend(
+            info.piece_length,
+            info.chunk_length,
+            16384,
+            crate::store::BackendKind::Disk {
+                dir: dir.path().join("cache"),
+            },
+        )
+        .unwrap(),
+    ));
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let (release, gate) = std::sync::mpsc::channel();
+    store.lock().await.pause_publication(reached.clone(), gate);
+    let (upstream, mut remote) = pair().await;
+    let (mut rx, task) = run(upstream, info.clone(), store.clone(), continuity);
+    for piece in [7u32, 8] {
+        for chunk in [0usize, 1] {
+            let begin = chunk * wires[0].len() / 2;
+            remote
+                .send(&build_piece(
+                    0,
+                    piece,
+                    chunk as u16,
+                    [piece as u8; 8],
+                    &wires[(piece - 7) as usize][begin..begin + wires[0].len() / 2],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), observed.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+                piece as u64
+            );
+        }
+        if piece == 7 {
+            tokio::time::timeout(Duration::from_secs(2), reached.notified())
+                .await
+                .unwrap();
+        }
+    }
+    // Independent evidence of a much newer head arrives while publication is pending.
+    remote
+        .send_extended_handshake(&OutgoingExtendedHandshake {
+            mi: Some(live_pos(7, 100)),
+            ace_metadata_version: 1,
+            ut_metadata_id: 2,
+            node: NodeFields::default(),
+            peer_ip: None,
+            metadata_size: None,
+        })
+        .await
+        .unwrap();
+    control(&mut remote).await;
+    // Let the decision deadline expire while publication is still pending: the deadline
+    // release then cannot apply the floor, and publication completes only afterwards.
+    tokio::time::sleep_until(deadline + Duration::from_millis(200)).await;
+    drop(release);
+    // Nothing from the stale provisional window may play.
+    match tokio::time::timeout(Duration::from_millis(1500), rx.recv()).await {
+        Err(_) => {}
+        Ok(output) => panic!(
+            "stale prefetched window published as playback: {:?}",
+            output.map(|o| o.bytes.len())
+        ),
+    }
+    let continuity = stop(&mut rx, task, &mut remote).await;
+    assert!(
+        continuity.reasm.next_needed() >= 99,
+        "the cursor must move to the live floor before first output: {}",
+        continuity.reasm.next_needed()
+    );
+    assert!(!continuity.startup_prefetch || continuity.emitted == 0);
+}

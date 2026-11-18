@@ -118,7 +118,7 @@ async fn next_discovery_peer(run: &mut Option<DiscoveryRun>) -> Option<SocketAdd
 
 /// Briefly collect other near-complete candidates after the first live handshake.
 const UPSTREAM_SELECTION_GRACE: Duration = Duration::from_millis(250);
-/// Process gossip while withholding media from an uncorroborated first window.
+/// Process gossip and prefetch while withholding output from an uncorroborated first window.
 const LIVE_START_CORROBORATION: Duration = Duration::from_secs(1);
 
 const BACKGROUND_DISCOVERY_BUDGET: Duration = Duration::from_secs(8);
@@ -665,6 +665,10 @@ pub(super) struct Continuity {
     pub(super) head: u64,
     /// Only a fresh lone-window pool delays media; reconnect continuity stays authoritative.
     startup_deadline: Option<Instant>,
+    /// Pieces may have been prefetched during the startup decision (#521). Until the
+    /// first byte is published, re-apply the live floor even to pieces whose cache
+    /// publication was pending, so an uncorroborated stale window never plays (#170).
+    startup_prefetch: bool,
     /// Workers discard queued stale chunk writes after new live-head evidence.
     pub(super) request_floor: Arc<AtomicU64>,
     /// Pieces behind the live edge to leave as a cushion when re-syncing forward to live.
