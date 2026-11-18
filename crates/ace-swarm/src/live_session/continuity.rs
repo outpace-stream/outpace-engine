@@ -278,6 +278,16 @@ impl Continuity {
         }
     }
 
+    /// Pieces prefetched during corroboration may predate a head learned while their
+    /// cache publication was still pending (which defers the floor). Every output path
+    /// re-applies the floor before a prefetched start's first byte, so a stale
+    /// provisional window never plays (#170, #521).
+    pub(super) fn settle_prefetch_floor(&mut self) {
+        if self.startup_prefetch && self.output_ceiling.is_none() {
+            self.skip_far_behind_live(self.output_clock.now(Instant::now()));
+        }
+    }
+
     /// Pieces still outstanding past the configured request timeout — candidates to re-request.
     /// Also prunes timer bookkeeping for pieces the cursor has already advanced past.
     pub(super) fn timed_out_requests(&mut self, now: EffectiveInstant) -> Vec<u64> {

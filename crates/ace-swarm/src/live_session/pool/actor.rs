@@ -1019,15 +1019,8 @@ impl PoolActor<'_> {
         }
     }
     fn start_output(&mut self) {
-        if self.output_reservation.is_none()
-            && self.continuity.startup_prefetch
-            && self.continuity.output_ceiling.is_none()
-        {
-            // Pieces prefetched during corroboration may predate a head learned while
-            // their cache publication was still pending (which defers the floor). Re-apply
-            // it before the first byte so a stale provisional window never plays (#170).
-            self.continuity
-                .skip_far_behind_live(self.continuity.output_clock.now(Instant::now()));
+        if self.output_reservation.is_none() {
+            self.continuity.settle_prefetch_floor();
         }
         if self.output_reservation.is_none() && self.continuity.output_demand() {
             self.continuity.startup_prefetch = false;
@@ -1236,8 +1229,15 @@ pub(in crate::live_session) async fn drain_retained(
         c.output_budget(Instant::now());
         c.advance_stats(seed.metrics.is_some(), info.metadata.bitrate);
         publish_live_stats(c, seed.metrics.as_ref(), info);
+        if reservation.is_none() {
+            c.settle_prefetch_floor();
+            if !c.has_delivery_work() {
+                break;
+            }
+        }
         publication::start_operation(&mut publication, c, store);
         if reservation.is_none() && c.output_demand() {
+            c.startup_prefetch = false;
             c.output_ceiling.get_or_insert(
                 c.reasm
                     .next_needed()
