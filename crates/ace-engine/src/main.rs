@@ -97,10 +97,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Before the runtime is built, so a panic on any thread, including during runtime
     // construction, reaches the log (#526).
     ace_engine::panic_log::install();
-    // Same runtime `#[tokio::main]` builds. An `Err` from `run` prints `Error: ...` and exits
+    // Same runtime `#[tokio::main]` builds, and the same panic if it cannot. An `Err` from `run` prints `Error: ...` and exits
     // with code 1; a main-thread panic exits 101.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?
+        .build()
+        .expect("Failed building the Runtime")
         .block_on(ace_engine::cli::run())
 }
