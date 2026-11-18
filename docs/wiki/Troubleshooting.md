@@ -45,10 +45,13 @@ Outpace keeps recent productive peer hints in its cache directory (`OUTPACE_CACH
 `<data dir>/cache` by default) to help later starts. With `OUTPACE_CACHE_TYPE=disk` the
 startup cache wipe clears them, so they help only within one run.
 On Linux and Android, this works through execute-only parent directories, including
-Android app storage and Termux. The cache directory must still belong to the daemon
-user, must not be group- or world-writable, and must have no symlinks in its path.
-If the log says `warm peer cache I/O failed`, check those permissions and that no
-other daemon is using the same directory. Streaming continues without durable hints.
+Android app storage and Termux. Symlinks among the parent directories (such as Android's
+`/data/user/0`, a link to `/data/data` inside each app) are resolved once at startup. The
+cache directory itself must still belong to the daemon user, must not be group- or
+world-writable, and must not be a symlink; nor may the hint files inside it.
+If the log says `warm peer cache I/O failed at <stage>`, it names the failing step and the
+OS error (`kind`, `errno`); check those permissions and that no other daemon is using the
+same directory. Each distinct error is logged once. Streaming continues without durable hints.
 
 A cold start has three stages:
 

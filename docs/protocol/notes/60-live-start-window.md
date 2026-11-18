@@ -1,9 +1,16 @@
 # Selecting a live start from window evidence
 
-A fresh pool with one advertised window processes peer messages immediately but
-withholds media requests and output for up to one second. It can connect source
-announcements, PEX candidates and existing background candidates during this
-interval. An independently connected current window releases the decision early.
+A fresh pool with one advertised window processes peer messages immediately and
+withholds output for up to one second. It can connect source announcements, PEX
+candidates and existing background candidates during this interval. Since #521 it
+also requests the provisional window's pieces during the interval, so a fallback
+start has its media ready at the deadline instead of beginning to download then.
+That prefetch is bounded by the provisional window and discarded if newer evidence
+raises the live floor. Before the first byte is published, the floor is re-applied
+even to prefetched pieces whose cache publication was still pending; otherwise a
+pending publication defers it. The scheduler remembers completed pieces until the
+cursor passes them, so pieces completed while output is held are not requested
+again. An independently connected current window releases the decision early.
 Source announcements contain addresses; PEX ranges rank connection candidates.
 Neither alone establishes a new authoritative live head.
 

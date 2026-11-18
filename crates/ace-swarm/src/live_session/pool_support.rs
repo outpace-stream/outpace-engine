@@ -252,10 +252,9 @@ pub(super) async fn advance_pool_requests(
     if continuity.playback_hold() {
         return Vec::new();
     }
+    // Requests proceed during the initial corroboration interval (#521): only output
+    // waits for the decision. A newer window later raises the floor and drops these.
     continuity.skip_far_behind_live(continuity.output_clock.now(Instant::now()));
-    if continuity.startup_deadline.is_some() {
-        return Vec::new();
-    }
     // Only this actor produces commands; workers can only release these slots.
     // Keep snapshot, selection and enqueue free of awaits.
     let queue_slots = peers
