@@ -495,7 +495,8 @@ impl NodeCache {
     }
 
     /// Remember each `(address, answered at)` pair, keeping the time the node actually
-    /// answered so its age is never understated. The first entry goes to the front.
+    /// answered so its age is never understated. The cache stays ordered by reply time,
+    /// newest first; among equal times the first entry goes in front.
     fn record_answered(&self, entries: &[(SocketAddrV4, Instant)]) {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         for (addr, seen) in entries.iter().rev() {
@@ -507,7 +508,13 @@ impl NodeCache {
                 }
                 nodes.remove(pos);
             }
-            nodes.push_front((*addr, *seen));
+            // Keep the whole cache ordered by reply time, newest first, whichever walk
+            // finishes first: ahead of every entry no newer than this reply.
+            let at = nodes
+                .iter()
+                .position(|(_, other)| *other <= *seen)
+                .unwrap_or(nodes.len());
+            nodes.insert(at, (*addr, *seen));
         }
         nodes.truncate(NODE_CACHE_CAP);
     }
@@ -2793,6 +2800,22 @@ mod tests {
         // A newer reply still promotes it.
         cache.record_answered(&[(addr(1), start + Duration::from_secs(25))]);
         assert_eq!(cache.fresh(now, 1, |_| false), vec![addr(1)]);
+    }
+
+    #[test]
+    fn cache_order_follows_reply_time_not_which_walk_finished_first() {
+        // B replied at t=20 in a walk that finished first; A replied at t=10 in a walk that
+        // finished later. With one free slot, recovery must ask B.
+        let start = Instant::now();
+        let cache = NodeCache::new();
+        cache.record_answered(&[(addr(2), start + Duration::from_secs(20))]);
+        cache.record_answered(&[(addr(1), start + Duration::from_secs(10))]);
+        let now = start + Duration::from_secs(30);
+        assert_eq!(cache.fresh(now, 1, |_| false), vec![addr(2)]);
+        assert_eq!(
+            cache.fresh(now, usize::MAX, |_| false),
+            vec![addr(2), addr(1)]
+        );
     }
 
     #[test]
