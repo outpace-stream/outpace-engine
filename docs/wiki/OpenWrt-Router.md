@@ -106,7 +106,7 @@ http://192.168.1.1:6878/streams/ace/0123456789abcdef0123456789abcdef01234567
 
 Replace the placeholder with a real content id. Add `.m3u8` to the URL for players that
 prefer HLS. Televisions with a DLNA renderer can also receive the stream with [Casting](Casting).
-Players that only speak the AceStream API need `OUTPACE_ACE_COMPAT=1`; see
+Players that only speak the AceStream API work too, because it is on by default; see
 [Playing Streams](Playing-Streams#acestream-compatible-api).
 
 ## Notes

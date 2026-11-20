@@ -3,8 +3,7 @@
 This inventory pins three representative clients inspected on 2026-10-23. Their source shows
 what they request, not complete official-engine behavior or successful playback in a deployed
 application. The [compatibility matrix](compat-matrix.md) remains the route and error contract.
-The supported subset remains opt-in through `OUTPACE_ACE_COMPAT=1`, disabled by
-default; `OUTPACE_ACE_COMPAT=0` explicitly disables it. The deprecated
+The supported subset is enabled by default; `OUTPACE_ACE_COMPAT=0` disables it. The deprecated
 `OUTPACE_EXPERIMENTAL_ACE_COMPAT` alias is a fallback only when the canonical variable
 is unset; see the [configuration contract](compat-matrix.md#enable-and-advertise-the-adapter)
 for precedence, strict validation, and restart requirements. Native APIs remain the primary

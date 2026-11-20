@@ -15,7 +15,7 @@ peer-to-peer side. It runs headless, as a server (`outpace serve`) or a one-shot
 
 For playing public live streams, yes. It's an independent, open-source implementation that
 works with Ace Stream content ids and `acestream://` links. It can also serve the common
-engine HTTP routes that existing apps call, through an opt-in compatibility mode.
+engine HTTP routes that existing apps call, through a compatibility mode that is on by default.
 
 It isn't a full clone. It doesn't play premium or encrypted content, and it has no accounts, web
 UI or EPG. [Optional stream-name search](Stream-Search) requires a separate services opt-in.
@@ -96,8 +96,8 @@ API reachable from them, and protect it. See
 
 ## My app was built for the AceStream engine. Will it work?
 
-Probably, if it uses the common HTTP routes. Start Outpace with `OUTPACE_ACE_COMPAT=1`. Apps
-that call these then work through Outpace:
+Probably, if it uses the common HTTP routes. Outpace serves them by default on port 6878, so apps
+that call these work through Outpace:
 
 - `/ace/getstream`;
 - `/ace/manifest.m3u8`;

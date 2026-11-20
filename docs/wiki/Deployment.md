@@ -49,7 +49,7 @@ What the defaults give you:
   `OUTPACE_RTMP_HOST` to publish them elsewhere.
 - The peer port published on `0.0.0.0:8621/tcp`. Keep this mapping fixed at 8621:8621.
 - A full participant (inbound and seeding on), port mapping off, memory cache, compatibility
-  API off.
+  API on (set `OUTPACE_ACE_COMPAT=0` in `.env` to turn it off).
 
 After changing `.env`, run `docker compose up -d --wait`. `docker compose restart` doesn't apply
 environment changes.
@@ -76,7 +76,6 @@ ignored. Put other settings in a `compose.override.yml` next to it:
 services:
   outpace:
     environment:
-      OUTPACE_ACE_COMPAT: "1"
       OUTPACE_PREBUFFER_MS: "10000"
       OUTPACE_HLS_STARTUP_SEGMENTS: "3"
       OUTPACE_MAX_SESSIONS: "8"

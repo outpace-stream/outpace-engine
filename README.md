@@ -145,8 +145,9 @@ For a production setup, use the repository's [`compose.yml`](compose.yml) and
 
 - **Jellyfin, Dispatcharr and other IPTV tools:** put the stream URL above in your M3U playlist.
   No handshake is needed.
-- **Apps built for the Ace Stream engine:** start Outpace with `OUTPACE_ACE_COMPAT=1`. They can
-  then use the supported `/ace/getstream?id=…` and `/server/api` routes.
+- **Apps built for the Ace Stream engine:** point them at Outpace as they are. The supported
+  `/ace/getstream?id=…`, `/ace/manifest.m3u8` and `/server/api` routes are on by default; set
+  `OUTPACE_ACE_COMPAT=0` to turn them off.
 
 The HTTP API has no authentication, so keep it on `127.0.0.1` or behind a proxy. Only TCP 8621
 (the peer port) is meant to be public. See
@@ -159,7 +160,7 @@ The HTTP API has no authentication, so keep it on `127.0.0.1` or behind a proxy.
 | --- | --- |
 | Live playback | Resolves content ids, finds peers through trackers and the DHT, verifies signed pieces and serves continuous MPEG-TS. Viewers of one stream share a single download. |
 | HLS | Built-in live HLS packaging, so no FFmpeg is needed. Optional audio conversion to AAC for players that need it. |
-| Ace Stream-compatible API | Opt-in subset (`OUTPACE_ACE_COMPAT=1`): `/ace/getstream`, `/ace/manifest.m3u8`, `/server/api`. See the [contract](docs/protocol/compat-matrix.md). |
+| Ace Stream-compatible API | Subset, on by default (`OUTPACE_ACE_COMPAT=0` turns it off): `/ace/getstream`, `/ace/manifest.m3u8`, `/server/api`. See the [contract](docs/protocol/compat-matrix.md). |
 | VOD | Single-file VOD with per-piece verification and byte-range seeking. |
 | Peer participation | Uploads and accepts inbound peers by default, like the official engine. Download-only mode is one setting away. |
 | Broadcasting | Publish your own signed swarm from HTTP, RTMP or an HTTP pull source, or from encrypted SRT in builds that include it. |

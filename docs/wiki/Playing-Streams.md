@@ -4,8 +4,8 @@ Outpace has two HTTP interfaces for playback:
 
 - the **native API** (`/streams/...`, `/vod/...`). It is always on, and it's the one to use for
   players, media servers and playlist tools;
-- the **AceStream-compatible API** (`/ace/...`, `/server/api`). It is off by default. Turn it on
-  for apps and add-ons written for the original engine.
+- the **AceStream-compatible API** (`/ace/...`, `/server/api`). It is on by default, for apps and
+  add-ons written for the original engine. Set `OUTPACE_ACE_COMPAT=0` to turn it off.
 
 Both serve the same streams. A stream opened through one interface is shared with viewers on the
 other.
@@ -241,8 +241,8 @@ outpace play --peer 192.0.2.10:8621 acestream://0123456789abcdef0123456789abcdef
 
 ## AceStream-compatible API
 
-Turn it on with `OUTPACE_ACE_COMPAT=1` and restart. With it off, every route below returns
-`404`.
+It is on by default. Turn it off with `OUTPACE_ACE_COMPAT=0` and restart. With it off, every
+route below returns `404`.
 
 ### Direct playback
 

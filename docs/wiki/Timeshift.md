@@ -17,7 +17,7 @@ It is a **short local rewind buffer**:
 
 | Viewer | Can rewind? |
 | --- | --- |
-| Compatibility HLS (`/ace/manifest.m3u8`) with `OUTPACE_ACE_COMPAT=1` | Yes, through `/ace/cmd` |
+| Compatibility HLS (`/ace/manifest.m3u8`), unless `OUTPACE_ACE_COMPAT=0` | Yes, through `/ace/cmd` |
 | [Managed HLS origin](Managed-HLS-Origins) viewers with `OUTPACE_MANAGED_HLS=1` | Yes, through the viewer's `command_url`, for qualifying streams |
 | Native HLS (`/streams/ace/<id>.m3u8`) | No seek control. The source still records history if a compat viewer could use it. |
 | Direct MPEG-TS (`/streams/...`, `/ace/getstream`) | No. Raw TS sessions record nothing. |
@@ -28,7 +28,6 @@ It is a **short local rewind buffer**:
 Set these in the daemon's environment, then restart it:
 
 ```bash
-export OUTPACE_ACE_COMPAT=1
 export OUTPACE_HISTORY_SECONDS=600
 export OUTPACE_HISTORY_BYTES=134217728
 export OUTPACE_HISTORY_TOTAL_BYTES=268435456
