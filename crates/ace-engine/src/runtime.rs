@@ -1643,8 +1643,8 @@ mod tests {
         }
 
         check!(
-            matches!(config_from_env(), Ok(c) if !c.experimental_ace_compat),
-            "default is off"
+            matches!(config_from_env(), Ok(c) if c.experimental_ace_compat),
+            "default is on"
         );
         for (value, expected) in [("1", true), ("true", true), ("0", false), ("false", false)] {
             std::env::set_var("OUTPACE_ACE_COMPAT", value);

@@ -43,7 +43,7 @@ Configure `outpace serve` through environment variables; see the full
 | Persistent identity | `OUTPACE_DATA_DIR`, default platform data directory plus `outpace`; container `/var/lib/outpace` |
 | Piece cache | `OUTPACE_CACHE_TYPE=memory` by default; disk cache is ephemeral, not a media archive |
 | Provider session admission | `OUTPACE_MAX_SESSIONS` unset or `0` is unlimited; a positive value such as `8` is explicit opt-in, not a viewer limit |
-| Legacy HTTP clients | `OUTPACE_ACE_COMPAT=1` opts in; default off |
+| Legacy HTTP clients | Served by default; `OUTPACE_ACE_COMPAT=0` opts out |
 | Origination | `outpace broadcast <name>` creates/resumes a signed identity and serves ingest; no fictitious broadcast-enable variable is needed |
 
 `OUTPACE_ACE_COMPAT` is canonical. The deprecated `OUTPACE_EXPERIMENTAL_ACE_COMPAT`

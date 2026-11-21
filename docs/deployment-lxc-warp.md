@@ -55,10 +55,8 @@ Use a pinned release tag instead of `edge` if you do not want to follow `main`. 
 `network_mode: host`, so the listeners bind the guest's own addresses and WARP applies to the
 daemon directly. The router, not Docker, publishes the peer port.
 
-This LXC template explicitly opts into the [supported Ace HTTP subset](protocol/compat-matrix.md)
-with `OUTPACE_ACE_COMPAT: "1"`. It replaces the deprecated
-`OUTPACE_EXPERIMENTAL_ACE_COMPAT` setting while preserving this template's existing opt-in;
-the daemon and generic Compose defaults remain off. To disable it here, change the service's
+This LXC template explicitly enables the [supported Ace HTTP subset](protocol/compat-matrix.md)
+with `OUTPACE_ACE_COMPAT: "1"`, which also matches the daemon and generic Compose defaults. To disable it here, change the service's
 environment entry to `OUTPACE_ACE_COMPAT: "0"` and recreate the service with
 `docker compose up -d --wait`. Setting `.env` alone does not override this literal entry.
 For boolean validation and legacy precedence, see the

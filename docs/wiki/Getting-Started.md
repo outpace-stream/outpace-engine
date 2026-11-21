@@ -112,17 +112,17 @@ outpace play acestream://0123456789abcdef0123456789abcdef01234567 > recording.ts
 
 ## Need an app to work, not just a player?
 
-Apps and add-ons written for the original engine call `/ace/getstream` and `/server/api`. Those
-routes are off by default. Turn them on with `OUTPACE_ACE_COMPAT=1`. Stop the daemon you
-started above first (`docker stop outpace`, or Ctrl+C), because it holds port 6878:
+Apps and add-ons written for the original engine call `/ace/getstream` and `/server/api`. Outpace
+serves those routes by default on the same port, so the daemon you started above already
+answers them:
 
 ```bash
-docker run -d --rm --name outpace -e OUTPACE_ACE_COMPAT=1 \
-  -p 127.0.0.1:6878:6878 -p 8621:8621/tcp \
-  -v outpace-data:/var/lib/outpace ghcr.io/outpace-stream/outpace-engine:1.2.1
-# for the binary instead: OUTPACE_ACE_COMPAT=1 ./outpace serve  (and open VLC in another terminal)
 vlc "http://127.0.0.1:6878/ace/getstream?id=0123456789abcdef0123456789abcdef01234567"
+curl "http://127.0.0.1:6878/server/api?method=get_version"
 ```
+
+If you only use the native URLs and don't want these routes, start Outpace with
+`OUTPACE_ACE_COMPAT=0`.
 
 See [Playing Streams](Playing-Streams#acestream-compatible-api).
 

@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
     name = "outpace",
     version,
     about = "Stream and broadcast public Acestream content",
-    long_about = "Stream and broadcast public Acestream content.\n\nThe native CLI and /streams API are the primary interface. The supported Ace HTTP subset is disabled by default; enable it with OUTPACE_ACE_COMPAT=1."
+    long_about = "Stream and broadcast public Acestream content.\n\nThe native CLI and /streams API are the primary interface. The supported Ace HTTP subset (/ace/getstream, /server/api) is enabled by default; disable it with OUTPACE_ACE_COMPAT=0."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -629,7 +629,7 @@ mod tests {
         let mut command = Cli::command();
         let help = command.render_long_help().to_string();
         assert!(help.contains("native CLI and /streams API are the primary interface"));
-        assert!(help.contains("supported Ace HTTP subset is disabled by default"));
+        assert!(help.contains("disable it with OUTPACE_ACE_COMPAT=0"));
         assert!(help.contains("Run the HTTP API, RTMP ingest listener"));
         assert!(help.contains("Create or resume a named broadcast"));
         assert!(help.contains("Write a live MPEG-TS stream"));

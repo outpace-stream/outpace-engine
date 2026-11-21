@@ -498,7 +498,7 @@ config_with_root_redaction! {
     /// `peer_listen`. `OUTPACE_PORT_MAP_EXTERNAL_PORT`.
     pub port_map_external_port: Option<u16>,
     /// Expose the supported Acestream HTTP subset (`/ace/*`, `/server/api`,
-    /// `/webui/api/service`), off by default. `OUTPACE_ACE_COMPAT` takes precedence over
+    /// `/webui/api/service`), on by default; `OUTPACE_ACE_COMPAT=0` turns it off. `OUTPACE_ACE_COMPAT` takes precedence over
     /// the deprecated `OUTPACE_EXPERIMENTAL_ACE_COMPAT` alias. The field name is retained
     /// for Rust and serialized configuration compatibility; native APIs remain primary.
     pub experimental_ace_compat: bool,
@@ -585,7 +585,7 @@ impl Default for Config {
             enable_port_mapping: false,
             port_map_backend: ace_swarm::portmap::PortMapBackend::Auto,
             port_map_external_port: None,
-            experimental_ace_compat: false,
+            experimental_ace_compat: true,
             acestream_services: Default::default(),
             managed_hls: false,
             enable_cast: false,
@@ -939,8 +939,8 @@ mod tests {
             "inbound serving is on by default, matching the Acestream engine"
         );
         assert!(
-            !c.experimental_ace_compat,
-            "Acestream HTTP compatibility must be opt-in"
+            c.experimental_ace_compat,
+            "Acestream HTTP compatibility is on by default, matching the Acestream engine"
         );
         assert!(!c.managed_hls, "managed origin HLS must remain opt-in");
         assert!(!c.metrics, "the metrics endpoint must remain opt-in");

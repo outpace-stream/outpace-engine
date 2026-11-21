@@ -15,7 +15,6 @@ on process restart.
 History is off by default. Set these in the **engine's** environment and restart:
 
 ```sh
-OUTPACE_ACE_COMPAT=1
 OUTPACE_HISTORY_SECONDS=600
 OUTPACE_HISTORY_BYTES=134217728
 OUTPACE_HISTORY_TOTAL_BYTES=268435456

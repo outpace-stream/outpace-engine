@@ -159,10 +159,10 @@ Other environment variables parsed by the daemon include:
   the daemon itself fetches origin playlists and media (public destinations only, with DNS
   pinning, deadlines and byte limits). With `OUTPACE_HISTORY_SECONDS` also set, qualifying TS
   origins gain bounded replay. See [origin HLS](native-api.md#origin-hls).
-- `OUTPACE_ACE_COMPAT` - enables the supported Ace HTTP subset, default off. Accepts
+- `OUTPACE_ACE_COMPAT` - enables the supported Ace HTTP subset, default on. Accepts
   exactly `1`, `true`, `0`, or `false`. A present value takes precedence over the legacy
   alias, including `0`/`false`; an empty, malformed, or non-Unicode selected value fails
-  startup. Set `0` to explicitly disable compatibility routes.
+  startup. Set `0` to disable compatibility routes. The default was off up to 1.2.1.
 - `OUTPACE_EXPERIMENTAL_ACE_COMPAT` - deprecated fallback, parsed only when
   `OUTPACE_ACE_COMPAT` is unset, with the same strict boolean rules. Rename it to
   `OUTPACE_ACE_COMPAT` when migrating; an unused invalid alias is ignored.
