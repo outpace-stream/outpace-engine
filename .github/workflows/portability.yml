@@ -22,8 +22,8 @@ env:
 
 jobs:
   release-target:
-    # Mirrors the build-binaries matrix in release.yml. Keep the two in step: a target
-    # added there must be added here so it is built before a tag ever reaches it.
+    # Match the build-binaries targets and runner images in release.yml.
+    # The FreeBSD target is checked separately in bsd.yml.
     name: Build and smoke ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
