@@ -92,7 +92,7 @@ messages, keys, queries or identifiers. An upstream failure is never presented a
 ## Select and play a result
 
 Use the returned infohash explicitly: native `/streams/ace/ih:<infohash>` (or its `.m3u8`
-form), or `/ace/getstream?infohash=<infohash>` with `OUTPACE_ACE_COMPAT=1`. Existing catalog
+form), or `/ace/getstream?infohash=<infohash>` when the compatibility API is enabled (see [Configuration](Configuration#acestream-compatibility-api)). Existing catalog
 resolution and descriptor/media verification still apply. Do not pass the infohash as a bare
 content ID or invent a content ID by hashing metadata.
 

@@ -74,8 +74,11 @@ Set at least:
 
 ```bash
 OUTPACE_BIND=192.168.1.20:6878      # reachable from the LAN
-OUTPACE_ACE_COMPAT=true             # app shows the engine version; AceStream-API players work
+OUTPACE_ACE_COMPAT=1               # required for the v1.2.1 example
 ```
+
+Keep the AceStream-compatible API on: the app uses it to show the engine version,
+and AceStream-API players need it.
 
 Add `OUTPACE_COMPAT_ACESTREAM_SERVICES=true` if you want [Stream Search](Stream-Search) in the
 app, and `OUTPACE_ENABLE_CAST=1` to [cast](Casting) to televisions. Then start it. With systemd:

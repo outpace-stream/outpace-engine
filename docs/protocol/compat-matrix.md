@@ -1,19 +1,19 @@
 # Acestream HTTP support contract
 
-This is the canonical operator contract for Outpace's opt-in Acestream HTTP adapter.
+This is the canonical operator contract for Outpace's Acestream HTTP adapter.
 Prefer the [native CLI and HTTP API](../native-api.md) for new integrations. The adapter
 provides a supported subset of public, unencrypted **live** playback and JSON control; it does
 not claim full engine or application parity. Native VOD is a separate `/vod` surface.
 
 ## Enable and advertise the adapter
 
-The gate is **off by default**. Enable it on the serving daemon:
+The gate is **on by default** (it was off up to 1.2.1). Disable it on the serving daemon:
 
 ```bash
-OUTPACE_ACE_COMPAT=1 cargo run -p ace-engine --bin outpace -- serve
+OUTPACE_ACE_COMPAT=0 cargo run -p ace-engine --bin outpace -- serve
 ```
 
-Set `OUTPACE_ACE_COMPAT=0` to explicitly disable it. The selected value accepts exactly
+The selected value accepts exactly
 `1`, `true`, `0`, or `false`; empty, malformed, or non-Unicode values fail startup.
 `OUTPACE_EXPERIMENTAL_ACE_COMPAT` is a deprecated fallback used only when
 `OUTPACE_ACE_COMPAT` is unset. A present canonical value always wins, including false;

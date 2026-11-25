@@ -12,10 +12,10 @@ before retiring the old engine; acceptance does not qualify every deployment.
 
 | You used | In Outpace |
 | --- | --- |
-| `http://host:6878/ace/getstream?id=<id>` | Same URL, with `OUTPACE_ACE_COMPAT=1`. |
-| `/ace/manifest.m3u8?id=<id>` (HLS) | Same, with `OUTPACE_ACE_COMPAT=1`. |
-| `format=json` sessions with `playback_url`, `stat_url`, `command_url` | Same, with compat on. |
-| `/server/api?method=get_version`, `get_status`, ... | A documented subset, with compat on. See [Playing Streams](Playing-Streams#control-api). |
+| `http://host:6878/ace/getstream?id=<id>` | Same URL, on by default. |
+| `/ace/manifest.m3u8?id=<id>` (HLS) | Same, on by default. |
+| `format=json` sessions with `playback_url`, `stat_url`, `command_url` | Same. `stat_url` reports speed, peers and downloaded bytes. |
+| `/server/api?method=get_version`, `get_status`, ... | A documented subset. See [Playing Streams](Playing-Streams#control-api). |
 | `acestream://<id>` links | `outpace play acestream://<id>`, or the native `/streams/ace/<id>`. |
 | HTTP port 6878 | Same port. |
 | Peer port 8621 | Same port, TCP only. |
@@ -50,7 +50,7 @@ handshake and work with compat off.
 | Concern | Outpace setting |
 | --- | --- |
 | HTTP API | `OUTPACE_BIND` (binary default `127.0.0.1:6878`) |
-| Compat API | `OUTPACE_ACE_COMPAT=1` (default off) |
+| Compat API | `OUTPACE_ACE_COMPAT` (default on; `0` turns it off) |
 | Peer port | `OUTPACE_PEER_LISTEN` (default `0.0.0.0:8621`, TCP) |
 | Seeding and inbound | `OUTPACE_ENABLE_SEEDING`, `OUTPACE_ENABLE_INBOUND` (both on by default) |
 | UPnP | `OUTPACE_ENABLE_PORT_MAPPING=1` (default off) |
@@ -58,6 +58,8 @@ handshake and work with compat off.
 | State directory | `OUTPACE_DATA_DIR` |
 | RTMP ingest | `OUTPACE_RTMP_BIND` (default `127.0.0.1:1935`) |
 | Concurrent-stream cap | `OUTPACE_MAX_SESSIONS` (default unlimited) |
+
+Through v1.2.1, set `OUTPACE_ACE_COMPAT=1` to enable the compatibility routes.
 
 If you used the old variable `OUTPACE_EXPERIMENTAL_ACE_COMPAT`, rename it to
 `OUTPACE_ACE_COMPAT`. The old name is read only when the new one is unset.
@@ -75,7 +77,7 @@ If you used the old variable `OUTPACE_EXPERIMENTAL_ACE_COMPAT`, rename it to
    ```bash
    OUTPACE_DATA_DIR=/var/lib/outpace \
    OUTPACE_BIND=127.0.0.1:16878 OUTPACE_RTMP_BIND=127.0.0.1:11935 \
-   OUTPACE_ENABLE_INBOUND=0 OUTPACE_ENABLE_SEEDING=0 OUTPACE_ACE_COMPAT=1 \
+   OUTPACE_ENABLE_INBOUND=0 OUTPACE_ENABLE_SEEDING=0 \
      outpace serve
    ```
 

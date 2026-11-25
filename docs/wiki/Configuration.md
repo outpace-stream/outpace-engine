@@ -267,8 +267,8 @@ See [Private Peer Mode](Private-Peer-Mode).
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_ACE_COMPAT` | `false` | boolean | all | Turns on `/ace/*`, `/server/api` and `/webui/api/service`. When off, those routes return `404`. Required for [Timeshift](Timeshift) seeking. |
-| `OUTPACE_EXPERIMENTAL_ACE_COMPAT` | unset | boolean | all | Deprecated old name. Read only when `OUTPACE_ACE_COMPAT` is unset; a set `OUTPACE_ACE_COMPAT=0` wins over it. Rename it. |
+| `OUTPACE_ACE_COMPAT` | `true` | boolean | all | Serves `/ace/*`, `/server/api` and `/webui/api/service`. Set `0` or `false` to turn them off; they then return `404`. Required for [Timeshift](Timeshift) seeking. The default was `false` up to 1.2.1. |
+| `OUTPACE_EXPERIMENTAL_ACE_COMPAT` | unset | boolean | all | Deprecated old name. Read only when `OUTPACE_ACE_COMPAT` is unset. Set the alias to `0` or `false` to disable compatibility in that case. The canonical variable takes precedence. |
 
 ### AceStream search services
 

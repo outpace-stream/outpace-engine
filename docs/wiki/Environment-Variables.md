@@ -14,7 +14,7 @@ See [Releases and Versions](Releases-and-Versions) for publication status.
 
 | Variable | Default | Avail. | Purpose |
 | --- | --- | --- | --- |
-| [`OUTPACE_ACE_COMPAT`](Configuration#acestream-compatibility-api) | `false` | all | Turn on the AceStream-compatible `/ace/*` and `/server/api` routes. |
+| [`OUTPACE_ACE_COMPAT`](Configuration#acestream-compatibility-api) | `true` | all | Serve the AceStream-compatible `/ace/*` and `/server/api` routes. Set `0` to turn them off. The default was `false` through v1.2.1. |
 | [`OUTPACE_COMPAT_ACESTREAM_SERVICES`](Configuration#acestream-search-services) | `false` | all | Separate opt-in for external stream-name search. |
 | [`OUTPACE_ACE_PEERS`](Configuration#discovery-trackers-and-resolution) | unset | all | Extra bootstrap peers, as `IPv4:port` separated by commas. |
 | [`OUTPACE_ACESTREAM_IDENTITY`](Configuration#acestream-identity) | `false` | 1.1.0 | Present the official engine's identity on the public network. |

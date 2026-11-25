@@ -3,8 +3,7 @@
 This inventory pins three representative clients inspected on 2026-10-23. Their source shows
 what they request, not complete official-engine behavior or successful playback in a deployed
 application. The [compatibility matrix](compat-matrix.md) remains the route and error contract.
-The supported subset remains opt-in through `OUTPACE_ACE_COMPAT=1`, disabled by
-default; `OUTPACE_ACE_COMPAT=0` explicitly disables it. The deprecated
+The supported subset is enabled by default; `OUTPACE_ACE_COMPAT=0` disables it. The deprecated
 `OUTPACE_EXPERIMENTAL_ACE_COMPAT` alias is a fallback only when the canonical variable
 is unset; see the [configuration contract](compat-matrix.md#enable-and-advertise-the-adapter)
 for precedence, strict validation, and restart requirements. Native APIs remain the primary
@@ -124,7 +123,7 @@ The HTTP tests live in `crates/ace-engine/src/http/tests/`.
 | JSON `id` + `format=json` + `pid`; playback/stat/stop | `compat.rs`: typed client DTO flow and malformed-input error; existing token, expiry and multi-consumer stop tests | JSON minting alone does not prove playable content; stat does not start work |
 | HLS redirect and JSON, playlist and segment | `compat_hls.rs`: engine Host, absolute segment, sampled Manager rewrite/catch-all mapping, retained TS bytes; existing forged-token, expiry and eviction cases | Tests URI routing locally; no proxy deployment or player timing claim |
 | `get_version` on both aliases | `server_api.rs`: literal spaced error, parsed result fields and JSON content type | Successful version formatting only; other methods keep their envelopes |
-| Gate off | Playback/control route table plus existing native route coverage | Supported opt-in configuration; default remains off |
+| Gate off | Playback/control route table plus existing native route coverage | Supported opt-out configuration; the gate defaults to on |
 | Stats counters | `compat.rs`: measured units/positions, idle/invalid-token cases | Provider observations, not an exact client playhead |
 
 The other existing methods have no discovered caller in these three snapshots. Their current

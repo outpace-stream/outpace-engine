@@ -112,7 +112,7 @@ http://192.168.1.2:6878/streams/ace/0123456789abcdef0123456789abcdef01234567
 
 Replace the placeholder with a real content id. The
 [Android app](Android-App) can use this board as its remote engine, and players that only speak
-the AceStream API need `OUTPACE_ACE_COMPAT=1`; see
+the AceStream API work too, with `OUTPACE_ACE_COMPAT=1` in the daemon environment for v1.2.1. Restart Outpace after setting it. See
 [Playing Streams](Playing-Streams#acestream-compatible-api).
 
 ## Notes

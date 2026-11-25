@@ -36,7 +36,7 @@ for scope, upgrades and validation limits.
 ```bash
 outpace --version
 docker run --rm ghcr.io/outpace-stream/outpace-engine:1.2.1 --version
-curl "http://127.0.0.1:6878/server/api?method=get_version"   # needs OUTPACE_ACE_COMPAT=1
+curl "http://127.0.0.1:6878/server/api?method=get_version"   # set OUTPACE_ACE_COMPAT=1 on the daemon through v1.2.1
 ```
 
 `get_version` returns `version`, a numeric `code` (`MAJOR*10000 + MINOR*100 + PATCH`) and the

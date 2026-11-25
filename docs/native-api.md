@@ -618,14 +618,14 @@ monitoring; do not poll a playback URL as a health check because that creates or
 
 ## Supported Ace HTTP subset
 
-Legacy `/ace/*`, `/server/api`, and `/webui/api/service` routes are disabled by default.
-Enable the supported adapter subset for middleware that cannot consume native URLs:
+Legacy `/ace/*`, `/server/api`, and `/webui/api/service` routes are enabled by default, so
+middleware that cannot consume native URLs works unchanged. Disable the adapter with:
 
 ```bash
-OUTPACE_ACE_COMPAT=1 outpace serve
+OUTPACE_ACE_COMPAT=0 outpace serve
 ```
 
-Set `OUTPACE_ACE_COMPAT=0` to disable it explicitly. The canonical variable wins whenever
+The canonical variable wins whenever
 present, including false; `OUTPACE_EXPERIMENTAL_ACE_COMPAT` is a deprecated fallback only
 when it is unset. The selected value must be exactly `1`, `true`, `0`, or `false`;
 empty, malformed, and non-Unicode selected values fail startup. Unused legacy values
