@@ -17,7 +17,7 @@ It is a **short local rewind buffer**:
 
 | Viewer | Can rewind? |
 | --- | --- |
-| Compatibility HLS (`/ace/manifest.m3u8`), unless `OUTPACE_ACE_COMPAT=0` | Yes, through `/ace/cmd` |
+| Compatibility HLS (`/ace/manifest.m3u8`), when the [compatibility API](Configuration#acestream-compatibility-api) is enabled | Yes, through `/ace/cmd` |
 | [Managed HLS origin](Managed-HLS-Origins) viewers with `OUTPACE_MANAGED_HLS=1` | Yes, through the viewer's `command_url`, for qualifying streams |
 | Native HLS (`/streams/ace/<id>.m3u8`) | No seek control. The source still records history if a compat viewer could use it. |
 | Direct MPEG-TS (`/streams/...`, `/ace/getstream`) | No. Raw TS sessions record nothing. |

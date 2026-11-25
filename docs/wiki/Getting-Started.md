@@ -113,8 +113,10 @@ outpace play acestream://0123456789abcdef0123456789abcdef01234567 > recording.ts
 ## Need an app to work, not just a player?
 
 Apps and add-ons written for the original engine call `/ace/getstream` and `/server/api`. Outpace
-serves those routes by default on the same port, so the daemon you started above already
-answers them:
+serves those routes on the same port. For v1.2.1, recreate the container above with
+`-e OUTPACE_ACE_COMPAT=1` before the image name. For a native install, set
+`OUTPACE_ACE_COMPAT=1` in the daemon environment and restart it. The routes are on
+by default in builds after v1.2.1. Then try:
 
 ```bash
 vlc "http://127.0.0.1:6878/ace/getstream?id=0123456789abcdef0123456789abcdef01234567"

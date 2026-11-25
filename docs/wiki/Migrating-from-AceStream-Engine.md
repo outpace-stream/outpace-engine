@@ -59,6 +59,8 @@ handshake and work with compat off.
 | RTMP ingest | `OUTPACE_RTMP_BIND` (default `127.0.0.1:1935`) |
 | Concurrent-stream cap | `OUTPACE_MAX_SESSIONS` (default unlimited) |
 
+Through v1.2.1, set `OUTPACE_ACE_COMPAT=1` to enable the compatibility routes.
+
 If you used the old variable `OUTPACE_EXPERIMENTAL_ACE_COMPAT`, rename it to
 `OUTPACE_ACE_COMPAT`. The old name is read only when the new one is unset.
 

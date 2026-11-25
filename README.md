@@ -147,7 +147,9 @@ For a production setup, use the repository's [`compose.yml`](compose.yml) and
   No handshake is needed.
 - **Apps built for the Ace Stream engine:** point them at Outpace as they are. The supported
   `/ace/getstream?id=…`, `/ace/manifest.m3u8` and `/server/api` routes are on by default; set
-  `OUTPACE_ACE_COMPAT=0` to turn them off.
+  `OUTPACE_ACE_COMPAT=0` to turn them off. For the v1.2.1 examples above, set
+  `OUTPACE_ACE_COMPAT=1` explicitly (pass `-e OUTPACE_ACE_COMPAT=1` before the image name
+  in Docker).
 
 The HTTP API has no authentication, so keep it on `127.0.0.1` or behind a proxy. Only TCP 8621
 (the peer port) is meant to be public. See

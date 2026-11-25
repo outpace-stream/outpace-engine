@@ -46,12 +46,15 @@ Configure `outpace serve` through environment variables; see the full
 | Legacy HTTP clients | Served by default; `OUTPACE_ACE_COMPAT=0` opts out |
 | Origination | `outpace broadcast <name>` creates/resumes a signed identity and serves ingest; no fictitious broadcast-enable variable is needed |
 
+Through v1.2.1, set `OUTPACE_ACE_COMPAT=1` to enable the compatibility routes.
+
 `OUTPACE_ACE_COMPAT` is canonical. The deprecated `OUTPACE_EXPERIMENTAL_ACE_COMPAT`
 is consulted only if the canonical variable is absent. Present canonical `0`/`false` wins
 over legacy `1`; accepted values are exactly `1`, `true`, `0`, `false`. Empty or invalid
 selected values fail startup; unused legacy values are ignored. Restart native processes,
 or recreate containers, after environment changes. Root Compose forwards the unset-only
-fallback; a new `.env.example` explicitly sets canonical `0`, overriding legacy opt-in.
+fallback; a new `.env.example` explicitly sets canonical `1`, overriding a legacy opt-out. To preserve that opt-out, set
+`OUTPACE_ACE_COMPAT=0` in the new `.env`.
 Arbitrary variables in `.env` are not automatically passed to containers.
 
 Outpace creates a new stable node identity in `identity.seed`. Keep the same writable data
