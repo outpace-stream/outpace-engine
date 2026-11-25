@@ -22,7 +22,10 @@ fn native_request_matches_independent_vector_before_form_encoding() {
         ("category".into(), "tv & radio".into()),
     ])
     .unwrap();
-    let request = NativeRequest::new(&query, 1_700_000_000, NONCE.into());
+    let current = NativeRequest::new(&query, 1_700_000_000, NONCE.into());
+    assert_eq!(current.params["_n"], env!("CARGO_PKG_VERSION"));
+    let request =
+        NativeRequest::as_outpace(&query, 1_700_000_000, NONCE.into(), "1.2.1", 1_020_100);
     let url = request.url("s5.torrentstream.net");
     assert!(url.starts_with("http://s5.torrentstream.net/a?"));
     let params: std::collections::BTreeMap<_, _> =
@@ -40,7 +43,7 @@ fn native_request_matches_independent_vector_before_form_encoding() {
     assert_eq!(params["c"], "tv & radio");
     assert_eq!(params["m"], "4");
     assert_eq!(params["_p"], "outpace");
-    assert_eq!(params["_n"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(params["_n"], "1.2.1");
     assert_eq!(params.len(), 13);
     assert!(url.contains("a=a%26key%3D%2B%C3%A9"));
 }

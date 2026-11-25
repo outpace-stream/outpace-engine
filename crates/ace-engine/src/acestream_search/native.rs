@@ -74,12 +74,25 @@ impl NativeRequest {
         let major: u64 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap();
         let minor: u64 = env!("CARGO_PKG_VERSION_MINOR").parse().unwrap();
         let patch: u64 = env!("CARGO_PKG_VERSION_PATCH").parse().unwrap();
+        Self::as_outpace(
+            query,
+            timestamp,
+            nonce,
+            env!("CARGO_PKG_VERSION"),
+            major * 1_000_000 + minor * 10_000 + patch * 100,
+        )
+    }
+
+    fn as_outpace(
+        query: &SearchQuery,
+        timestamp: u64,
+        nonce: String,
+        version: &str,
+        version_code: u64,
+    ) -> Self {
         let mut params: BTreeMap<String, String> = [
-            ("_n", env!("CARGO_PKG_VERSION").to_owned()),
-            (
-                "_v",
-                (major * 1_000_000 + minor * 10_000 + patch * 100).to_string(),
-            ),
+            ("_n", version.to_owned()),
+            ("_v", version_code.to_string()),
             ("_p", "outpace".into()),
             ("_t", timestamp.to_string()),
             ("_r", nonce.clone()),
