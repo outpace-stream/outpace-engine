@@ -33,11 +33,6 @@ concurrency:
   group: site-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  # Site tooling only; nothing here ships in Outpace. Bump both together.
-  MDBOOK_VERSION: v0.5.4
-  MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
-
 jobs:
   build:
     name: build site
@@ -54,8 +49,14 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.sha || 'refs/heads/main' }}
           persist-credentials: false
       - name: Install mdBook
+        # The pin lives in the checked-out tree, not this file: a run that builds main's tip
+        # uses the mdBook version that tip's builder expects, even if GitHub ran an older
+        # copy of this workflow.
         run: |
           set -euo pipefail
+          MDBOOK_VERSION="$(sed -n 's/^version=//p' tools/site/mdbook.pin)"
+          MDBOOK_SHA256="$(sed -n 's/^sha256=//p' tools/site/mdbook.pin)"
+          [[ "$MDBOOK_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "$MDBOOK_SHA256" =~ ^[0-9a-f]{64}$ ]]
           archive="$RUNNER_TEMP/mdbook.tar.gz"
           curl -fsSL --retry 3 -o "$archive" \
             "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_VERSION}/mdbook-${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
