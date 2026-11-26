@@ -65,6 +65,7 @@ New here? Start with the [FAQ](FAQ) or [Getting Started](Getting-Started).
 | Look up a setting | [Configuration](Configuration) (by topic) · [Environment Variables](Environment-Variables) (A–Z) |
 | Use `outpace play`, `broadcast` or other commands | [Command Line](Command-Line) |
 | Point a player or app at Outpace | [Playing Streams](Playing-Streams) |
+| Add Outpace channels to Jellyfin, Dispatcharr or Kodi | [Jellyfin](Jellyfin) · [Dispatcharr](Dispatcharr) · [Kodi](Kodi) |
 | Send a live stream to a smart TV or other DLNA renderer | [Casting](Casting) |
 | Tune HLS or fix audio for a player | [HLS Output](HLS-Output) |
 | Rewind a live stream | [Timeshift](Timeshift) |

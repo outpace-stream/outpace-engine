@@ -18,6 +18,12 @@
 - [Timeshift](Timeshift)
 - [Managed HLS Origins](Managed-HLS-Origins)
 
+**Integrations**
+
+- [Jellyfin](Jellyfin)
+- [Dispatcharr](Dispatcharr)
+- [Kodi](Kodi)
+
 **Publishing and peers**
 
 - [Broadcasting](Broadcasting)
