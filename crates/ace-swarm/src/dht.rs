@@ -38,6 +38,15 @@ const MAX_ACTIVE: usize = 8;
 /// correlatable until the TTL, so a late reply is still accepted.
 const SLOT_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// The most lookup `get_peers` queries one walk sends (#384). Refilling slots as replies
+/// arrive lets a walk query at network speed, so the budget alone no longer bounds its
+/// traffic: a peerless swarm, or responders that keep referring fresh node ids, could
+/// otherwise be asked thousands of times in one budget. Live walks that reach the peer
+/// target ask 20 to 40 nodes, and the libraries compared in #44 sent 236 and 552
+/// datagrams, so this leaves the normal path untouched. The one recovery round adds at
+/// most [`MAX_ACTIVE`] on top, so a walk sends at most `MAX_QUERIES + MAX_ACTIVE` queries.
+const MAX_QUERIES: usize = 256;
+
 /// How many IPv4 addresses the walk seeds from one bootstrap hostname. Some routers sit
 /// behind several addresses (round-robin DNS), and a walk that only ever asks the first
 /// one loses that router whenever that single address drops its query.
@@ -240,6 +249,8 @@ struct DhtWalkMetrics {
     recovery_peers: usize,
     /// The walk ran out of new frontier nodes before exhausting its time budget.
     frontier_exhausted: bool,
+    /// The walk sent its [`MAX_QUERIES`] lookup queries and stopped asking new nodes.
+    query_cap_reached: bool,
 }
 
 /// 6-byte compact endpoint: 4-byte IPv4 + 2-byte big-endian port.
@@ -313,6 +324,7 @@ async fn dht_walk_with_bootstraps(
         Vec::new(),
         lookups,
         cache,
+        MAX_QUERIES,
         on_response,
     )
     .await
@@ -389,6 +401,7 @@ async fn dht_walk_from_bootstrap_seeds(
         bootstraps,
         tokio::task::JoinSet::new(),
         cache,
+        MAX_QUERIES,
         on_response,
     )
     .await
@@ -410,6 +423,7 @@ async fn dht_walk_frontier(
         Vec::new(),
         tokio::task::JoinSet::new(),
         None,
+        MAX_QUERIES,
         on_response,
     )
     .await
@@ -638,6 +652,7 @@ async fn dht_walk_owned(
     mut bootstraps: Vec<BootstrapNode>,
     mut lookups: BootstrapLookups,
     cache: Option<&NodeCache>,
+    max_queries: usize,
     mut on_response: impl FnMut(SocketAddrV4, &GetPeersResponse) -> bool,
 ) -> DhtWalkMetrics {
     let node_id = session_node_id();
@@ -691,6 +706,10 @@ async fn dht_walk_owned(
 
         let mut active = inflight.values().filter(|query| query.active).count();
         while active < MAX_ACTIVE {
+            if metrics.nodes_queried - metrics.recovery_queries >= max_queries {
+                metrics.query_cap_reached = true;
+                break;
+            }
             let Some(addr) = frontier
                 .values()
                 .find(|addr| !queried.contains(*addr))
@@ -725,6 +744,7 @@ async fn dht_walk_owned(
 
         if active == 0
             && lookups.is_empty()
+            && !metrics.query_cap_reached
             && recovery_started_at.is_none()
             && metrics.peers_discovered == 0
         {
@@ -792,6 +812,12 @@ async fn dht_walk_owned(
                     metrics.recovery_queries
                 );
             }
+        }
+        if active == 0 && metrics.query_cap_reached {
+            // The query cap is spent and every slot has been answered or released: nothing
+            // more will go out, so a pending bootstrap lookup cannot help either.
+            crate::alog!("[dht] query cap reached: queried={}", queried.len());
+            break;
         }
         if active == 0 && lookups.is_empty() {
             // Nothing left to ask and nothing outstanding that could add to the frontier.
@@ -906,7 +932,7 @@ async fn dht_walk_owned(
     crate::alog!(
         "[dht] walk done: seeded={} queried={} valid={} peers={} nodes={} malformed={} \
          krpc_err={} uncorrelated={} timeouts={} recovery_queries={} recovery_peers={} \
-         frontier_exhausted={}",
+         frontier_exhausted={} query_cap_reached={}",
         metrics.bootstrap_seeded,
         metrics.nodes_queried,
         metrics.valid_responses,
@@ -919,6 +945,7 @@ async fn dht_walk_owned(
         metrics.recovery_queries,
         metrics.recovery_peers,
         metrics.frontier_exhausted,
+        metrics.query_cap_reached,
     );
     metrics
 }
@@ -2047,6 +2074,7 @@ mod tests {
             Vec::new(),
             lookups,
             None,
+            MAX_QUERIES,
             |_src, resp| {
                 accepted |= resp.peers.contains(&peer);
                 false
@@ -2147,6 +2175,114 @@ mod tests {
         assert!(
             elapsed < SLOT_TIMEOUT + Duration::from_millis(700),
             "slots were held for {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn walk_never_holds_more_than_max_active_slots() {
+        // Twenty silent seeds. The first MAX_ACTIVE are asked at once, the next MAX_ACTIVE
+        // only when their slots release at SLOT_TIMEOUT, and the budget ends before the
+        // third release: exactly two full sets of slots, never more at a time.
+        let sockets = bind_loopback(20).await;
+        let seeds: Vec<SocketAddrV4> = sockets.iter().map(v4_addr).collect();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let metrics = dht_walk_from_seeds(
+            &[0u8; 20],
+            SLOT_TIMEOUT + SLOT_TIMEOUT / 3,
+            &client,
+            seeds,
+            |_, _| false,
+        )
+        .await;
+        let elapsed = start.elapsed();
+        let mut buf = [0u8; 2048];
+        let mut asked = 0;
+        for socket in &sockets {
+            if socket.try_recv_from(&mut buf).is_ok() {
+                asked += 1;
+                assert!(
+                    socket.try_recv_from(&mut buf).is_err(),
+                    "seed queried twice"
+                );
+            }
+        }
+        assert_eq!(asked, 2 * MAX_ACTIVE, "after {elapsed:?}");
+        assert_eq!(metrics.nodes_queried, 2 * MAX_ACTIVE);
+        assert_eq!(metrics.timeouts, MAX_ACTIVE);
+    }
+
+    #[tokio::test]
+    async fn walk_stops_asking_new_nodes_at_its_query_cap() {
+        // Twelve responders that all answer at once with nothing useful, seeded as bootstrap
+        // routers so a peerless dead end would normally start the recovery round. With a cap
+        // of five the walk must ask exactly the five closest, skip the recovery round, and end
+        // as soon as those five have answered rather than waiting out the budget.
+        const CAP: usize = 5;
+        let sockets = bind_loopback(12).await;
+        let seeds: Vec<SocketAddrV4> = sockets.iter().map(v4_addr).collect();
+        let mut frontier = BTreeMap::new();
+        let mut bootstraps = Vec::new();
+        for (i, seed) in seeds.iter().enumerate() {
+            let mut key = [0xffu8; 20];
+            key[19] = i as u8;
+            frontier.insert(key, *seed);
+            bootstraps.push(BootstrapNode {
+                addr: *seed,
+                answered: false,
+            });
+        }
+        let responders: Vec<_> = sockets
+            .into_iter()
+            .map(|socket| {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let mut queries = 0usize;
+                    while let Ok(Ok((n, caller))) =
+                        tokio::time::timeout(Duration::from_millis(300), socket.recv_from(&mut buf))
+                            .await
+                    {
+                        queries += 1;
+                        let resp = response_with(&buf_txid(&buf[..n]), &[], &[]);
+                        socket.send_to(&resp, caller).await.unwrap();
+                    }
+                    queries
+                })
+            })
+            .collect();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let metrics = dht_walk_owned(
+            &[0u8; 20],
+            Instant::now() + Duration::from_secs(5),
+            &client,
+            frontier,
+            bootstraps,
+            tokio::task::JoinSet::new(),
+            None,
+            CAP,
+            |_, _| false,
+        )
+        .await;
+        let elapsed = start.elapsed();
+        let mut per_seed = Vec::new();
+        for responder in responders {
+            per_seed.push(responder.await.unwrap());
+        }
+        assert_eq!(
+            per_seed[..CAP],
+            [1; CAP],
+            "the closest seeds are asked once"
+        );
+        assert!(per_seed[CAP..].iter().all(|&n| n == 0), "{per_seed:?}");
+        assert_eq!(metrics.nodes_queried, CAP);
+        assert_eq!(metrics.valid_responses, CAP);
+        assert_eq!(metrics.recovery_queries, 0);
+        assert!(metrics.query_cap_reached);
+        assert!(!metrics.frontier_exhausted);
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "capped walk lingered for {elapsed:?}"
         );
     }
 
