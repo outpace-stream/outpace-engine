@@ -330,4 +330,6 @@ lines, IPv6 addresses or base32 magnet links.
 
 Ask in [Discussions](https://github.com/outpace-stream/outpace-engine/discussions). See the
 [FAQ](FAQ) for common questions: do you need the official engine, Docker, VLC,
-Jellyfin and Dispatcharr, broadcasting, and the differences from the official engine.
+Jellyfin and Dispatcharr, broadcasting, and the differences from the official engine. The
+[Jellyfin](Jellyfin), [Dispatcharr](Dispatcharr) and [Kodi](Kodi) guides cover problems specific
+to those clients.
