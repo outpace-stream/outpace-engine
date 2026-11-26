@@ -81,31 +81,58 @@ pub(crate) fn pmt(tracks: &[(u16, u8, &[u8; 3])]) -> [u8; N] {
 
 /// Generate `frames` 40 ms frames of synthetic multi-audio TS.
 pub(crate) fn stream(frames: usize) -> Vec<u8> {
+    let mut generator = Generator::new(&AUDIO);
     let mut out = Vec::with_capacity(frames * 142 * N);
-    let mut cc = [0u8; 0x2000];
-    let mut next = |pid: u16| {
-        let c = cc[pid as usize];
-        cc[pid as usize] = (c + 1) & 15;
+    for _ in 0..frames {
+        generator.frame(&mut out);
+    }
+    out
+}
+
+/// Endless frame source with its own audio track layout, continuity and PCR.
+pub(crate) struct Generator {
+    tracks: Vec<(u16, u8, [u8; 3])>,
+    table: [u8; N],
+    frame: u64,
+    cc: Vec<u8>,
+}
+
+impl Generator {
+    pub(crate) fn new(tracks: &[(u16, u8, &[u8; 3])]) -> Self {
+        Self {
+            tracks: tracks.iter().map(|(p, t, l)| (*p, *t, **l)).collect(),
+            table: pmt(tracks),
+            frame: 0,
+            cc: vec![0; 0x2000],
+        }
+    }
+
+    fn next_cc(&mut self, pid: u16) -> u8 {
+        let c = self.cc[pid as usize];
+        self.cc[pid as usize] = (c + 1) & 15;
         c
-    };
-    let table = pmt(&AUDIO);
-    for frame in 0..frames {
-        if frame % 3 == 0 {
+    }
+
+    /// Append one 40 ms frame.
+    pub(crate) fn frame(&mut self, out: &mut Vec<u8>) {
+        let frame = self.frame;
+        self.frame += 1;
+        if frame.is_multiple_of(3) {
             let mut p = pat();
-            p[3] |= next(0);
+            p[3] |= self.next_cc(0);
             out.extend_from_slice(&p);
-            let mut p = table;
-            p[3] |= next(PMT_PID);
+            let mut p = self.table;
+            p[3] |= self.next_cc(PMT_PID);
             out.extend_from_slice(&p);
         }
-        let key = frame % 25 == 0;
-        let pcr = frame as u64 * 3600;
+        let key = frame.is_multiple_of(25);
+        let pcr = frame * 3600;
         let mut p = [0xab; N];
         p[..4].copy_from_slice(&[
             0x47,
             0x40 | (VIDEO_PID >> 8) as u8,
             VIDEO_PID as u8,
-            0x30 | next(VIDEO_PID),
+            0x30 | self.next_cc(VIDEO_PID),
         ]);
         p[4] = 7;
         p[5] = 0x10 | if key { 0x40 } else { 0 };
@@ -126,18 +153,19 @@ pub(crate) fn stream(frames: usize) -> Vec<u8> {
                 0x47,
                 (VIDEO_PID >> 8) as u8,
                 VIDEO_PID as u8,
-                0x10 | next(VIDEO_PID),
+                0x10 | self.next_cc(VIDEO_PID),
             ]);
             out.extend_from_slice(&p);
         }
-        for (pid, _, _) in AUDIO {
+        for t in 0..self.tracks.len() {
+            let pid = self.tracks[t].0;
             for i in 0..3 {
                 let mut p = [pid as u8; N];
                 p[..4].copy_from_slice(&[
                     0x47,
                     if i == 0 { 0x40 } else { 0 } | (pid >> 8) as u8,
                     pid as u8,
-                    0x10 | next(pid),
+                    0x10 | self.next_cc(pid),
                 ]);
                 if i == 0 {
                     p[4..13].copy_from_slice(&[0, 0, 1, 0xc0, 0, 0, 0x80, 0, 0]);
@@ -146,5 +174,38 @@ pub(crate) fn stream(frames: usize) -> Vec<u8> {
             }
         }
     }
-    out
+}
+
+/// Audio PIDs (from `AUDIO`-style layouts, PIDs 0x101..) present in `ts`.
+pub(crate) fn audio_pids(ts: &[u8]) -> Vec<u16> {
+    let mut pids: Vec<u16> = ts
+        .as_chunks::<N>()
+        .0
+        .iter()
+        .map(|p| ace_media::mpegts::ts_pid(p))
+        .filter(|pid| (0x101..0x200).contains(pid))
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// Elementary PIDs, in PMT order, of the first PMT packet in `ts`.
+pub(crate) fn first_pmt_order(ts: &[u8]) -> Option<Vec<u16>> {
+    let p = ts
+        .as_chunks::<N>()
+        .0
+        .iter()
+        .find(|p| ace_media::mpegts::ts_pid(*p) == PMT_PID && p[1] & 0x40 != 0)?;
+    let off = 5 + p[4] as usize;
+    let len = (((p[off + 1] & 15) as usize) << 8) | p[off + 2] as usize;
+    let s = &p[off..off + 3 + len];
+    assert_eq!(mpeg_crc32(s), 0, "PMT CRC must stay valid");
+    let mut pos = 12 + ((((s[10] & 15) as usize) << 8) | s[11] as usize);
+    let mut pids = Vec::new();
+    while pos + 5 <= s.len() - 4 {
+        pids.push((((s[pos + 1] & 31) as u16) << 8) | s[pos + 2] as u16);
+        pos += 5 + ((((s[pos + 3] & 15) as usize) << 8) | s[pos + 4] as usize);
+    }
+    Some(pids)
 }

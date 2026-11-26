@@ -275,6 +275,9 @@ process limits and recovery behavior. A terminal normalization failure may keep
 returning retryable 503 without restarting the worker; teardown and a fresh source
 session are required. This does not qualify any particular browser or live client.
 
+Live HLS also honors a per-request
+[`preferred_audio_language`](#preferred-audio-language) within this policy.
+
 Query hints such as `audio_normalize`, codec/playlist/transcode settings, and caller
 source options do not configure FFmpeg or enable arbitrary remuxing, video encoding,
 seek or file selection. `OUTPACE_LIVE_AUDIO_NORMALIZE=true` separately enables
@@ -284,6 +287,50 @@ switches enabled there is one conversion child. TS startup failures return expli
 error. Native stream status retains the bounded failure code. VOD lengths, ranges
 and bytes are unchanged. This operator policy does not add per-request conversion
 options or new compatibility response keys.
+
+### Preferred audio language
+
+`/ace/getstream` (direct, and `format=json` through its lease's `/ace/r/…` URL) and
+`/ace/manifest.m3u8` accept `preferred_audio_language=<code>`. Native routes ignore it.
+
+- **Value.** Exactly three ASCII letters (ISO 639-2), case-insensitive. The twenty
+  bibliographic codes fold to their terminology synonyms (`ger` = `deu`, `fre` = `fra`).
+  Any other value, including an empty one, is ignored as if omitted, with no error. This
+  repository has no evidence of how the original engine treats invalid values, so
+  Outpace stays lenient. A repeated key is rejected like any other repeated parameter.
+- **Matching.** The code is compared with every entry of each audio stream's
+  ISO_639_language_descriptor (tag `0x0a`) in the current single-packet PMT. Among
+  matching tracks the preference order is ADTS AAC, then MPEG audio or AC-3, then other
+  recognized audio; PMT order breaks ties. No match leaves the default behavior.
+- **TS.** Every track is still delivered. Only the requesting viewer's PMT is rewritten:
+  the matched track moves to the program's first audio entry and the CRC is recomputed;
+  PIDs, descriptors, version and continuity are unchanged. Players that start the first
+  audio track (for example VLC and mpv) play it, and can still switch; players with
+  their own rules may not. Without a match, or for a fragmented or CRC-invalid PMT, the
+  PMT is forwarded byte for byte. Viewers without the parameter are unaffected.
+- **HLS.** Native HLS carries one audio track. When the program has ADTS AAC, a matching
+  ADTS AAC track replaces the default first ADTS AAC, and a match in another codec is
+  ignored, so the delivered codec never changes. Without ADTS AAC, where the default
+  passes every track through, a matching recognized track is kept alone. The request
+  resolves the language once, against the shared source's current PMT (on a cold start
+  it waits up to `OUTPACE_HLS_STARTUP_TIMEOUT_MS` for the first PMT), and its lease stays
+  on the result. A language that resolves to the default track uses the default
+  packager.
+- **One download, bounded variants.** Every viewer shares the stream's one upstream
+  session. Each distinct non-default track adds one native packager (a *variant*) on that
+  session: one more broadcast receiver and its own bounded segment window, the same
+  `OUTPACE_HLS_SEGMENT_PACKETS` × (`OUTPACE_HLS_WINDOW_SEGMENTS` + 1) ceiling as the
+  default packager, plus any retained history, charged to the one global history budget.
+  At most **four** variants run per stream. Further tracks get the default packager, and
+  `[hls] audio variant limit reached` is logged once per stream. A variant whose last
+  lease is stopped, expires or is evicted is retired by the next idle sweep (about 30 s);
+  stopping the stream removes all of its variants. Timeshift on a variant lease uses
+  that variant's history.
+- **Normalization wins.** With `OUTPACE_HLS_AUDIO_NORMALIZE` or
+  `OUTPACE_LIVE_AUDIO_NORMALIZE` on, HLS ignores the preference: no variant packager and
+  no extra FFmpeg child. With `OUTPACE_LIVE_AUDIO_NORMALIZE` on, TS ignores it too,
+  because the shared source has already been normalized. With only
+  `OUTPACE_HLS_AUDIO_NORMALIZE`, TS still honors it.
 
 ## Live statistics units and limits
 

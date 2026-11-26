@@ -14,9 +14,16 @@ fn config() -> HlsConfig {
 }
 
 fn cases() -> Vec<(&'static str, Setup)> {
-    vec![("default", || {
-        HlsPackager::new(config(), Some("Synthetic".into()))
-    })]
+    vec![
+        ("default", || {
+            HlsPackager::new(config(), Some("Synthetic".into()))
+        }),
+        ("variant_rus", || {
+            let pkg = HlsPackager::new(config(), Some("Synthetic".into()));
+            pkg.set_audio_language(ace_media::audio::AudioLanguage::parse("rus").unwrap());
+            pkg
+        }),
+    ]
 }
 
 #[test]

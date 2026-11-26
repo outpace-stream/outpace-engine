@@ -114,7 +114,9 @@ With both on, only the shared conversion runs. VOD is never converted, whichever
 - Video is copied, never re-encoded.
 - AAC audio passes through without conversion, and video-only streams start no converter.
 - Everyone watching a source gets the same converted audio. There is no per-viewer track or
-  language choice.
+  language choice: with either switch on, HLS ignores
+  [`preferred_audio_language`](#choosing-an-audio-language), and with
+  `OUTPACE_LIVE_AUDIO_NORMALIZE=1` MPEG-TS ignores it too.
 - Stereo downmix loses surround channels, and re-encoding costs some quality.
 - At most **four** conversions run at once across the daemon.
 
@@ -163,6 +165,32 @@ playlists are absolute and built from the request's `Host` header.
 
 Native playlists use root-relative paths (`/streams/ace/<id>/seg/<n>.ts`). They work through a
 reverse proxy on the same host name, but not under a sub-path.
+
+### Choosing an audio language
+
+Add `preferred_audio_language=<code>` to `/ace/manifest.m3u8`, with a three-letter ISO 639-2 code
+such as `rus`:
+
+```text
+http://127.0.0.1:6878/ace/manifest.m3u8?id=0123456789abcdef0123456789abcdef01234567&preferred_audio_language=rus
+```
+
+- The code is case-insensitive, and `ger`/`deu`, `fre`/`fra` and the other bibliographic and
+  terminology pairs are treated as the same language. Any other value is ignored.
+- It is matched against the language tags of the stream's audio tracks. If the stream has AAC
+  audio, only an AAC track in that language is picked, so the codec you get never changes. If
+  the stream has no AAC, a track in that language in any recognised codec is kept on its own.
+- No match, an invalid code or no parameter gives the normal audio: the first AAC track, or
+  every track when there is no AAC.
+- Viewers asking for different languages still share **one download**. Each extra track costs
+  one more packager, with its own retained segment window. A stream runs at most **four** extra
+  language packagers; later languages get the normal audio. An extra packager stops about 30
+  seconds after its last viewer's lease ends.
+- With [audio normalisation](#audio-normalisation) on, the parameter is ignored.
+- Native `/streams/...` playlists ignore the parameter.
+
+The full rules are in the
+[compatibility contract](https://github.com/outpace-stream/outpace-engine/blob/main/docs/protocol/compat-matrix.md#preferred-audio-language).
 
 ## Related pages
 

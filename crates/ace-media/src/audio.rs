@@ -29,6 +29,184 @@ pub struct SelectedAudio {
     pub codec: AudioCodec,
 }
 
+/// A requested ISO 639-2 audio language: exactly three ASCII letters, compared
+/// case-insensitively. The twenty bibliographic (B) codes are folded to their terminology (T)
+/// synonyms, so `ger` matches a track tagged `deu` and `fre` one tagged `fra`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AudioLanguage([u8; 3]);
+
+/// ISO 639-2 B -> T synonyms; every other code has a single form.
+const BIBLIOGRAPHIC: [(&[u8; 3], &[u8; 3]); 20] = [
+    (b"alb", b"sqi"),
+    (b"arm", b"hye"),
+    (b"baq", b"eus"),
+    (b"bur", b"mya"),
+    (b"chi", b"zho"),
+    (b"cze", b"ces"),
+    (b"dut", b"nld"),
+    (b"fre", b"fra"),
+    (b"geo", b"kat"),
+    (b"ger", b"deu"),
+    (b"gre", b"ell"),
+    (b"ice", b"isl"),
+    (b"mac", b"mkd"),
+    (b"mao", b"mri"),
+    (b"may", b"msa"),
+    (b"per", b"fas"),
+    (b"rum", b"ron"),
+    (b"slo", b"slk"),
+    (b"tib", b"bod"),
+    (b"wel", b"cym"),
+];
+
+impl AudioLanguage {
+    /// Parse a request value. Anything other than exactly three ASCII letters is `None`.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::from_code(value.as_bytes())
+    }
+
+    fn from_code(code: &[u8]) -> Option<Self> {
+        let code: [u8; 3] = code.try_into().ok()?;
+        if !code.iter().all(u8::is_ascii_alphabetic) {
+            return None;
+        }
+        let code = code.map(|c| c.to_ascii_lowercase());
+        Some(Self(
+            BIBLIOGRAPHIC
+                .iter()
+                .find(|(b, _)| **b == code)
+                .map_or(code, |(_, t)| **t),
+        ))
+    }
+
+    /// The normalized lowercase (terminology) code.
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).unwrap_or("und")
+    }
+
+    /// Whether an elementary stream's descriptor loop carries an ISO_639_language_descriptor
+    /// (tag 0x0a) entry for this language. Malformed loops never match.
+    pub fn tagged(&self, mut descriptors: &[u8]) -> bool {
+        while let [tag, len, rest @ ..] = descriptors {
+            let Some(body) = rest.get(..*len as usize) else {
+                return false;
+            };
+            if *tag == 0x0a
+                && body
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|entry| Self::from_code(&entry[..3]) == Some(*self))
+            {
+                return true;
+            }
+            descriptors = &rest[*len as usize..];
+        }
+        false
+    }
+}
+
+/// Preference among language-matching tracks: ADTS AAC, then MPEG audio or AC-3, then any
+/// other recognized audio. Ties keep PMT order.
+fn codec_rank(codec: AudioCodec) -> u8 {
+    match codec {
+        AudioCodec::AdtsAac => 0,
+        AudioCodec::MpegAudio | AudioCodec::Ac3 => 1,
+        _ => 2,
+    }
+}
+
+/// Best `language` track among `(pid, codec, descriptors)` entries ranked at most `max_rank`.
+fn language_track<'a>(
+    tracks: impl Iterator<Item = (u16, Option<AudioCodec>, &'a [u8])>,
+    language: AudioLanguage,
+    max_rank: u8,
+) -> Option<u16> {
+    let mut best: Option<(u8, u16)> = None;
+    for (pid, codec, desc) in tracks {
+        let Some(rank) = codec.map(codec_rank) else {
+            continue;
+        };
+        if rank <= max_rank && best.is_none_or(|(b, _)| rank < b) && language.tagged(desc) {
+            best = Some((rank, pid));
+        }
+    }
+    best.map(|(_, pid)| pid)
+}
+
+/// Native live HLS selection: the first ADTS AAC track, or `None` to pass audio through.
+/// A preferred language picks a matching ADTS AAC track instead; when the program has no ADTS
+/// AAC (so native HLS would pass every track through), any recognized matching track is kept
+/// alone. Without a match, the default selection stands.
+fn native_selection(
+    entries: &[(usize, usize, u16, Option<AudioCodec>)],
+    s: &[u8],
+    preferred: Option<AudioLanguage>,
+) -> Option<u16> {
+    let default = entries
+        .iter()
+        .find(|e| e.3 == Some(AudioCodec::AdtsAac))
+        .map(|e| e.2);
+    let Some(language) = preferred else {
+        return default;
+    };
+    let max_rank = if default.is_some() { 0 } else { 2 };
+    let tracks = entries.iter().map(|e| (e.2, e.3, &s[e.0 + 5..e.1]));
+    language_track(tracks, language, max_rank).or(default)
+}
+
+/// Reorder one viewer's PMT so the best `language` audio track becomes the program's first
+/// audio entry, then recompute the CRC. Every elementary stream, descriptor, PID and the
+/// version are kept, so players that start the first audio track start the requested one and
+/// can still switch. Only a complete, CRC-valid, single-packet current PMT is rewritten; any
+/// other packet, or one already in the preferred order, is left untouched (`false`).
+/// Works in place without allocating.
+pub fn prefer_audio_track(packet: &mut [u8], language: AudioLanguage) -> bool {
+    let Ok(packet) = <&mut [u8; N]>::try_from(packet) else {
+        return false;
+    };
+    let Ok(s) = section(packet, 2, 13, None) else {
+        return false;
+    };
+    let len = s.len();
+    let end = len - 4;
+    let begin = 12 + ((((s[10] & 15) as usize) << 8) | s[11] as usize);
+    let mut pos = begin;
+    let mut first_audio = None;
+    let mut best: Option<(u8, usize, usize)> = None;
+    while pos < end {
+        let Some(h) = s.get(pos..pos + 5).filter(|_| pos + 5 <= end) else {
+            return false;
+        };
+        let next = pos + 5 + ((((h[3] & 15) as usize) << 8) | h[4] as usize);
+        if next > end {
+            return false;
+        }
+        let desc = &s[pos + 5..next];
+        if let Some(codec) = audio_codec(h[0], desc).and_then(|c| c.first) {
+            first_audio.get_or_insert(pos);
+            let rank = codec_rank(codec);
+            if best.is_none_or(|(b, _, _)| rank < b) && language.tagged(desc) {
+                best = Some((rank, pos, next));
+            }
+        }
+        pos = next;
+    }
+    let (Some(first), Some((_, start, stop))) = (first_audio, best) else {
+        return false;
+    };
+    if first == start {
+        return false;
+    }
+    let off = payload(packet).expect("a validated section has a payload");
+    let at = off + 1 + packet[off] as usize;
+    let sec = &mut packet[at..at + len];
+    sec[first..stop].rotate_right(stop - start);
+    let crc = mpeg_crc32(&sec[..end]);
+    sec[end..].copy_from_slice(&crc.to_be_bytes());
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransportLayout {
     pub transport_stream_id: u16,
@@ -198,15 +376,50 @@ pub struct LiveAudioSelection {
     version: u8,
     rewrite: bool,
     output_cc: u8,
+    /// Language-aware native selection for one HLS variant; survives [`Self::reset`].
+    preferred: Option<AudioLanguage>,
 }
 
 impl LiveAudioSelection {
+    /// Native selection that prefers `language` (see [`Self::selection_for`]).
+    pub fn with_language(language: AudioLanguage) -> Self {
+        Self {
+            preferred: Some(language),
+            ..Self::default()
+        }
+    }
+
     pub fn layout(&self) -> LayoutDecision {
         self.layout.clone()
     }
 
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            preferred: self.preferred,
+            ..Self::default()
+        };
+    }
+
+    /// The audio PID native selection keeps under the current PMT for `language` (`None` is
+    /// the default policy): `None` while no usable PMT is known yet, `Some(None)` when audio
+    /// passes through unchanged (no ADTS AAC and no match, or PSI that disables selection).
+    pub fn selection_for(&self, language: Option<AudioLanguage>) -> Option<Option<u16>> {
+        let Some(s) = self.source_pmt.as_deref() else {
+            return (self.layout == LayoutDecision::Unsupported).then_some(None);
+        };
+        let begin = 12 + ((((s[10] & 15) as usize) << 8) | s[11] as usize);
+        let mut entries = Vec::new();
+        let mut pos = begin;
+        while pos + 5 <= s.len() {
+            let next = pos + 5 + ((((s[pos + 3] & 15) as usize) << 8) | s[pos + 4] as usize);
+            if next > s.len() {
+                break;
+            }
+            let codec = audio_codec(s[pos], &s[pos + 5..next]).and_then(|c| c.first);
+            entries.push((pos, next, pid(&s[pos + 1..]), codec));
+            pos = next;
+        }
+        Some(native_selection(&entries, s, language))
     }
 
     pub fn pcr_pid(&self) -> Option<u16> {
@@ -380,10 +593,7 @@ impl LiveAudioSelection {
         } else {
             self.decide_layout(s, &entries)
         };
-        let selected = entries
-            .iter()
-            .find(|e| e.3 == Some(AudioCodec::AdtsAac))
-            .map(|e| e.2);
+        let selected = native_selection(&entries, s, self.preferred);
         let removed: Vec<_> = entries
             .iter()
             .filter(|e| selected.is_some() && e.3.is_some() && Some(e.2) != selected)
@@ -1443,5 +1653,220 @@ mod tests {
         assert!(matches!(st.layout(), LayoutDecision::Supported(_)));
         st.reset();
         assert_eq!(st.layout(), LayoutDecision::Pending);
+    }
+
+    const ENG: &[u8] = &[0x0a, 4, b'e', b'n', b'g', 0];
+    const RUS: &[u8] = &[0x0a, 4, b'r', b'u', b's', 0];
+    const SPA: &[u8] = &[0x0a, 4, b's', b'p', b'a', 0];
+
+    fn lang(code: &str) -> AudioLanguage {
+        AudioLanguage::parse(code).unwrap()
+    }
+
+    fn multi_language() -> [u8; N] {
+        pmt(
+            0,
+            &[
+                (0x1b, 257, &[]),
+                (15, 258, ENG),
+                (15, 259, RUS),
+                (3, 260, SPA),
+            ],
+        )
+    }
+
+    fn selected(language: Option<&str>, table: [u8; N]) -> (Vec<u16>, Option<Option<u16>>) {
+        let mut st = match language {
+            Some(code) => LiveAudioSelection::with_language(lang(code)),
+            None => LiveAudioSelection::default(),
+        };
+        st.observe(pat(1, 256));
+        let out = st.observe(table).packet.unwrap();
+        (es_pids(&out), st.selection_for(language.map(lang)))
+    }
+
+    #[test]
+    fn audio_language_parses_three_letters_case_insensitively_and_folds_bibliographic_codes() {
+        assert_eq!(lang("RuS").as_str(), "rus");
+        assert_eq!(lang("ger"), lang("deu"));
+        assert_eq!(lang("FRE").as_str(), "fra");
+        for bad in ["", "ru", "russ", "r1s", "rü", "r s", "ру"] {
+            assert_eq!(AudioLanguage::parse(bad), None, "{bad:?}");
+        }
+        assert!(lang("deu").tagged(&[0x0a, 4, b'G', b'E', b'R', 1]));
+        // A dual-language descriptor matches either entry; other descriptors are skipped.
+        let dual = [
+            0x52, 1, 7, 0x0a, 8, b'e', b'n', b'g', 0, b'r', b'u', b's', 0,
+        ];
+        assert!(lang("rus").tagged(&dual) && lang("eng").tagged(&dual));
+        assert!(!lang("spa").tagged(&dual));
+        // Truncated loops never match.
+        assert!(!lang("rus").tagged(&[0x0a, 8, b'r', b'u', b's', 0]));
+        assert!(!lang("rus").tagged(&[0x0a]));
+    }
+
+    #[test]
+    fn native_selection_honors_a_matching_aac_language_and_falls_back_otherwise() {
+        // Omitted: the first ADTS AAC wins, as before.
+        assert_eq!(
+            selected(None, multi_language()),
+            (vec![257, 258], Some(Some(258)))
+        );
+        // A matching ADTS AAC track replaces the default, case-insensitively.
+        assert_eq!(
+            selected(Some("rus"), multi_language()),
+            (vec![257, 259], Some(Some(259)))
+        );
+        assert_eq!(selected(Some("RUS"), multi_language()).0, vec![257, 259]);
+        // With ADTS AAC present, native HLS never switches to another codec.
+        assert_eq!(
+            selected(Some("spa"), multi_language()),
+            (vec![257, 258], Some(Some(258)))
+        );
+        // No match keeps the default.
+        assert_eq!(
+            selected(Some("fra"), multi_language()),
+            (vec![257, 258], Some(Some(258)))
+        );
+    }
+
+    #[test]
+    fn native_selection_without_aac_keeps_only_a_matching_track_or_passes_through() {
+        let table = pmt(
+            0,
+            &[
+                (0x1b, 257, &[]),
+                (3, 258, ENG),
+                (0x81, 259, RUS),
+                (3, 260, RUS),
+            ],
+        );
+        assert_eq!(
+            selected(None, table),
+            (vec![257, 258, 259, 260], Some(None))
+        );
+        // Among matches MPEG audio and AC-3 rank equally, so PMT order decides.
+        assert_eq!(
+            selected(Some("rus"), table),
+            (vec![257, 259], Some(Some(259)))
+        );
+        assert_eq!(
+            selected(Some("eng"), table),
+            (vec![257, 258], Some(Some(258)))
+        );
+        assert_eq!(
+            selected(Some("spa"), table),
+            (vec![257, 258, 259, 260], Some(None))
+        );
+        let st = {
+            let mut st = LiveAudioSelection::with_language(lang("rus"));
+            st.observe(pat(1, 256));
+            st.observe(table);
+            st
+        };
+        assert_eq!(st.removed, vec![258, 260]);
+    }
+
+    #[test]
+    fn language_preference_survives_reset_and_selection_waits_for_tables() {
+        let mut st = LiveAudioSelection::with_language(lang("rus"));
+        assert_eq!(st.selection_for(Some(lang("rus"))), None);
+        st.observe(pat(1, 256));
+        assert_eq!(st.selection_for(None), None, "PMT still pending");
+        st.observe(multi_language());
+        st.reset();
+        assert_eq!(st.selection_for(None), None);
+        st.observe(pat(1, 256));
+        assert_eq!(
+            es_pids(&st.observe(multi_language()).packet.unwrap()),
+            vec![257, 259]
+        );
+        assert!(st.observe(elementary(258)).packet.is_none());
+        assert!(st.observe(elementary(259)).packet.is_some());
+        // A multi-program PAT disables selection: resolution is immediate passthrough.
+        let mut multi = LiveAudioSelection::default();
+        multi.observe(table(
+            0,
+            vec![0, 0xb0, 0, 0, 1, 0xc1, 0, 0, 0, 1, 0xe1, 0, 0, 2, 0xe1, 1],
+        ));
+        assert_eq!(multi.selection_for(Some(lang("rus"))), Some(None));
+    }
+
+    #[test]
+    fn preferred_track_is_moved_to_the_first_audio_entry_with_a_valid_crc() {
+        let source = multi_language();
+        let mut packet = source;
+        assert!(prefer_audio_track(&mut packet, lang("rus")));
+        assert_eq!(es_pids(&packet), vec![257, 259, 258, 260]);
+        let s = section(&packet, 2, 13, None).expect("CRC-valid current PMT");
+        let original = section(&source, 2, 13, None).unwrap();
+        assert_eq!(s.len(), original.len());
+        assert_eq!(
+            s[..12],
+            original[..12],
+            "header, version and program info kept"
+        );
+        // Descriptors travel with their elementary stream.
+        let sorted = |p: &[u8; N]| {
+            let s = section(p, 2, 13, None).unwrap().to_vec();
+            let mut bytes = s[15..s.len() - 4].to_vec();
+            bytes.sort_unstable();
+            bytes
+        };
+        assert_eq!(sorted(&packet), sorted(&source));
+        assert_eq!(packet[..4], source[..4], "header and continuity untouched");
+
+        // Codec rank applies among matches: an AAC match beats an earlier MPEG match.
+        let mut packet = pmt(
+            0,
+            &[
+                (0x1b, 257, &[]),
+                (15, 258, ENG),
+                (3, 259, RUS),
+                (15, 260, RUS),
+            ],
+        );
+        assert!(prefer_audio_track(&mut packet, lang("rus")));
+        assert_eq!(es_pids(&packet), vec![257, 260, 258, 259]);
+
+        for (code, table) in [
+            ("eng", source),                                     // already first
+            ("fra", source),                                     // no match
+            ("rus", pmt(0, &[(0x1b, 257, &[]), (6, 258, RUS)])), // tagged but not audio
+        ] {
+            let mut packet = table;
+            assert!(!prefer_audio_track(&mut packet, lang(code)), "{code}");
+            assert_eq!(packet, table);
+        }
+        let mut corrupt = source;
+        corrupt[30] ^= 1;
+        let before = corrupt;
+        assert!(!prefer_audio_track(&mut corrupt, lang("rus")));
+        assert_eq!(
+            corrupt, before,
+            "CRC-invalid tables are forwarded untouched"
+        );
+        let mut short = [0x47; 100];
+        assert!(!prefer_audio_track(&mut short, lang("rus")));
+    }
+
+    #[test]
+    fn multi_language_vectors_match_the_independent_generator() {
+        let source = include_bytes!("../../../tests/vectors/media/pmt-multi-language.ts");
+        let expected =
+            include_bytes!("../../../tests/vectors/media/pmt-multi-language-prefer-rus.ts");
+        assert_eq!(&source[..N], &crate::test_stream::pat());
+        assert_eq!(
+            &source[N..],
+            &crate::test_stream::pmt(&crate::test_stream::AUDIO)
+        );
+        let mut packet: [u8; N] = source[N..].try_into().unwrap();
+        assert!(prefer_audio_track(&mut packet, lang("rus")));
+        assert_eq!(&packet, &expected[N..]);
+        let mut st = LiveAudioSelection::with_language(lang("rus"));
+        st.observe(source[..N].try_into().unwrap());
+        st.observe(source[N..].try_into().unwrap());
+        assert_eq!(st.selection_for(Some(lang("rus"))), Some(Some(0x102)));
+        assert_eq!(st.selection_for(Some(lang("spa"))), Some(Some(0x101)));
     }
 }

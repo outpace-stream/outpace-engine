@@ -8,9 +8,16 @@ use std::time::Instant;
 type Setup = fn() -> KeyframeGate;
 
 fn cases() -> Vec<(&'static str, Setup)> {
-    vec![("default", || {
-        KeyframeGate::with_service_name(Some("Synthetic".into()))
-    })]
+    vec![
+        ("default", || {
+            KeyframeGate::with_service_name(Some("Synthetic".into()))
+        }),
+        ("preferred_rus", || {
+            let mut gate = KeyframeGate::with_service_name(Some("Synthetic".into()));
+            gate.prefer_audio_language(crate::audio::AudioLanguage::parse("rus").unwrap());
+            gate
+        }),
+    ]
 }
 
 #[test]

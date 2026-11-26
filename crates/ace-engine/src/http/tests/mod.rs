@@ -16,6 +16,7 @@ mod broadcast;
 mod broadcast_source;
 mod cast;
 mod compat;
+mod compat_audio;
 mod compat_catalog;
 mod compat_hls;
 mod native;
