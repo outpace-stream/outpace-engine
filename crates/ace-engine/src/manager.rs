@@ -1553,7 +1553,7 @@ impl StreamManager {
 
     /// Retire idle entries, then wait for their cleanup to be confirmed.
     #[cfg(test)]
-    async fn reap_idle_at(&self, now: Instant) {
+    pub(crate) async fn reap_idle_at(&self, now: Instant) {
         self.retire_idle_at(now).await.confirm().await;
     }
 

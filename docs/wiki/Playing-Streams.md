@@ -281,8 +281,12 @@ curl "http://127.0.0.1:6878/ace/getstream?content_id=0123456789abcdef0123456789a
 - Always check **both** the HTTP status and the JSON `error` field. Most errors come back as HTTP
   `200` with `response: null`.
 - Treat the returned URLs as opaque. Don't build URLs from `infohash` or `playback_session_id`.
-- A TS `format=json` request doesn't start the stream; opening `playback_url` does. An HLS
-  `format=json` request starts it straight away.
+- A TS `format=json` request doesn't start the stream by itself. Opening `playback_url` starts
+  it, and so does the first read of `stat_url`. `status` is `prebuf` while the stream starts and
+  `dl` once it runs, so apps that wait for `dl` before opening `playback_url` work. If the start
+  fails, `stat_url` answers with `response: null` and an `error`. A stream started this way
+  stays up until you open `playback_url`, stop it with `command_url`, or the session expires
+  (6 hours). An HLS `format=json` request starts the stream straight away.
 
 ### Control API
 
@@ -340,7 +344,7 @@ through TLS termination or a sub-path, the returned URLs won't work. See
 | Apps built on the public AceStream Android SDK | Compat `/ace/*` and `/server/api` | SDK request quirks are handled: duplicated selectors, `stream_id=-1`, `api_version=2`. |
 | [Outpace for Android](Android-App) | Native URLs, `/status`, `/streams` | The companion app; hands the native URL to the player you pick. |
 | [Kodi](Kodi) with PVR IPTV Simple Client, or a direct URL | Native TS or HLS URL, or `/ace/getstream?id=` | Tested with Kodi 21.2 (headless) and Outpace 1.3.0: plays. |
-| [Kodi](Kodi) with the Horus add-on | Compat `format=json` handshake and `stat_url` | Tested with Horus 1.3.2: plays only a stream that's already running; a cold start times out. |
+| [Kodi](Kodi) with the Horus add-on | Compat `format=json` handshake and `stat_url` | Tested in Kodi with Horus 1.3.2 and Outpace 1.3.0, which played only a running stream. Cold starts now work: the first `stat_url` read starts the stream (checked with Horus's client code, not yet in Kodi). |
 | Other Kodi add-ons using `/ace/getstream` | Compat API | Not tested. |
 
 "Tested" means the client was run against a local Outpace build with live public streams;

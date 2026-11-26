@@ -18,6 +18,7 @@ mod cast;
 mod compat;
 mod compat_catalog;
 mod compat_hls;
+mod compat_warm;
 mod native;
 mod origin_history;
 mod origin_hls;

@@ -1,4 +1,4 @@
-use super::leases::AceHlsView;
+use super::leases::{AceHlsView, WarmPoll};
 use super::*;
 use crate::hls::HlsHistoryError;
 use crate::provider::ContentIdPreparation;
@@ -501,6 +501,9 @@ pub(super) async fn ace_playback(
     };
     match opened {
         Ok(session) => {
+            // This response's own subscription now keeps the source; a stat-poll warm hold
+            // has done its job.
+            s.ace_sessions.release_warm(&id, &token);
             ace_stream_session_response(
                 session,
                 expires_at,
@@ -597,14 +600,34 @@ pub(super) async fn ace_stat(
     let Some(network) = ace_network(&s) else {
         return Json(json!({ "response": null, "error": "no ace network registered" }));
     };
-    let Some(session_key) = s.ace_sessions.validate(&id, &token) else {
+    let Some((session_key, warm)) = s.ace_sessions.poll_for_stat(&id, &token) else {
         return Json(json!({ "response": null, "error": "invalid or expired playback session" }));
+    };
+    let (status, failed) = match warm {
+        WarmPoll::Begin { expires_at, cancel } => {
+            spawn_warm_start(
+                &s,
+                network.clone(),
+                &id,
+                &token,
+                &session_key,
+                expires_at,
+                cancel,
+            );
+            ("prebuf", None)
+        }
+        WarmPoll::Starting => ("prebuf", None),
+        WarmPoll::Failed(error) => ("idle", Some(error)),
+        WarmPoll::Settled => ("idle", None),
     };
     let public_id = ace_public_id(&id);
     let Some(session) = s.manager.get(&network, &session_key).await else {
+        if let Some(error) = failed {
+            return Json(json!({ "response": null, "error": error.message }));
+        }
         return Json(json!({
             "response": {
-                "status": "idle",
+                "status": status,
                 "speed_down": 0, "speed_up": 0, "livepos": null,
                 "peers": 0,
                 "downloaded": 0,
@@ -641,6 +664,49 @@ pub(super) async fn ace_stat(
         },
         "error": null
     }))
+}
+
+/// Run a lease's warm start (see `WarmPoll::Begin`) off the stat request. Stop, expiry and
+/// eviction cancel it, dropping a pending open that no other viewer is waiting on.
+fn spawn_warm_start(
+    s: &AppState,
+    network: String,
+    id: &str,
+    token: &str,
+    session_key: &str,
+    expires_at: Instant,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+) {
+    let manager = s.manager.clone();
+    let sessions = s.ace_sessions.clone();
+    let (id, token, session_key) = (id.to_owned(), token.to_owned(), session_key.to_owned());
+    tokio::spawn(async move {
+        if *cancel.borrow_and_update() {
+            return;
+        }
+        let started = tokio::select! {
+            biased;
+            _ = cancel.changed() => return,
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(expires_at)) => return,
+            // Reuse the viewer acquisition (also used by cast warm-up) rather than a
+            // separate support-pin instantiation: the pin is taken while the transient
+            // subscription still fences idle retirement, and the subscription is dropped
+            // at once, so the hold never counts as a viewer.
+            started = manager.get_or_subscribe(&network, &session_key) => {
+                started.map(|(session, _subscription)| session.support_pin())
+            }
+        };
+        if let Err(error) = &started {
+            // Provider messages may embed identifiers; log only the stable code.
+            crate::alog!(
+                "[ace-compat] stat warm start failed: error={}",
+                crate::start_status::StartError::from_provider(error)
+                    .code
+                    .as_str()
+            );
+        }
+        sessions.settle_warm(&id, &token, started);
+    });
 }
 
 pub(super) async fn ace_command(
