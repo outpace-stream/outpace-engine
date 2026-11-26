@@ -49,7 +49,9 @@ enum WarmState {
         _pin: SupportPin,
     },
     Failed(StartError),
-    /// Playback opened, or the start resolved to an HLS origin. Never warmed again.
+    /// The start resolved to an HLS origin, which `playback_url` redirects to. Holds nothing.
+    Origin,
+    /// Playback opened. Never warmed again.
     Done,
 }
 
@@ -83,6 +85,8 @@ pub(super) enum WarmPoll {
     },
     Starting,
     Failed(StartError),
+    /// The start resolved to an HLS origin; `playback_url` redirects to it.
+    Origin,
     /// Not starting anything: an HLS lease, a held source, or playback already opened.
     Settled,
 }
@@ -494,6 +498,7 @@ impl AceSessionStore {
             }
             WarmState::Starting { .. } => WarmPoll::Starting,
             WarmState::Failed(error) => WarmPoll::Failed(error.clone()),
+            WarmState::Origin => WarmPoll::Origin,
             WarmState::Cold | WarmState::Held { .. } | WarmState::Done => WarmPoll::Settled,
         };
         let session_key = lease.session_key.clone();
@@ -537,7 +542,7 @@ impl AceSessionStore {
                 _pin: pin,
             },
             // Playback redirects to the origin; this lease never owns a local source.
-            Err(ProviderError::DirectHls(_)) => WarmState::Done,
+            Err(ProviderError::DirectHls(_)) => WarmState::Origin,
             Err(error) => WarmState::Failed(StartError::from_provider(&error)),
         };
         drop(leases);

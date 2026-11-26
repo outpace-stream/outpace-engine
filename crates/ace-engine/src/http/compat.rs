@@ -622,6 +622,8 @@ pub(super) async fn ace_stat(
             ("prebuf", None)
         }
         WarmPoll::Starting => ("prebuf", None),
+        // The source is an HLS origin: playback_url redirects to it, so a client can open it.
+        WarmPoll::Origin => ("dl", None),
         WarmPoll::Failed(error) => ("idle", Some(error)),
         WarmPoll::Settled => ("idle", None),
     };
@@ -697,12 +699,15 @@ fn spawn_warm_start(
             _ = idle.changed() => return,
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(expires_at)) => return,
             // Reuse the viewer acquisition (also used by cast warm-up) rather than a
-            // separate support-pin instantiation: the pin is taken while the transient
-            // subscription still fences idle retirement, and the subscription is dropped
-            // at once, so the hold never counts as a viewer.
-            started = manager.get_or_subscribe(&network, &session_key) => {
-                started.map(|(session, _subscription)| session.support_pin())
-            }
+            // separate support-pin instantiation. The subscription fences idle retirement
+            // until it becomes a pin, so the hold never counts as a viewer.
+            started = manager.get_or_subscribe(&network, &session_key) => started,
+        };
+        let started = match started {
+            Ok((session, subscription)) => Ok(manager
+                .subscription_to_support(&session, subscription)
+                .await),
+            Err(error) => Err(error),
         };
         if let Err(error) = &started {
             // Provider messages may embed identifiers; log only the stable code.

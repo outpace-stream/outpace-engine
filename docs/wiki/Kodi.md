@@ -125,7 +125,8 @@ has gone unread for 60 seconds.
 
 If the stream can't start (for example, no peer is sharing it), `stat_url` answers with an
 `error`. Horus ignores stat errors and keeps showing its last status, so its dialog can stay on
-"prebuffering" until you cancel it.
+"prebuffering" until you cancel it. Later reads don't retry the start. Opening the channel again
+in Horus sends a new request, which tries again.
 
 ## Add-ons that weren't tested
 

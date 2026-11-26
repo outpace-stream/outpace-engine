@@ -283,8 +283,10 @@ curl "http://127.0.0.1:6878/ace/getstream?content_id=0123456789abcdef0123456789a
 - Treat the returned URLs as opaque. Don't build URLs from `infohash` or `playback_session_id`.
 - A TS `format=json` request doesn't start the stream by itself. Opening `playback_url` starts
   it, and so does the first read of `stat_url`. `status` is `prebuf` while the stream starts and
-  `dl` once it runs, so apps that wait for `dl` before opening `playback_url` work. If the start
-  fails, `stat_url` answers with `response: null` and an `error`. A stream started this way
+  `dl` once it runs, so apps that wait for `dl` before opening `playback_url` work. If the stream
+  turns out to be an HLS origin, `stat_url` reports `dl` and `playback_url` redirects to it. If the
+  start fails, `stat_url` answers with `response: null` and an `error`, and later reads don't try
+  again: make a new `format=json` request to retry. A stream started this way
   stays up until you open `playback_url`, stop it with `command_url`, or nothing reads `stat_url`
   for 60 seconds. Reading `stat_url` again after that starts it again. An HLS `format=json` request starts the stream straight away.
 

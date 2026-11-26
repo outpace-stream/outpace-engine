@@ -12,11 +12,20 @@ async fn bounded(test: impl std::future::Future<Output = ()>) {
         .expect("test timed out");
 }
 
-/// Counts opens. With `release`, the first open waits for it; with `fail`, every open fails.
+/// What every open of the test provider does.
+#[derive(Clone, Copy)]
+enum Outcome {
+    Play,
+    Fail,
+    /// Resolves late to an HLS origin, as a TS lease can.
+    Origin,
+}
+
+/// Counts opens. With `release`, the first open waits for it; then it does `outcome`.
 struct WarmProvider {
     opens: Arc<AtomicUsize>,
     release: Option<Arc<tokio::sync::Notify>>,
-    fail: bool,
+    outcome: Outcome,
 }
 
 #[async_trait]
@@ -30,8 +39,17 @@ impl StreamProvider for WarmProvider {
         if let (true, Some(release)) = (first, &self.release) {
             release.notified().await;
         }
-        if self.fail {
-            return Err(ProviderError::NoPeers("synthetic".into()));
+        match self.outcome {
+            Outcome::Play => {}
+            Outcome::Fail => return Err(ProviderError::NoPeers("synthetic".into())),
+            Outcome::Origin => {
+                return Err(ProviderError::DirectHls(Box::new(
+                    ace_swarm::resolve::HlsOrigin {
+                        manifest_url: "https://cdn.example.test/master.m3u8".into(),
+                        metadata: StreamMetadata::default(),
+                    },
+                )))
+            }
         }
         // Loops, so a viewer that joins a warmed source late still receives media.
         Ok(Box::new(PacedFixtureSource { pos: 0 }))
@@ -45,14 +63,14 @@ struct Warm {
     release: Arc<tokio::sync::Notify>,
 }
 
-fn warm_state(pending: bool, fail: bool, sessions: AceSessionStore) -> Warm {
+fn warm_state(pending: bool, outcome: Outcome, sessions: AceSessionStore) -> Warm {
     let opens = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(tokio::sync::Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(Arc::new(WarmProvider {
         opens: opens.clone(),
         release: pending.then(|| release.clone()),
-        fail,
+        outcome,
     }));
     let mut state = ace_compat_state(0);
     state.manager = StreamManager::new(registry);
@@ -134,7 +152,7 @@ async fn session(state: &AppState) -> Option<Arc<StreamSession>> {
 async fn horus_style_client_starts_a_cold_stream_with_one_open() {
     bounded(async {
         use futures::StreamExt;
-        let warm = warm_state(false, false, AceSessionStore::default());
+        let warm = warm_state(false, Outcome::Play, AceSessionStore::default());
         let lease = mint(&warm.app).await;
         assert_eq!(
             warm.opens.load(Ordering::SeqCst),
@@ -171,7 +189,7 @@ async fn horus_style_client_starts_a_cold_stream_with_one_open() {
 #[tokio::test]
 async fn a_json_mint_that_is_never_polled_opens_nothing() {
     bounded(async {
-        let warm = warm_state(false, false, AceSessionStore::default());
+        let warm = warm_state(false, Outcome::Play, AceSessionStore::default());
         let _lease = mint(&warm.app).await;
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(warm.opens.load(Ordering::SeqCst), 0);
@@ -183,7 +201,7 @@ async fn a_json_mint_that_is_never_polled_opens_nothing() {
 #[tokio::test]
 async fn concurrent_first_polls_start_the_source_once() {
     bounded(async {
-        let warm = warm_state(true, false, AceSessionStore::default());
+        let warm = warm_state(true, Outcome::Play, AceSessionStore::default());
         let lease = mint(&warm.app).await;
         let polls = (0..8).map(|_| get_json(&warm.app, &lease.stat));
         for json in futures::future::join_all(polls).await {
@@ -204,7 +222,7 @@ async fn concurrent_first_polls_start_the_source_once() {
 #[tokio::test]
 async fn stopping_a_polled_lease_releases_its_hold_to_idle_cleanup() {
     bounded(async {
-        let warm = warm_state(false, false, AceSessionStore::default());
+        let warm = warm_state(false, Outcome::Play, AceSessionStore::default());
         let lease = mint(&warm.app).await;
         poll_until(&warm.app, &lease.stat, is_dl).await;
         assert!(warm.state.ace_sessions.warm_held(&lease.token));
@@ -226,7 +244,7 @@ async fn stopping_a_polled_lease_releases_its_hold_to_idle_cleanup() {
 #[tokio::test]
 async fn stopping_a_lease_cancels_its_pending_warm_start() {
     bounded(async {
-        let warm = warm_state(true, false, AceSessionStore::default());
+        let warm = warm_state(true, Outcome::Play, AceSessionStore::default());
         let lease = mint(&warm.app).await;
         assert_eq!(
             get_json(&warm.app, &lease.stat).await["response"]["status"],
@@ -258,7 +276,7 @@ async fn an_expired_polled_lease_releases_its_hold_without_further_requests() {
         // Real clock: lease deadlines use the standard clock.
         let warm = warm_state(
             false,
-            false,
+            Outcome::Play,
             AceSessionStore::new(Duration::from_millis(300), 8),
         );
         let lease = mint(&warm.app).await;
@@ -287,7 +305,7 @@ async fn an_expired_polled_lease_releases_its_hold_without_further_requests() {
 #[tokio::test]
 async fn a_failed_warm_start_reports_an_in_band_error_once() {
     bounded(async {
-        let warm = warm_state(false, true, AceSessionStore::default());
+        let warm = warm_state(false, Outcome::Fail, AceSessionStore::default());
         let lease = mint(&warm.app).await;
         let (failed, statuses) =
             poll_until(&warm.app, &lease.stat, |json| json["error"].is_string()).await;
@@ -315,7 +333,7 @@ async fn a_failed_warm_start_reports_an_in_band_error_once() {
 fn idle_bounded(pending: bool) -> Warm {
     warm_state(
         pending,
-        false,
+        Outcome::Play,
         AceSessionStore::default().with_warm_poll_idle(Duration::from_millis(200)),
     )
 }
@@ -427,6 +445,23 @@ async fn the_poll_idle_bound_cancels_a_pending_warm_start() {
             "nothing published"
         );
         assert_eq!(warm.state.ace_sessions.active_count(), 1);
+        warm.state.manager.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_warm_start_that_resolves_to_an_hls_origin_reports_dl_and_redirects() {
+    bounded(async {
+        let warm = warm_state(false, Outcome::Origin, AceSessionStore::default());
+        let lease = mint(&warm.app).await;
+        let (_, statuses) = poll_until(&warm.app, &lease.stat, is_dl).await;
+        assert_eq!(statuses[0], "prebuf");
+        // Nothing local is held, but playback_url works, so a client waiting for dl proceeds.
+        assert!(!warm.state.ace_sessions.warm_held(&lease.token));
+        assert!(warm.state.manager.list().await.is_empty());
+        let playback = get(&warm.app, &lease.playback).await;
+        assert!(playback.status().is_redirection(), "{}", playback.status());
         warm.state.manager.shutdown().await;
     })
     .await;

@@ -936,6 +936,21 @@ impl StreamManager {
         .map_err(ProviderError::from)
     }
 
+    /// Turn a held viewer subscription into a support pin. `release_support` and idle
+    /// retirement read the pin and subscriber counts under `sessions`; converting under the
+    /// same lock (pin first, then the subscription) means neither can read zero demand between
+    /// the two steps and retire a session that is about to be pinned.
+    pub(crate) async fn subscription_to_support(
+        &self,
+        session: &Arc<StreamSession>,
+        subscription: crate::session::Subscription,
+    ) -> crate::session::SupportPin {
+        let _sessions = self.sessions.lock().await;
+        let pin = session.support_pin();
+        drop(subscription);
+        pin
+    }
+
     /// Release one logical pin, joining its generation only when no demand remains.
     /// `false` means another owner, a pending start, or a replacement prevented retirement.
     pub async fn release_support(
@@ -3598,6 +3613,28 @@ mod tests {
         m.reap_idle_at(Instant::now()).await;
         assert!(m.get("blocking", "compatibility").await.is_none());
         assert!(m.get_hls("blocking", "compatibility").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn subscription_converts_to_a_support_pin_under_the_sessions_lock() {
+        let m = StreamManager::new(registry());
+        let (session, subscription) = m.get_or_subscribe("test", "convert").await.unwrap();
+        // Hold the lock the demand readers (`release_support`, idle retirement) take.
+        let readers = m.sessions.lock().await;
+        let mut convert = Box::pin(m.subscription_to_support(&session, subscription));
+        assert!(futures::poll!(&mut convert).is_pending());
+        // A reader under the lock still sees the viewer: the conversion hasn't started.
+        assert_eq!(session.subscriber_count(), 1);
+        assert_eq!(session.support_pin_count(), 0);
+        drop(readers);
+        let pin = convert.await;
+        assert_eq!(session.subscriber_count(), 0);
+        assert_eq!(session.support_pin_count(), 1);
+        m.reap_idle_at(Instant::now() + m.grace + Duration::from_secs(1))
+            .await;
+        assert!(m.get("test", "convert").await.is_some(), "the pin keeps it");
+        drop(pin);
+        m.shutdown().await;
     }
 
     #[tokio::test]
