@@ -26,9 +26,11 @@ CLI inputs retain their existing meanings.
 | Command | Behavior |
 | --- | --- |
 | `outpace serve` | Runs the native HTTP API, RTMP ingest, and enabled peer services. With no command, Outpace defaults to `serve`. |
-| `outpace play <input>` | Writes live MPEG-TS bytes to stdout. Diagnostics go to stderr, so redirection and piping are safe. Accepts `acestream://`, `acestream:?`, `magnet:`, and HTTP(S) transport-file inputs; infohash and magnet inputs fail closed (no verified descriptor in a one-shot process). |
+| `outpace play <input>` | Writes live MPEG-TS bytes to stdout. Diagnostics go to stderr, so redirection and piping are safe. Accepts `acestream://`, `acestream:?`, `magnet:`, HTTP(S) transport-file, and `local:<alias>` ([private descriptor](private-peer-mode.md)) inputs; infohash and magnet inputs fail closed (no verified descriptor in a one-shot process). `--peer IPv4:PORT` (repeatable) adds a bootstrap peer. |
 | `outpace play --vod <input>` | Downloads a single-file VOD, verifies every piece, and writes the file to stdout. |
-| `outpace broadcast <name>` | Creates or resumes a broadcast, prints HTTP/RTMP ingest and playback metadata to stderr, and runs the server. |
+| `outpace broadcast <name>` | Creates or resumes a broadcast, prints HTTP/RTMP ingest and playback metadata to stderr, and runs the server. `--public-host <host>` sets the host printed in ingest and transport URLs. Refused with `OUTPACE_PROXY_MODE=on`, since peers cannot reach the engine. |
+| `outpace healthcheck` | Sends one `GET /healthz` to a running daemon and exits `0` on an HTTP `200`, `1` otherwise. `--addr IP:PORT` defaults to `OUTPACE_BIND`, else `127.0.0.1:6878`; a wildcard bind (`0.0.0.0` or `[::]`) is probed on loopback of the same family. `--timeout SECONDS` (default `3`, minimum `1`) bounds the connect and the response. Reads no other settings; used by the container health checks, which have no `curl`. |
+| `outpace service install` / `uninstall` / `run` | Windows only. Registers (not started) or removes the automatic-start `outpace` service running as `NT SERVICE\outpace` with a private data directory; both need an elevated prompt. `run` is the Service Control Manager entry point, not for manual use. See [Windows service](wiki/Deployment.md#windows-service). |
 
 Use `outpace <command> --help` for arguments and accepted inputs. For example:
 
@@ -45,6 +47,8 @@ outpace broadcast sports --public-host stream.example
 | `GET /healthz` | `200 text/plain` (`ok`) | Process health probe; it does not prove swarm connectivity. |
 | `GET /metrics` | `200 text/plain; version=0.0.4` | Prometheus exposition. Only with `OUTPACE_METRICS=1`; otherwise `404`. Labels carry provider network names and route templates, never stream ids. See the [metric list](wiki/Support-Sources-and-Operations.md#prometheus-metrics). |
 | `GET /networks` | `200 application/json`, `{"networks":["ace"]}` | Provider networks configured in this daemon. |
+| `GET /network-policy` | `200 application/json` | Peer-network mode: `{"mode":"public","allowed_peer_count":null}`, or in [private peer mode](private-peer-mode.md) `mode` `private` with `allowed_peer_count` and `inbound_peer_connections`/`public_discovery`/`public_advertising` all `false`. Always includes a `proxy` object with `mode`, current `path`, `udp_trackers`, `dht` and `inbound_advertised`; never the proxy endpoint or credentials. |
+| `GET /debug/memstats` | `200 application/json` | Allocator counters. On jemalloc builds (64-bit, non-MSVC, non-Android): `allocator` `jemalloc`, `epoch_error` (`null` on success), and `allocated`, `active`, `resident`, `retained`, `mapped` in bytes (`null` if a counter cannot be read). Other builds return only `{"allocator":"system"}`. |
 | `GET /streams` | `200 application/json`, `{"streams":[...]}` | Active shared sessions. Entries have `network`, `id`, direct-client count `clients`, and descriptor `metadata`. |
 | `GET /streams/<network>/<id>` | `200 video/mp2t` streaming body | Default live playback for dot-free provider ids; starts or joins the same shared session as the explicit `.ts` form. When the descriptor supplies a title, the response includes `Icy-Name`. Dotted ids, unknown networks, and invalid ids return `404`. An `ih:` selector without a verified descriptor returns `422` with a plain-text reason. Malformed `cid:`/`ih:` selectors return `400`. |
 | `GET /streams/<network>/<id>.ts` | `200 video/mp2t` streaming body | Explicit continuous MPEG-TS form; equivalent for dot-free ids, preserves dots within the provider id, and includes `Icy-Name` when the descriptor supplies a title. |
@@ -60,12 +64,21 @@ outpace broadcast sports --public-host stream.example
 | `GET /vod/<network>/<id>` | `200` or `206` streaming body | Verified single-file VOD. Supports one byte range and advertises `Accept-Ranges: bytes`; an unsatisfiable range returns `416`. |
 | `GET /vod/<network>/<id>/manifest.m3u8` | `200 application/vnd.apple.mpegurl` | Static VOD HLS playlist. |
 | `GET /vod/<network>/<id>/seg/<n>.ts` | `200 video/mp2t` | Verified VOD HLS segment. |
-| `PUT /broadcast/<name>` | `200 application/json` | Exclusively admits raw MPEG-TS ingest. Returns `name`, `content_id`, and `infohash` immediately while an owned task consumes the request body. |
+| `PUT /broadcast/<name>` | `200 application/json` | Exclusively admits raw MPEG-TS ingest. Returns `name`, `content_id`, `infohash`, and `catalog_content_id` immediately while an owned task consumes the request body. `catalog_content_id` is `null` unless `OUTPACE_BROADCAST_CATALOG_REGISTER=1` registration has already succeeded. |
 | `PUT /broadcast/<name>/source` | `202 application/json` | Attaches one managed HTTP(S) MPEG-TS source; returns `name`, `content_id`, `infohash`, `source`. Acceptance is independent of upstream health. |
 | `GET /broadcast/<name>/source` | `200 application/json` | Returns exactly `name`, `source`; never creates a broadcast. |
 | `DELETE /broadcast/<name>/source` | `204` | Cancels/joins the source only, retaining identity/store/announcements. Detached or unknown is idempotent. |
 | `GET /broadcast/<name>` | `200 application/octet-stream` | Returns the broadcast transport descriptor; `404` until minted. |
 | `DELETE /broadcast/<name>` | `204` | Stops ingress/announcements and deletes identity after persistence settles; unknown names are idempotent. Names must be 1–64 ASCII letters, digits, `.`, `_`, or `-`, excluding `.` and `..`. |
+| `GET /support` | `200 application/json` array | Declared [support sources](support-operation.md) and their desired/observed state; never selectors. An unconfigured daemon returns `[]`. |
+| `POST /support/<name>/start` | `202 application/json`, `{"running":true,"epoch":…}` | Enables one declaration or restarts it after a terminal error. The body must be empty (`400`/`413` `body_not_empty`, `408` `request_timeout`). Unknown names return `404` `not_found`; HTTP cannot create a declaration. |
+| `POST /support/<name>/stop` | `202 application/json`, `{"running":false,"epoch":…}` | Releases that declaration's support pin; real viewers keep watching. Same body and error rules as `start`. |
+| `GET /search` | `200 application/json` | External stream-name search. Only with `OUTPACE_COMPAT_ACESTREAM_SERVICES=1` (independent of compat routes, never in private peer mode); otherwise `404`. See [Stream search](#stream-search). |
+| `GET /cast/targets` | `200 application/json` | DLNA/UPnP renderers. The `/cast/*` routes exist only with `OUTPACE_ENABLE_CAST=1`; otherwise `404`. See [Casting](#casting). |
+| `POST /cast/targets/<target>/play` | `200 application/json` | Starts the live stream if needed and tells the renderer to play it. |
+| `POST /cast/targets/<target>/stop` | `204` | Stops playback on the renderer and retires its stream URL. |
+| `GET /cast/targets/<target>/status` | `200 application/json` | Renderer transport state and whether it is still fetching the stream. |
+| `GET`/`HEAD /cast/s/<token>.ts` | `200 video/mp2t` streaming body | The per-cast stream URL handed to the renderer; `404` once retired. |
 
 A broadcast accepts one producer at a time across raw PUT, RTMP and managed HTTP sources. A competing publisher
 receives `409` / `producer_conflict`; separate names can ingest concurrently. Sequential
@@ -596,6 +609,71 @@ retained window (`OUTPACE_HLS_WINDOW_SEGMENTS=8`), six completed startup segment
 the timeout. `OUTPACE_HLS_STARTUP_SEGMENTS=0` retains compatibility by behaving as one segment.
 The generated `EXT-X-START` points near the beginning of the retained startup window, but it is
 advisory: clients may choose a different starting position and maintain their own buffer policy.
+
+## Casting
+
+With `OUTPACE_ENABLE_CAST=1` the daemon can find DLNA/UPnP media renderers with an AVTransport
+service on the LAN and tell one to play a live stream. The user guide is the
+[Casting wiki page](wiki/Casting.md); this section keeps the route contract.
+
+- Discovery runs only when `GET /cast/targets` is called. The result (at most 16 renderers) is
+  cached for 60 seconds; `?refresh=1` or `?refresh=true` searches again. The response is
+  `{"targets":[...],"age_secs":N}`.
+- `POST /cast/targets/<target>/play` requires `Content-Type: application/json` and the body
+  `{"network":"ace","id":"<id>"}`, where `id` takes the same forms as `/streams/ace/<id>`
+  (an optional `.ts` suffix is stripped). It holds a viewer on the shared live session while the
+  renderer is told about it, then returns `target`, `network`, the canonical `id` and the
+  stream `url`. Each `play` mints a new random `/cast/s/<token>.ts` URL; `stop`, a failed `play`
+  and a new `play` to the same renderer retire the old one and end any response still open.
+- `GET /cast/targets/<target>/status` returns `target`, `transport_state`, `transport_status`,
+  `speed`, a `cast` object (`network`, `id`, `url`, `stream_connections`) or `null`, and
+  `fetching`.
+- Cross-site `POST` requests are refused with `403` `cross_origin`.
+
+Errors are `{"error":"<code>","message":"..."}` (renderer SOAP faults add `upnp_error`):
+
+| Status | Code |
+| --- | --- |
+| `400` | `invalid_request`, `unknown_network`, `invalid_id` |
+| `403` | `cross_origin` |
+| `404` | `unknown_target`, `no_peers`, `stream_not_found` |
+| `409` | `loopback_bind`, `unsupported_bind` |
+| `422` | `origin_hls_unsupported`, `stream_unavailable` |
+| `502` | `renderer_unreachable`, `renderer_invalid`, `renderer_http_error`, `renderer_fault`, `network` |
+| `503` | `discovery_failed`, `capacity_exhausted` |
+| `504` | `renderer_timeout` |
+| `507` | `no_space` |
+
+`play` needs an `OUTPACE_BIND` address the renderer can reach; a loopback bind fails with
+`409` `loopback_bind` before any renderer traffic. The routes add no authentication; keep the
+HTTP bind on a trusted network.
+
+## Stream search
+
+`GET /search` exists only with `OUTPACE_COMPAT_ACESTREAM_SERVICES=1`; it does not need
+`OUTPACE_ACE_COMPAT`, and private peer mode refuses the setting at startup. Query parameters:
+
+| Parameter | Default | Limit |
+| --- | --- | --- |
+| `query` | empty (browse) | 256 UTF-8 bytes; no control characters |
+| `page` | `0` | Zero-based integer, 0–10,000 |
+| `page_size` | `10` | Integer, 1–200 |
+| `category` | omitted | 64 UTF-8 bytes; no control characters; empty means omitted |
+
+Unknown and duplicate parameters are rejected with `400` before outbound work. Success is
+`{"result":{"total":N,"results":[...]},"error":null}`; failures are
+`{"result":null,"error":"<code>"}`. Every response carries `Cache-Control: no-store`.
+
+| Status | Code |
+| --- | --- |
+| `400` | `search_invalid_query` |
+| `429` | `search_rate_limited` (`Retry-After: 30`) |
+| `502` | `search_invalid_upstream_response`, `search_response_too_large`, `search_upstream_unavailable` |
+| `503` | `search_busy` (`Retry-After: 1`), `search_unavailable` |
+| `504` | `search_timeout` |
+
+Result shape, deadlines, concurrency, caching and privacy trade-offs are described in the
+[Stream Search wiki page](wiki/Stream-Search.md).
 
 ## Player and middleware integration
 
