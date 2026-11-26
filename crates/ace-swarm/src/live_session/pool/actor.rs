@@ -1278,5 +1278,8 @@ pub(in crate::live_session) async fn drain_retained(
         }
         tokio::task::yield_now().await;
     }
+    // The last send above ran after this turn's publication: publish the final delivery
+    // cursor now, since the reconnect wait that follows publishes nothing.
+    publish_live_stats(c, seed.metrics.as_ref(), info);
     true
 }
