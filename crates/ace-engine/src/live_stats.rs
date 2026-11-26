@@ -145,6 +145,7 @@ impl ace_swarm::live_session::LiveObserver for LiveMetrics {
         self.publish_position(
             position.map(|position| LivePositionStats {
                 pos: position.pos,
+                delivered: position.delivered,
                 last: position.last,
                 live_first: position.live_first,
                 live_last: position.live_last,
@@ -271,6 +272,7 @@ mod tests {
         assert_eq!(metrics.received.load(Ordering::Relaxed), 17);
         let position = LivePosition {
             pos: Some(19),
+            delivered: Some(17),
             last: Some(23),
             live_first: Some(29),
             live_last: Some(31),
@@ -309,12 +311,13 @@ mod tests {
         assert_eq!(
             (
                 position.pos,
+                position.delivered,
                 position.last,
                 position.live_first,
                 position.live_last,
                 position.buffer_pieces
             ),
-            (Some(19), Some(23), Some(29), Some(31), 37)
+            (Some(19), Some(17), Some(23), Some(29), Some(31), 37)
         );
         LiveObserver::clear_active_coverage(metrics.as_ref());
         let snapshot = metrics.snapshot();
