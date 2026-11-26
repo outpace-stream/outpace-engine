@@ -476,6 +476,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_variant_memory_is_freed_after_cleanup_and_its_last_reader() {
+        let manager = manager(Provider {
+            opens: Arc::default(),
+            end_after: None,
+            switch_after: None,
+        });
+        let (pkg, session, _lease) = manager
+            .get_or_start_compatibility_hls("multi", "a")
+            .await
+            .unwrap();
+        let pin = manager
+            .compatibility_hls_audio("multi", "a", &pkg, &session, rus())
+            .await
+            .expect("a variant");
+        // An in-flight segment request holds the packager across retirement.
+        let reader = manager.get_hls_variant("multi", "a", pin.id()).unwrap();
+        let weak = Arc::downgrade(&reader);
+        drop(pin);
+        manager.sweep_idle_for_test().await;
+        assert_eq!(
+            manager.hls_variant_count("multi", "a"),
+            0,
+            "retired at once"
+        );
+        assert!(weak.upgrade().is_some(), "the reader keeps it alive");
+        drop(reader);
+        // Once the cancelled worker has finished cleanup, nothing else keeps it.
+        let freed = tokio::time::timeout(Duration::from_secs(5), async {
+            while weak.strong_count() > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(freed.is_ok(), "retired packager still referenced");
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn failed_variant_is_never_served_and_new_requests_re_resolve() {
         // After 60 frames `rus` moves from 0x102 to 0x104 and 0x102 disappears.
         const MOVED: [(u16, u8, &[u8; 3]); 3] = [
