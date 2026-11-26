@@ -1,7 +1,10 @@
 """Unit tests for the documentation site build, on synthetic inputs only."""
 
+import contextlib
+import io
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -51,6 +54,15 @@ class RewriteLinksTest(unittest.TestCase):
             "```md\n[y](FAQ)\n```\n\n"
             "1. Step:\n\n   ```sh\n   echo '[z](Missing)'\n   ```\n\n"
             "After [w](FAQ).\n"
+        )
+        out, problems = rewrite(text)
+        self.assertEqual(out, text.replace("[w](FAQ)", "[w](FAQ.md)"))
+        self.assertEqual(problems, [])
+
+    def test_longer_fence_wraps_a_shorter_one(self):
+        text = (
+            "````md\n```sh\n[x](FAQ)\n```\n[y](FAQ)\n````\n\n"
+            "~~~\n```\n[z](FAQ)\n~~~~\n\nAfter [w](FAQ).\n"
         )
         out, problems = rewrite(text)
         self.assertEqual(out, text.replace("[w](FAQ)", "[w](FAQ.md)"))
@@ -155,6 +167,70 @@ class MetaTest(unittest.TestCase):
         xml = build.sitemap(["https://example.org/", "https://example.org/FAQ.html?a&b"])
         self.assertIn("<url><loc>https://example.org/</loc></url>", xml)
         self.assertIn("<loc>https://example.org/FAQ.html?a&amp;b</loc>", xml)
+
+
+class TomlTest(unittest.TestCase):
+    def test_utf8_quotes_backslashes_and_controls(self):
+        value = 'Live \U0001F4FA "streams" \\ caf\u00e9\tend\x7f'
+        rendered = build.toml_string(value)
+        self.assertIn("\U0001F4FA", rendered)
+        self.assertNotIn("\\ud83d", rendered.lower())
+        self.assertEqual(tomllib.loads(f"v = {rendered}")["v"], value)
+
+    def test_book_toml_parses(self):
+        config = tomllib.loads(build.book_toml("Outpace \U0001F680 docs", "/docs/"))
+        self.assertEqual(config["book"]["description"], "Outpace \U0001F680 docs")
+
+
+FAKE_MDBOOK = """#!/usr/bin/env python3
+# Stands in for mdBook: renders each SUMMARY.md entry and copies other source files.
+import re, shutil, sys
+from pathlib import Path
+dest, book = Path(sys.argv[3]), Path(sys.argv[4])
+src = book / "src"
+shutil.copytree(src, dest, ignore=shutil.ignore_patterns("*.md"))
+for page in re.findall(r"\\]\\(([^)]+)\\.md\\)", (src / "SUMMARY.md").read_text()):
+    (dest / (page + ".html")).write_text(
+        '<html><head><title>x</title><meta name="description" content="x"></head>'
+        '<body><a href="notes.txt">notes</a></body></html>'
+    )
+"""
+
+
+class BuildTest(unittest.TestCase):
+    def run_build(self, sidebar, strict):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wiki = root / "wiki"
+            wiki.mkdir()
+            (wiki / "Home.md").write_text("# Home\n\nThe home page.\n")
+            (wiki / "Extra.md").write_text("# Extra\n\nAn extra page.\n")
+            (wiki / "notes.txt").write_text("plain notes\n")
+            (wiki / "_Sidebar.md").write_text(sidebar)
+            mdbook = root / "mdbook"
+            mdbook.write_text(FAKE_MDBOOK)
+            mdbook.chmod(0o755)
+            social = root / "social.png"
+            social.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(8) + (2).to_bytes(4, "big") + (1).to_bytes(4, "big"))
+            out = root / "site"
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                code = build.build(wiki, out, str(mdbook), "https://example.org/docs", social, strict)
+            files = sorted(str(p.relative_to(out)) for p in out.rglob("*")) if out.exists() else []
+            return code, files
+
+    def test_root_files_are_copied_and_listed_pages_built(self):
+        code, files = self.run_build("**[Home](Home)**\n\n- [Extra](Extra)\n", strict=True)
+        self.assertEqual(code, 0)
+        self.assertIn("notes.txt", files)
+        self.assertIn("Extra.html", files)
+
+    def test_unlisted_page_fails_strict_and_is_skipped_otherwise(self):
+        sidebar = "**[Home](Home)**\n"
+        self.assertEqual(self.run_build(sidebar, strict=True), (1, []))
+        code, files = self.run_build(sidebar, strict=False)
+        self.assertEqual(code, 0)
+        self.assertIn("index.html", files)
+        self.assertNotIn("Extra.html", files)
 
 
 class CheckOutputTest(unittest.TestCase):

@@ -25,6 +25,14 @@ on:
 permissions:
   contents: read
 
+# Build and deploy share one group per ref, so a whole run (build, then deploy)
+# finishes before the next starts. GitHub keeps only the newest pending run in a
+# group, so an older commit can never deploy after a newer one. On main a running
+# deployment is never cancelled half-way; superseded pull request builds are.
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # Site tooling only; nothing here ships in Outpace. Bump both together.
   MDBOOK_VERSION: v0.5.4
@@ -70,10 +78,6 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    # One deployment at a time, in merge order; never cancel one half-way.
-    concurrency:
-      group: pages
-      cancel-in-progress: false
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

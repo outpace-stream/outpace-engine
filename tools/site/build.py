@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import html
 import importlib.util
-import json
 import os
 import re
 import shutil
@@ -65,7 +64,7 @@ LINK = check_links.LINK
 SCHEME = check_links.SCHEME
 FILE_EXTENSION = check_links.FILE_EXTENSION
 
-FENCE_LINE = re.compile(r"^\s*(```|~~~)")
+FENCE_LINE = re.compile(r"^\s*(`{3,}|~{3,})")
 INLINE_CODE = re.compile(r"(`+)(?:(?!\n[ \t]*\n).)+?\1", re.S)
 H1 = re.compile(r"^#\s+(.*?)\s*#*\s*$")
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
@@ -88,6 +87,12 @@ def html_file(page: str) -> str:
     return "index.html" if page == "Home" else f"{page}.html"
 
 
+def closes_fence(line: str, fence: str) -> bool:
+    """CommonMark: a closing fence uses the opening character, at least as many times."""
+    run = line.strip()
+    return len(run) >= len(fence) and run == fence[0] * len(run)
+
+
 def _blank(chars: list[str], start: int, end: int, keep: str = "\n") -> None:
     for i in range(start, end):
         if chars[i] not in keep:
@@ -103,7 +108,7 @@ def mask_code(text: str) -> str:
         match = FENCE_LINE.match(line)
         if marker is None and match:
             marker, start = match.group(1), offset
-        elif marker is not None and line.strip().startswith(marker) and not line.strip().strip(marker[0]):
+        elif marker is not None and closes_fence(line, marker):
             _blank(chars, start, offset + len(line))
             marker = None
         offset += len(line)
@@ -175,7 +180,7 @@ def first_paragraph(markdown: str) -> str:
     for line in text.splitlines():
         fence = FENCE_LINE.match(line)
         if in_fence:
-            if line.strip().startswith(in_fence):
+            if closes_fence(line, in_fence):
                 in_fence = None
             continue
         if fence:
@@ -263,7 +268,16 @@ def summary_from_sidebar(sidebar: str, pages: set[str]) -> tuple[str, list[str],
 
 
 def toml_string(value: str) -> str:
-    return json.dumps(value)
+    """A TOML basic string: UTF-8 as is, escaping only quotes, backslashes and controls."""
+    out = []
+    for char in value:
+        if char in '"\\':
+            out.append("\\" + char)
+        elif ord(char) < 0x20 or ord(char) == 0x7F:
+            out.append(f"\\u{ord(char):04X}")
+        else:
+            out.append(char)
+    return '"' + "".join(out) + '"'
 
 
 def book_toml(description: str, site_path: str) -> str:
@@ -426,6 +440,8 @@ def build(wiki: Path, out: Path, mdbook: str, site_url: str, social: Path, stric
     summary, order, found = summary_from_sidebar(sources.get("_Sidebar", ""), pages)
     report(found)
 
+    # Only pages listed in the sidebar are rendered; strict mode already rejects the rest.
+    home_description = describe(sources["Home"])
     metas = {
         page: PageMeta(
             page=page,
@@ -433,12 +449,12 @@ def build(wiki: Path, out: Path, mdbook: str, site_url: str, social: Path, stric
             description=describe(sources[page]),
             url=site_url if page == "Home" else site_url + html_file(page),
         )
-        for page in pages
+        for page in order
     }
     for meta in metas.values():
         if not meta.description:
             report([f"{meta.page}.md: no prose paragraph for a meta description"])
-            meta.description = metas["Home"].description
+            meta.description = home_description
 
     with tempfile.TemporaryDirectory(prefix="outpace-site-") as tmp:
         book = Path(tmp)
@@ -447,6 +463,8 @@ def build(wiki: Path, out: Path, mdbook: str, site_url: str, social: Path, stric
         for entry in wiki.iterdir():
             if entry.is_dir():
                 shutil.copytree(entry, src / entry.name)
+            elif entry.is_file() and entry.suffix != ".md":
+                shutil.copyfile(entry, src / entry.name)
         shutil.copyfile(social, src / SOCIAL_IMAGE)
         for page in pages:
             found = []
@@ -457,7 +475,7 @@ def build(wiki: Path, out: Path, mdbook: str, site_url: str, social: Path, stric
             (src / book_file(page)).write_text(text, encoding="utf-8")
         (src / "SUMMARY.md").write_text(summary, encoding="utf-8")
         (book / "book.toml").write_text(
-            book_toml(metas["Home"].description, urlsplit(site_url).path or "/"), encoding="utf-8"
+            book_toml(home_description, urlsplit(site_url).path or "/"), encoding="utf-8"
         )
         if strict and problems:
             print(f"site build failed: {len(problems)} problem(s)", file=sys.stderr)
