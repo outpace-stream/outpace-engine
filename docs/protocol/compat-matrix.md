@@ -337,7 +337,10 @@ options or new compatibility response keys.
   session: one more broadcast receiver and its own bounded segment window, the same
   `OUTPACE_HLS_SEGMENT_PACKETS` × (`OUTPACE_HLS_WINDOW_SEGMENTS` + 1) ceiling as the
   default packager, plus any retained history, charged to the one global history budget.
-  At most **four** variants run per session, so a stream has at most five packagers.
+  At most **four** variants run per session. After a session is replaced (for example on
+  source EOF), variants of the old session that leases still pin keep serving those leases
+  and do not count toward the new session's cap, so for up to one lease lifetime a stream
+  can hold up to four old variants on top of the current session's five packagers.
   Further tracks get the default packager, and `[hls] audio variant limit reached` is
   logged once per stream. A variant whose last lease is stopped, expires or is evicted is
   retired by the next idle sweep (about 30 s); stopping the stream removes all of its

@@ -7,7 +7,9 @@ incoming MPEG-TS into segments, keeps a sliding window of them and serves a live
 HLS viewers of one source share one packager, and every packager shares the download with any
 direct MPEG-TS viewers. Compatibility viewers that ask for a different
 [audio language](#choosing-an-audio-language) can add up to four more packagers to a source,
-so one source can run up to five.
+so one source normally runs up to five. Right after a source restarts, language packagers from
+before the restart keep serving the viewers that still use them until their leases end, so for
+a short time there can be up to four more.
 
 ## When to use HLS instead of MPEG-TS
 
@@ -31,7 +33,7 @@ so one source can run up to five.
   return `404`. Worst-case memory per packager is about (window + 1) × the segment ceiling. Each
   audio-language packager keeps its own window and, with [timeshift](Timeshift), its own
   retained history, so plan for up to five times that per source when compatibility clients
-  request languages.
+  request languages, and briefly up to nine times right after a source restart.
 
 ## Startup
 
@@ -188,8 +190,8 @@ http://127.0.0.1:6878/ace/manifest.m3u8?id=0123456789abcdef0123456789abcdef01234
 - No match, an invalid code or no parameter gives the normal audio: the first AAC track, or
   every track when there is no AAC.
 - Viewers asking for different languages still share **one download**. Each extra track costs
-  one more packager, with its own retained segment window and history. A stream runs at most
-  **four** extra language packagers; later languages get the normal audio. An extra packager
+  one more packager, with its own retained segment window and history. A stream session runs at
+  most **four** extra language packagers; later languages get the normal audio. An extra packager
   stops about 30 seconds after its last viewer's lease ends.
 - A language packager keeps playing the track it started with. If that track disappears from
   the stream, the packager stops and its viewers get `404`; requesting the manifest again picks
