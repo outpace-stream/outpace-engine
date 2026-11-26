@@ -59,6 +59,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Ubuntu 24.04 is the cross-toolchain baseline shared with the Linux
+          # and FreeBSD checks in portability.yml and bsd.yml.
           - target: x86_64-unknown-linux-musl
             os: ubuntu-24.04
             archive: tar.gz
