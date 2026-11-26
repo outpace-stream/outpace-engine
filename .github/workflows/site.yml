@@ -26,9 +26,9 @@ permissions:
   contents: read
 
 # Build and deploy share one group per ref, so a whole run (build, then deploy)
-# finishes before the next starts. GitHub keeps only the newest pending run in a
-# group, so an older commit can never deploy after a newer one. On main a running
-# deployment is never cancelled half-way; superseded pull request builds are.
+# finishes before the next starts; on main a running deployment is never cancelled
+# half-way, while superseded pull request builds are. Together with building main's
+# tip (see the checkout step), this keeps the published site monotonic.
 concurrency:
   group: site-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -44,8 +44,14 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
+      # Outside pull requests, build the current tip of main rather than the commit that
+      # triggered the run. Runs in the concurrency group execute one at a time, so each
+      # later run reads a tip at least as new as any earlier one: deployments never go
+      # backwards, and a run GitHub replaced or one triggered by an older commit loses
+      # nothing, because whichever run deploys last publishes everything merged so far.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || 'refs/heads/main' }}
           persist-credentials: false
       - name: Install mdBook
         run: |
@@ -73,40 +79,12 @@ jobs:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     permissions:
-      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      # The concurrency group serializes runs but admits them in the order they start
-      # waiting, not commit order. If main has moved on, deploy anyway when no newer
-      # commit touches the site's inputs (the build would be identical, and the path
-      # filter starts no newer run); skip only when a newer commit does, since that
-      # commit's own run publishes the newer docs. Keep SITE_PATHS in sync with `on:`.
-      - name: Skip a superseded commit
-        id: current
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SITE_PATHS: "^(docs/wiki/|tools/site/|tools/wiki/|docs/assets/social-preview\\.png$|\\.github/workflows/site\\.yml$)"
-        run: |
-          set -euo pipefail
-          tip="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
-          deploy=true
-          if [[ "$tip" != "$GITHUB_SHA" ]]; then
-            compare="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${tip}")"
-            status="$(jq -r .status <<<"$compare")"
-            changed="$(jq -r '.files[]?.filename' <<<"$compare" | grep -E "$SITE_PATHS" || true)"
-            # The compare API lists at most 300 files; a longer list counts as changed.
-            if [[ "$status" != "ahead" || -n "$changed" ]] \
-                || (( $(jq '.files | length' <<<"$compare") >= 300 )); then
-              deploy=false
-              echo "::notice::main moved to ${tip} with site changes; its run deploys instead."
-            fi
-          fi
-          echo "deploy=${deploy}" >> "$GITHUB_OUTPUT"
       - name: Deploy to GitHub Pages
-        if: steps.current.outputs.deploy == 'true'
         id: deployment
         uses: actions/deploy-pages@v5
