@@ -266,7 +266,10 @@ Both routes accept `preferred_audio_language=<code>`, a three-letter ISO 639-2 c
   every audio track. Outpace moves the matching track to the front of the stream's track list
   for that viewer only, so players that start the first audio track, such as VLC and mpv, start
   that one. You can still switch tracks in the player. Without a match nothing changes.
-- **HLS** (`manifest.m3u8`) carries one audio track, and the parameter picks it. See
+- **HLS** (`manifest.m3u8`) can only pick among the tracks HLS would play. If the stream has
+  AAC audio, only an AAC track in that language replaces the default first AAC track: with
+  English AAC and Russian AC-3, `rus` still plays English. If the stream has no AAC, a matching
+  track is played on its own, and without a match every track passes through as before. See
   [HLS Output](HLS-Output#choosing-an-audio-language) for the rules and limits.
 - Viewers asking for different languages share one download.
 - With [audio normalisation](HLS-Output#audio-normalisation) on, the converted track wins and

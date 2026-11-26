@@ -20,7 +20,7 @@ fn cases() -> Vec<(&'static str, Setup)> {
         }),
         ("variant_rus", || {
             let pkg = HlsPackager::new(config(), Some("Synthetic".into()));
-            pkg.set_audio_language(ace_media::audio::AudioLanguage::parse("rus").unwrap());
+            pkg.set_audio_track(0x102);
             pkg
         }),
     ]

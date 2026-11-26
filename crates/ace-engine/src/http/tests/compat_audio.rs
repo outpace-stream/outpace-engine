@@ -192,7 +192,7 @@ async fn hls_variant_is_retired_after_its_last_lease_stops() {
     let (default, _) = manifest(&app, None).await;
     let (rus, token) = manifest(&app, Some("rus")).await;
     assert_eq!(segment_audio(&app, &rus).await, vec![0x102]);
-    let variant = manager.get_hls_variant("multi", ID, 0x102).unwrap();
+    let variant = manager.hls_variant_for_pid("multi", ID, 0x102).unwrap();
 
     // Another lease on the variant keeps it through a sweep.
     let (second, second_token) = manifest(&app, Some("rus")).await;
@@ -311,5 +311,31 @@ async fn direct_and_json_ts_reorder_only_the_requesting_viewers_pmt() {
         1,
         "all viewers share one source"
     );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_pre_stop_variant_lease_never_reads_the_replacement_packager() {
+    let (state, opens) = audio_state(&AUDIO, None);
+    let manager = state.manager.clone();
+    let app = router(state);
+    let (old, _) = manifest(&app, Some("rus")).await;
+    let old_playlist = wait_for_hls_playlist(&app, &old).await;
+    let old_segment = playlist_segment_path(&old_playlist).to_owned();
+    assert!(manager.stop("multi", ID).await);
+
+    // A new viewer restarts the stream and gets a fresh variant for the same track.
+    let (new, _) = manifest(&app, Some("rus")).await;
+    assert_eq!(segment_audio(&app, &new).await, vec![0x102]);
+    assert_eq!(opens.load(Ordering::SeqCst), 2);
+    // The old lease's variant was removed by the stop: unavailable, never the new packager.
+    for path in [old.as_str(), old_segment.as_str()] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
     manager.shutdown().await;
 }

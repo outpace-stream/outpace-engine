@@ -134,6 +134,19 @@ fn language_track<'a>(
     best.map(|(_, pid)| pid)
 }
 
+/// What one native HLS selection keeps, beyond the default policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AudioPreference {
+    /// The first ADTS AAC track, or passthrough without one.
+    #[default]
+    Default,
+    /// The best track tagged with this language; otherwise the default.
+    Language(AudioLanguage),
+    /// Exactly this elementary PID, which must be a recognized audio track. Without it the
+    /// selection keeps nothing and [`LiveAudioSelection::track_lost`] reports the loss.
+    Track(u16),
+}
+
 /// Native live HLS selection: the first ADTS AAC track, or `None` to pass audio through.
 /// A preferred language picks a matching ADTS AAC track instead; when the program has no ADTS
 /// AAC (so native HLS would pass every track through), any recognized matching track is kept
@@ -141,13 +154,23 @@ fn language_track<'a>(
 fn native_selection(
     entries: &[(usize, usize, u16, Option<AudioCodec>)],
     s: &[u8],
-    preferred: Option<AudioLanguage>,
+    preference: AudioPreference,
 ) -> Option<u16> {
+    let language = match preference {
+        AudioPreference::Track(pid) => {
+            return entries
+                .iter()
+                .find(|e| e.2 == pid && e.3.is_some())
+                .map(|e| e.2);
+        }
+        AudioPreference::Language(language) => Some(language),
+        AudioPreference::Default => None,
+    };
     let default = entries
         .iter()
         .find(|e| e.3 == Some(AudioCodec::AdtsAac))
         .map(|e| e.2);
-    let Some(language) = preferred else {
+    let Some(language) = language else {
         return default;
     };
     let max_rank = if default.is_some() { 0 } else { 2 };
@@ -360,6 +383,10 @@ fn pid(bytes: &[u8]) -> u16 {
 pub struct AudioPacket {
     pub packet: Option<[u8; N]>,
     pub changed: bool,
+    /// Tables went from unknown to known (a usable PMT, or PSI that disables selection), so
+    /// [`LiveAudioSelection::selection_for`] stopped returning `None`. Only that transition
+    /// sets it; repeated tables stay silent.
+    pub resolved: bool,
 }
 
 #[derive(Default)]
@@ -376,16 +403,36 @@ pub struct LiveAudioSelection {
     version: u8,
     rewrite: bool,
     output_cc: u8,
-    /// Language-aware native selection for one HLS variant; survives [`Self::reset`].
-    preferred: Option<AudioLanguage>,
+    /// Native selection for one HLS variant; survives [`Self::reset`].
+    preference: AudioPreference,
+    /// The PID the current PMT's native selection kept, if any.
+    selected: Option<u16>,
 }
 
 impl LiveAudioSelection {
     /// Native selection that prefers `language` (see [`Self::selection_for`]).
     pub fn with_language(language: AudioLanguage) -> Self {
+        Self::with_preference(AudioPreference::Language(language))
+    }
+
+    pub fn with_preference(preference: AudioPreference) -> Self {
         Self {
-            preferred: Some(language),
+            preference,
             ..Self::default()
+        }
+    }
+
+    /// Whether tables are known: a usable PMT, or PSI that disables selection.
+    fn tables_known(&self) -> bool {
+        self.source_pmt.is_some() || self.layout == LayoutDecision::Unsupported
+    }
+
+    /// For an [`AudioPreference::Track`] selection: known tables no longer offer that PID as
+    /// a recognized audio track (or disable selection), so the output cannot carry it.
+    pub fn track_lost(&self) -> bool {
+        match self.preference {
+            AudioPreference::Track(pid) => self.tables_known() && self.selected != Some(pid),
+            _ => false,
         }
     }
 
@@ -395,7 +442,7 @@ impl LiveAudioSelection {
 
     pub fn reset(&mut self) {
         *self = Self {
-            preferred: self.preferred,
+            preference: self.preference,
             ..Self::default()
         };
     }
@@ -419,7 +466,8 @@ impl LiveAudioSelection {
             entries.push((pos, next, pid(&s[pos + 1..]), codec));
             pos = next;
         }
-        Some(native_selection(&entries, s, language))
+        let preference = language.map_or(AudioPreference::Default, AudioPreference::Language);
+        Some(native_selection(&entries, s, preference))
     }
 
     pub fn pcr_pid(&self) -> Option<u16> {
@@ -438,18 +486,22 @@ impl LiveAudioSelection {
         self.pcr = None;
         self.effective = None;
         self.rewrite = false;
+        self.selected = None;
         changed
     }
 
     pub fn observe(&mut self, mut packet: [u8; N]) -> AudioPacket {
         // Inspect the original packet, including payload on PIDs the native filter drops.
         // This metadata never changes the legacy packet return value or rewrite rules.
+        let mut resolved = false;
         if packet[3] & 0xc0 != 0 {
+            resolved = !self.tables_known();
             self.layout = LayoutDecision::Unsupported;
         }
         let source_pid = ts_pid(&packet);
         let mut changed = false;
         if source_pid == 0 {
+            let known = self.tables_known();
             match section(&packet, 0, 9, None) {
                 Ok(s) => {
                     let entries = &s[8..s.len() - 4];
@@ -457,6 +509,7 @@ impl LiveAudioSelection {
                         return AudioPacket {
                             packet: None,
                             changed: false,
+                            resolved,
                         };
                     }
                     let programs: Vec<_> = entries
@@ -501,11 +554,14 @@ impl LiveAudioSelection {
                         return AudioPacket {
                             packet: None,
                             changed: false,
+                            resolved,
                         };
                     }
                 }
             }
+            resolved |= !known && self.tables_known();
         } else if self.mapping.is_some_and(|(_, p)| p == source_pid) && payload(&packet).is_some() {
+            let known = self.tables_known();
             match self.update_pmt(&packet) {
                 Ok(different) => {
                     changed = different;
@@ -521,9 +577,11 @@ impl LiveAudioSelection {
                     return AudioPacket {
                         packet: None,
                         changed: false,
+                        resolved,
                     };
                 }
             }
+            resolved |= !known && self.tables_known();
         } else if self.removed.contains(&source_pid) {
             let timing = ts_timing(&packet);
             if Some(source_pid) == self.pcr && (timing.pcr.is_some() || timing.discontinuity) {
@@ -533,6 +591,7 @@ impl LiveAudioSelection {
                     return AudioPacket {
                         packet: None,
                         changed,
+                        resolved,
                     };
                 }
                 packet[1] &= !0x40;
@@ -543,12 +602,14 @@ impl LiveAudioSelection {
                 return AudioPacket {
                     packet: None,
                     changed,
+                    resolved,
                 };
             }
         }
         AudioPacket {
             packet: Some(packet),
             changed,
+            resolved,
         }
     }
 
@@ -593,7 +654,7 @@ impl LiveAudioSelection {
         } else {
             self.decide_layout(s, &entries)
         };
-        let selected = native_selection(&entries, s, self.preferred);
+        let selected = native_selection(&entries, s, self.preference);
         let removed: Vec<_> = entries
             .iter()
             .filter(|e| selected.is_some() && e.3.is_some() && Some(e.2) != selected)
@@ -637,6 +698,7 @@ impl LiveAudioSelection {
         self.pmt = Some(if self.rewrite { rewritten } else { *packet });
         self.source_pmt = Some(source_content);
         self.removed = removed;
+        self.selected = selected;
         self.pcr = Some(pid(&s[8..]));
         Ok(different)
     }
@@ -1868,5 +1930,77 @@ mod tests {
         st.observe(source[N..].try_into().unwrap());
         assert_eq!(st.selection_for(Some(lang("rus"))), Some(Some(0x102)));
         assert_eq!(st.selection_for(Some(lang("spa"))), Some(Some(0x101)));
+    }
+
+    #[test]
+    fn track_preference_keeps_its_pid_across_language_moves_and_reports_loss() {
+        let mut st = LiveAudioSelection::with_preference(AudioPreference::Track(259));
+        assert!(!st.track_lost(), "unknown tables are not a loss");
+        st.observe(pat(1, 256));
+        assert_eq!(
+            es_pids(&st.observe(multi_language()).packet.unwrap()),
+            vec![257, 259]
+        );
+        assert!(!st.track_lost());
+        // `rus` moves to 260 while 259 stays as another language: the PID, not the language, wins.
+        let moved = pmt(
+            1,
+            &[
+                (0x1b, 257, &[]),
+                (15, 258, ENG),
+                (15, 259, SPA),
+                (15, 260, RUS),
+            ],
+        );
+        assert_eq!(es_pids(&st.observe(moved).packet.unwrap()), vec![257, 259]);
+        assert!(!st.track_lost());
+        // The PID leaves the PMT: nothing is selected, and the loss is reported.
+        let gone = pmt(2, &[(0x1b, 257, &[]), (15, 258, ENG), (15, 260, RUS)]);
+        assert!(st.observe(gone).changed);
+        assert!(st.track_lost());
+        // A reset forgets the tables (not a loss) but keeps the pinned PID.
+        st.reset();
+        assert!(!st.track_lost());
+        st.observe(pat(1, 256));
+        st.observe(multi_language());
+        assert!(!st.track_lost());
+        assert!(st.observe(elementary(258)).packet.is_none());
+        // PSI that disables selection is a loss too.
+        st.observe(table(
+            0,
+            vec![0, 0xb0, 0, 0, 1, 0xc1, 0, 0, 0, 1, 0xe1, 0, 0, 2, 0xe1, 1],
+        ));
+        assert!(st.track_lost());
+    }
+
+    #[test]
+    fn resolved_fires_once_on_the_transition_to_known_tables() {
+        let multi = table(
+            0,
+            vec![0, 0xb0, 0, 0, 1, 0xc1, 0, 0, 0, 1, 0xe1, 0, 0, 2, 0xe1, 1],
+        );
+        // Unsupported PSI with no PMT: `changed` stays false, `resolved` fires once.
+        let mut st = LiveAudioSelection::default();
+        let first = st.observe(multi);
+        assert!(!first.changed && first.resolved);
+        assert_eq!(st.selection_for(None), Some(None));
+        for _ in 0..3 {
+            assert!(
+                !st.observe(multi).resolved,
+                "repeated unsupported PSI stays silent"
+            );
+        }
+        // A normal program: the PAT alone resolves nothing, the first PMT does, repeats do not.
+        let mut st = LiveAudioSelection::default();
+        assert!(!st.observe(pat(1, 256)).resolved);
+        assert!(st.observe(multi_language()).resolved);
+        assert!(!st.observe(multi_language()).resolved);
+        assert!(!st.observe(elementary(258)).resolved);
+        // A scrambled packet before tables resolves (to passthrough) once.
+        let mut st = LiveAudioSelection::default();
+        let mut scrambled = elementary(300);
+        scrambled[3] |= 0x80;
+        assert!(st.observe(scrambled).resolved);
+        assert!(!st.observe(scrambled).resolved);
     }
 }

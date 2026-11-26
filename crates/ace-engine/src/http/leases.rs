@@ -327,10 +327,10 @@ impl AceSessionStore {
         }
     }
 
-    /// The elementary PID of the HLS audio variant a lease pins, if any.
-    pub(super) fn hls_audio_variant(&self, token: &str) -> Option<u16> {
+    /// The id of the exact HLS audio variant entry a lease pins, if any.
+    pub(super) fn hls_audio_variant(&self, token: &str) -> Option<u64> {
         match &self.leases.lock().unwrap().get(token)?.audio {
-            LeaseAudio::Hls(pin) => Some(pin.pid()),
+            LeaseAudio::Hls(pin) => Some(pin.id()),
             _ => None,
         }
     }

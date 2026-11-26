@@ -469,7 +469,8 @@ async fn ace_hls_view_segment(
     }
 }
 
-/// The packager a lease serves: its pinned audio variant, else the stream's default packager.
+/// The packager a lease serves: the exact audio variant entry it pinned (none once that entry
+/// is removed or failed, never a later variant for the same track), else the default packager.
 async fn lease_hls(
     s: &AppState,
     network: &str,
@@ -477,7 +478,7 @@ async fn lease_hls(
     token: &str,
 ) -> Option<Arc<crate::hls::HlsPackager>> {
     match s.ace_sessions.hls_audio_variant(token) {
-        Some(pid) => s.manager.get_hls_variant(network, session_key, pid),
+        Some(variant) => s.manager.get_hls_variant(network, session_key, variant),
         None => s.manager.get_hls(network, session_key).await,
     }
 }

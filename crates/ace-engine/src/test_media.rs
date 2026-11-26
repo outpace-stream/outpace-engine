@@ -107,6 +107,17 @@ impl Generator {
         }
     }
 
+    /// Switch the audio layout (a new PMT version) from the next frame on.
+    pub(crate) fn set_tracks(&mut self, tracks: &[(u16, u8, &[u8; 3])]) {
+        self.tracks = tracks.iter().map(|(p, t, l)| (*p, *t, **l)).collect();
+        self.table = pmt(tracks);
+        let s = 5 + 5;
+        self.table[s] = (self.table[s] & 0xc1) | 0x02; // version 1
+        let len = (((self.table[6] & 15) as usize) << 8) | self.table[7] as usize;
+        let crc = mpeg_crc32(&self.table[5..5 + 3 + len - 4]);
+        self.table[5 + 3 + len - 4..5 + 3 + len].copy_from_slice(&crc.to_be_bytes());
+    }
+
     fn next_cc(&mut self, pid: u16) -> u8 {
         let c = self.cc[pid as usize];
         self.cc[pid as usize] = (c + 1) & 15;

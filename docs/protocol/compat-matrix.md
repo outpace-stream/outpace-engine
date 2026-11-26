@@ -308,24 +308,40 @@ options or new compatibility response keys.
   audio track (for example VLC and mpv) play it, and can still switch; players with
   their own rules may not. Without a match, or for a fragmented or CRC-invalid PMT, the
   PMT is forwarded byte for byte. Viewers without the parameter are unaffected.
-- **HLS.** Native HLS carries one audio track. When the program has ADTS AAC, a matching
-  ADTS AAC track replaces the default first ADTS AAC, and a match in another codec is
-  ignored, so the delivered codec never changes. Without ADTS AAC, where the default
-  passes every track through, a matching recognized track is kept alone. The request
-  resolves the language once, against the shared source's current PMT (on a cold start
-  it waits up to `OUTPACE_HLS_STARTUP_TIMEOUT_MS` for the first PMT), and its lease stays
-  on the result. A language that resolves to the default track uses the default
-  packager.
+- **HLS.** The preference only changes which tracks native selection keeps:
+  - With ADTS AAC in the program, the default keeps the first ADTS AAC track. A matching
+    ADTS AAC track replaces it; a match in another codec is ignored, so the delivered
+    codec never changes. For example, with English ADTS AAC and Russian AC-3, `rus` keeps
+    the English AAC track.
+  - Without ADTS AAC, the default passes every audio track through. A matching recognized
+    track is kept alone; without a match every track still passes through.
+
+  The request resolves the language to an elementary PID once, against the shared
+  source's current PMT (on a cold start it waits up to `OUTPACE_HLS_STARTUP_TIMEOUT_MS`
+  for the first PMT). A language that resolves to the default selection uses the default
+  packager; any other result is served by the variant for exactly that PID.
+- **A variant carries exactly its PID.** It never re-resolves the language and never
+  switches tracks. If a later PMT still lists the PID, the variant keeps carrying it, even
+  if its language tag changed. If the PID leaves the PMT (or the PSI stops supporting
+  selection), the variant fails. A failed variant is treated as gone: its leases get the
+  unavailable response (404) and the next manifest request re-resolves and starts a fresh
+  variant.
+- **Leases are bound to their exact variant.** A lease only ever reads the variant entry
+  it pinned, never a later packager for the same PID. Stopping the stream removes all of
+  its variants, so their leases get 404 for playlists and segments until the client
+  requests a new manifest. A variant also belongs to the session it was created on: a
+  replacement session for the same stream (for example after the source ended) never
+  receives it, and the old one keeps serving its existing leases until they end.
 - **One download, bounded variants.** Every viewer shares the stream's one upstream
   session. Each distinct non-default track adds one native packager (a *variant*) on that
   session: one more broadcast receiver and its own bounded segment window, the same
   `OUTPACE_HLS_SEGMENT_PACKETS` × (`OUTPACE_HLS_WINDOW_SEGMENTS` + 1) ceiling as the
   default packager, plus any retained history, charged to the one global history budget.
-  At most **four** variants run per stream. Further tracks get the default packager, and
-  `[hls] audio variant limit reached` is logged once per stream. A variant whose last
-  lease is stopped, expires or is evicted is retired by the next idle sweep (about 30 s);
-  stopping the stream removes all of its variants. Timeshift on a variant lease uses
-  that variant's history.
+  At most **four** variants run per session, so a stream has at most five packagers.
+  Further tracks get the default packager, and `[hls] audio variant limit reached` is
+  logged once per stream. A variant whose last lease is stopped, expires or is evicted is
+  retired by the next idle sweep (about 30 s); stopping the stream removes all of its
+  variants. Timeshift on a variant lease uses that variant's history.
 - **Normalization wins.** With `OUTPACE_HLS_AUDIO_NORMALIZE` or
   `OUTPACE_LIVE_AUDIO_NORMALIZE` on, HLS ignores the preference: no variant packager and
   no extra FFmpeg child. With `OUTPACE_LIVE_AUDIO_NORMALIZE` on, TS ignores it too,

@@ -16,7 +16,7 @@ use crate::config::{HlsConfig, HlsHistoryConfig};
 use crate::history::{HistoryBudget, HistoryEntry, HistoryStore};
 pub use crate::history::{HlsHistoryError, HlsHistorySnapshot, HlsHistoryStatus};
 use crate::session::{StreamEvent, StreamSession};
-use ace_media::audio::{AudioLanguage, LiveAudioSelection};
+use ace_media::audio::{AudioLanguage, AudioPreference, LiveAudioSelection};
 use ace_media::mpegts::{
     ts_pid, ts_timing, ClockObservation, SelectedPcrClock, TsTiming, VideoAccessPointState,
 };
@@ -201,10 +201,13 @@ impl HlsPackager {
         media
     }
 
-    /// Make this packager's native audio selection prefer `language`. Call before its worker
-    /// starts; the preference survives every later table reset.
-    pub(crate) fn set_audio_language(&self, language: AudioLanguage) {
-        self.state.lock().unwrap().audio = LiveAudioSelection::with_language(language);
+    /// Make this packager carry exactly the audio elementary stream `pid`, for an audio-language
+    /// variant. Call before its worker starts; the choice survives every later table reset. If
+    /// current tables stop offering `pid` as a recognized audio track, the packager fails
+    /// ([`HlsFailure::Unsupported`]) instead of carrying another track.
+    pub(crate) fn set_audio_track(&self, pid: u16) {
+        self.state.lock().unwrap().audio =
+            LiveAudioSelection::with_preference(AudioPreference::Track(pid));
     }
 
     /// Resolve `language` against the currently observed PMT. A stopped, failed or ended
@@ -615,9 +618,19 @@ impl HlsPackager {
                 continue;
             }
             let result = st.audio.observe(packet);
-            if result.changed {
-                // Rare (a PMT whose content changed): wakes audio-language resolution waiters.
+            // Non-short-circuit `|`: one combined test keeps the per-packet path at base cost.
+            if result.changed | result.resolved {
+                // Rare (tables became known or changed): wakes audio-language resolution waiters.
                 self.ready.notify_waiters();
+                if st.audio.track_lost() {
+                    crate::alog!("[hls] audio variant track left the PMT; variant stopped");
+                    st.status = HlsStatus::Failed(HlsFailure::Unsupported);
+                    Self::reset_partial(st, false);
+                    self.ready.notify_waiters();
+                    return;
+                }
+            }
+            if result.changed {
                 let pending = st.discontinuity_pending || !st.awaiting_access_point;
                 st.access.reset();
                 self.discard_incomplete_run(st);
@@ -1135,6 +1148,8 @@ impl VodHlsLayout {
     }
 }
 
+#[cfg(test)]
+mod audio_tests;
 #[cfg(test)]
 mod bench;
 
