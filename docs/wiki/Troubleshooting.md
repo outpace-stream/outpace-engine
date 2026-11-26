@@ -190,6 +190,8 @@ out of nodes to ask before finding any peer, it asks the bootstrap routers once 
 together with up to a few DHT nodes that answered earlier searches in the last 15 minutes
 (remembered in memory only, so a fresh process starts with none):
 `recovery_queries` counts those extra queries and `recovery_peers` the peers they led to.
+A search asks at most 256 nodes; `query_cap_reached=true` means it stopped there, which a
+search that finds peers normally never reaches.
 
 ## No inbound peers
 

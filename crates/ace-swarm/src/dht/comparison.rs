@@ -108,7 +108,10 @@ async fn run_comparison(infohash: &[u8; 20], seeds: Vec<SocketAddrV4>) -> serde_
     .await;
     let terminal = if state.peers.len() >= 8 {
         "target"
-    } else if start.elapsed() < budget && metrics.frontier_exhausted {
+    } else if start.elapsed() < budget
+        // A spent query cap ends the walk early the same way a dry frontier does.
+        && (metrics.frontier_exhausted || metrics.query_cap_reached)
+    {
         "exhausted"
     } else {
         "deadline"
