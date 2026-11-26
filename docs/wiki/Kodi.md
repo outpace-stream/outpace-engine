@@ -120,6 +120,9 @@ same wait-for-`dl` rule) against a local Outpace build on one current public liv
 came after about 2 seconds and the playback URL returned media. It hasn't been re-run in Kodi
 itself yet.
 
+If Kodi or Horus is closed before playback opens, Outpace drops the stream once `stat_url`
+has gone unread for 60 seconds.
+
 If the stream can't start (for example, no peer is sharing it), `stat_url` answers with an
 `error`. Horus ignores stat errors and keeps showing its last status, so its dialog can stay on
 "prebuffering" until you cancel it.

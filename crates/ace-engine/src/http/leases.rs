@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 const ACE_TOKEN_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const ACE_TOKEN_CAPACITY: usize = 4096;
+/// A warm hold ends when its stat URL goes unpolled this long before playback opens. Clients
+/// that wait for `dl` poll about once a second, so this only ends abandoned holds.
+const WARM_POLL_IDLE: Duration = Duration::from_secs(60);
 
 pub(super) struct AceLease {
     playback_id: String,
@@ -24,16 +27,25 @@ pub(super) struct AceLease {
     hls_view: Option<HlsViewState>,
     /// Start-up hold of a TS lease whose stat URL is polled before its playback URL opens.
     warm: WarmState,
+    /// Identifies the current warm start, so a cancelled earlier start never settles a later one.
+    warm_epoch: u64,
 }
 
 /// A TS JSON lease starts nothing when minted. Its first stat poll starts the shared source
-/// once and keeps it with a support pin (not a viewer) until playback opens, the lease is
-/// stopped, or it expires, so a client that waits for `dl` before opening still starts.
+/// and keeps it with a support pin (not a viewer) until playback opens, the lease is stopped
+/// or expires, or its stat URL goes unpolled for the store's warm poll idle bound, so a client
+/// that waits for `dl` before opening still starts.
 enum WarmState {
-    /// Never polled, or an HLS lease, which already holds its source.
+    /// Never polled, idle-released, or an HLS lease, which already holds its source.
     Cold,
-    Starting,
+    Starting {
+        epoch: u64,
+        last_poll: Instant,
+        /// Dropping this cancels the pending start.
+        _cancel: tokio::sync::watch::Sender<()>,
+    },
     Held {
+        last_poll: Instant,
         _pin: SupportPin,
     },
     Failed(StartError),
@@ -42,17 +54,32 @@ enum WarmState {
 }
 
 impl WarmState {
-    fn holds_source(&self) -> bool {
-        matches!(self, Self::Starting | Self::Held { .. })
+    /// When an unpolled hold ends; `None` when this lease holds nothing.
+    fn idle_deadline(&self, idle: Duration) -> Option<Instant> {
+        match self {
+            Self::Starting { last_poll, .. } | Self::Held { last_poll, .. } => {
+                Some(*last_poll + idle)
+            }
+            _ => None,
+        }
+    }
+
+    fn touch(&mut self, now: Instant) {
+        if let Self::Starting { last_poll, .. } | Self::Held { last_poll, .. } = self {
+            *last_poll = now;
+        }
     }
 }
 
 /// What a stat poll learned about its lease's warm start.
 pub(super) enum WarmPoll {
-    /// This poll claimed the lease's only warm start; the caller runs it.
+    /// This poll claimed the lease's warm start (first poll, or first after an idle release).
     Begin {
+        epoch: u64,
         expires_at: Instant,
         cancel: tokio::sync::watch::Receiver<bool>,
+        /// Closes when the hold idles out before the start finishes.
+        idle: tokio::sync::watch::Receiver<()>,
     },
     Starting,
     Failed(StartError),
@@ -112,6 +139,7 @@ pub struct AceSessionStore {
     pub(super) leases: Mutex<HashMap<String, AceLease>>,
     ttl: Duration,
     capacity: usize,
+    warm_poll_idle: Duration,
     /// A single weak-reference reaper handles every HLS deadline for this store. Mutations bump
     /// the watch generation so capacity eviction, stop, and revoke cancel its current sleep and
     /// make it recalculate the next live deadline.
@@ -141,10 +169,17 @@ impl AceSessionStore {
             leases: Mutex::new(HashMap::new()),
             ttl,
             capacity,
+            warm_poll_idle: WARM_POLL_IDLE,
             hls_reaper_signal,
             hls_reaper_started: AtomicBool::new(false),
             hls_reaper_workers: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_warm_poll_idle(mut self, idle: Duration) -> Self {
+        self.warm_poll_idle = idle;
+        self
     }
 
     pub(super) fn mint(&self, playback_id: String, session_key: String) -> String {
@@ -224,14 +259,21 @@ impl AceSessionStore {
         });
     }
 
-    /// The next deadline of a lease that keeps a source alive (an HLS pin or a warm hold).
+    /// The next deadline of a lease that keeps a source alive: an HLS pin's expiry, or the
+    /// earlier of a warm hold's expiry and its poll idle bound.
     fn next_pinned_expiry(&self) -> Option<Instant> {
         self.leases
             .lock()
             .unwrap()
             .values()
-            .filter(|lease| lease._hls_pin.is_some() || lease.warm.holds_source())
-            .map(|lease| lease.expires_at)
+            .filter_map(|lease| {
+                let warm = lease.warm.idle_deadline(self.warm_poll_idle);
+                if lease._hls_pin.is_some() {
+                    Some(lease.expires_at)
+                } else {
+                    warm.map(|idle| idle.min(lease.expires_at))
+                }
+            })
             .min()
     }
 
@@ -249,6 +291,20 @@ impl AceSessionStore {
             }
             keep
         });
+        // An unpolled warm hold goes back to cold: a client that resumes polling warms it
+        // again. Pins and pending starts are released outside the lock.
+        let idle: Vec<_> = leases
+            .values_mut()
+            .filter(|lease| {
+                lease
+                    .warm
+                    .idle_deadline(self.warm_poll_idle)
+                    .is_some_and(|deadline| deadline <= now)
+            })
+            .map(|lease| std::mem::replace(&mut lease.warm, WarmState::Cold))
+            .collect();
+        drop(leases);
+        drop(idle);
     }
 
     pub(super) fn insert_at(
@@ -299,6 +355,7 @@ impl AceSessionStore {
                 _hls_pin: hls_pin,
                 hls_view,
                 warm: WarmState::Cold,
+                warm_epoch: 0,
             },
         );
         drop(leases);
@@ -405,34 +462,44 @@ impl AceSessionStore {
             })
     }
 
-    /// Authorize a stat poll and claim the lease's warm start on its first poll. Only a TS
-    /// lease warms: an HLS lease already holds its source from the manifest request.
+    /// Authorize a stat poll, keep a warm hold alive, and claim a warm start on a cold lease.
+    /// Only a TS lease warms: an HLS lease already holds its source from the manifest request.
     pub(super) fn poll_for_stat(
         self: &Arc<Self>,
         playback_id: &str,
         token: &str,
     ) -> Option<(String, WarmPoll)> {
-        self.purge_expired(Instant::now());
+        let now = Instant::now();
+        self.purge_expired(now);
         let mut leases = self.leases.lock().unwrap();
         let lease = leases
             .get_mut(token)
             .filter(|lease| lease.playback_id == playback_id)?;
+        lease.warm.touch(now);
         let poll = match &lease.warm {
             WarmState::Cold if lease._hls_pin.is_none() => {
-                lease.warm = WarmState::Starting;
+                lease.warm_epoch = lease.warm_epoch.wrapping_add(1);
+                let (cancel, idle) = tokio::sync::watch::channel(());
+                lease.warm = WarmState::Starting {
+                    epoch: lease.warm_epoch,
+                    last_poll: now,
+                    _cancel: cancel,
+                };
                 WarmPoll::Begin {
+                    epoch: lease.warm_epoch,
                     expires_at: lease.expires_at,
                     cancel: lease.cancel.subscribe(),
+                    idle,
                 }
             }
-            WarmState::Starting => WarmPoll::Starting,
+            WarmState::Starting { .. } => WarmPoll::Starting,
             WarmState::Failed(error) => WarmPoll::Failed(error.clone()),
             WarmState::Cold | WarmState::Held { .. } | WarmState::Done => WarmPoll::Settled,
         };
         let session_key = lease.session_key.clone();
         drop(leases);
         if matches!(poll, WarmPoll::Begin { .. }) {
-            // A warm hold ends at the lease deadline even if nobody touches the store again.
+            // A warm hold ends at its deadlines even if nobody touches the store again.
             self.ensure_hls_reaper();
             self.wake_hls_reaper();
         }
@@ -445,24 +512,35 @@ impl AceSessionStore {
         &self,
         playback_id: &str,
         token: &str,
+        epoch: u64,
         started: Result<SupportPin, ProviderError>,
     ) {
         let mut leases = self.leases.lock().unwrap();
         let Some(lease) = leases
             .get_mut(token)
             .filter(|lease| lease.playback_id == playback_id)
-            .filter(|lease| matches!(lease.warm, WarmState::Starting))
+            .filter(|lease| {
+                matches!(lease.warm, WarmState::Starting { epoch: current, .. } if current == epoch)
+            })
         else {
             drop(leases);
             drop(started);
             return;
         };
+        let previous = std::mem::replace(&mut lease.warm, WarmState::Done);
+        let WarmState::Starting { last_poll, .. } = previous else {
+            return;
+        };
         lease.warm = match started {
-            Ok(pin) => WarmState::Held { _pin: pin },
+            Ok(pin) => WarmState::Held {
+                last_poll,
+                _pin: pin,
+            },
             // Playback redirects to the origin; this lease never owns a local source.
             Err(ProviderError::DirectHls(_)) => WarmState::Done,
             Err(error) => WarmState::Failed(StartError::from_provider(&error)),
         };
+        drop(leases);
     }
 
     /// Playback opened with its own subscription: release the warm hold, if any.

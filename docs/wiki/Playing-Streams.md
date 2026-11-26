@@ -285,8 +285,8 @@ curl "http://127.0.0.1:6878/ace/getstream?content_id=0123456789abcdef0123456789a
   it, and so does the first read of `stat_url`. `status` is `prebuf` while the stream starts and
   `dl` once it runs, so apps that wait for `dl` before opening `playback_url` work. If the start
   fails, `stat_url` answers with `response: null` and an `error`. A stream started this way
-  stays up until you open `playback_url`, stop it with `command_url`, or the session expires
-  (6 hours). An HLS `format=json` request starts the stream straight away.
+  stays up until you open `playback_url`, stop it with `command_url`, or nothing reads `stat_url`
+  for 60 seconds. Reading `stat_url` again after that starts it again. An HLS `format=json` request starts the stream straight away.
 
 ### Control API
 

@@ -604,15 +604,20 @@ pub(super) async fn ace_stat(
         return Json(json!({ "response": null, "error": "invalid or expired playback session" }));
     };
     let (status, failed) = match warm {
-        WarmPoll::Begin { expires_at, cancel } => {
+        WarmPoll::Begin {
+            epoch,
+            expires_at,
+            cancel,
+            idle,
+        } => {
             spawn_warm_start(
                 &s,
                 network.clone(),
-                &id,
-                &token,
+                (&id, &token, epoch),
                 &session_key,
                 expires_at,
                 cancel,
+                idle,
             );
             ("prebuf", None)
         }
@@ -666,16 +671,17 @@ pub(super) async fn ace_stat(
     }))
 }
 
-/// Run a lease's warm start (see `WarmPoll::Begin`) off the stat request. Stop, expiry and
-/// eviction cancel it, dropping a pending open that no other viewer is waiting on.
+/// Run a lease's warm start (see `WarmPoll::Begin`) off the stat request. Stop, expiry,
+/// eviction and the poll idle bound cancel it, dropping a pending open that no other viewer
+/// is waiting on.
 fn spawn_warm_start(
     s: &AppState,
     network: String,
-    id: &str,
-    token: &str,
+    (id, token, epoch): (&str, &str, u64),
     session_key: &str,
     expires_at: Instant,
     mut cancel: tokio::sync::watch::Receiver<bool>,
+    mut idle: tokio::sync::watch::Receiver<()>,
 ) {
     let manager = s.manager.clone();
     let sessions = s.ace_sessions.clone();
@@ -687,6 +693,8 @@ fn spawn_warm_start(
         let started = tokio::select! {
             biased;
             _ = cancel.changed() => return,
+            // Nothing is ever sent: this completes only when the idle bound drops the sender.
+            _ = idle.changed() => return,
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(expires_at)) => return,
             // Reuse the viewer acquisition (also used by cast warm-up) rather than a
             // separate support-pin instantiation: the pin is taken while the transient
@@ -705,7 +713,7 @@ fn spawn_warm_start(
                     .as_str()
             );
         }
-        sessions.settle_warm(&id, &token, started);
+        sessions.settle_warm(&id, &token, epoch, started);
     });
 }
 

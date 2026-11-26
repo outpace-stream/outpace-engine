@@ -310,3 +310,124 @@ async fn a_failed_warm_start_reports_an_in_band_error_once() {
     })
     .await;
 }
+
+/// A short poll idle bound for the idle-release tests; lease deadlines use the real clock.
+fn idle_bounded(pending: bool) -> Warm {
+    warm_state(
+        pending,
+        false,
+        AceSessionStore::default().with_warm_poll_idle(Duration::from_millis(200)),
+    )
+}
+
+async fn wait_for_pins(held: &StreamSession, pins: u64) {
+    for _ in 0..300 {
+        if held.support_pin_count() == pins {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("support pins never reached {pins}");
+}
+
+#[tokio::test]
+async fn an_unpolled_warm_hold_is_released_after_the_poll_idle_bound() {
+    bounded(async {
+        let warm = idle_bounded(false);
+        let lease = mint(&warm.app).await;
+        poll_until(&warm.app, &lease.stat, is_dl).await;
+        let held = session(&warm.state).await.unwrap();
+        assert_eq!(held.support_pin_count(), 1);
+        // No further requests: the lease reaper alone ends the hold.
+        wait_for_pins(&held, 0).await;
+        assert!(!warm.state.ace_sessions.warm_held(&lease.token));
+        assert_eq!(
+            warm.state.ace_sessions.active_count(),
+            1,
+            "the lease itself stays valid"
+        );
+        warm.state
+            .manager
+            .reap_idle_at(Instant::now() + Duration::from_secs(60))
+            .await;
+        assert!(session(&warm.state).await.is_none());
+        warm.state.manager.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn regular_polls_keep_a_warm_hold_past_the_poll_idle_bound() {
+    bounded(async {
+        let warm = idle_bounded(false);
+        let lease = mint(&warm.app).await;
+        poll_until(&warm.app, &lease.stat, is_dl).await;
+        let held = session(&warm.state).await.unwrap();
+        let until = Instant::now() + Duration::from_millis(700);
+        while Instant::now() < until {
+            assert!(is_dl(&get_json(&warm.app, &lease.stat).await));
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        assert!(warm.state.ace_sessions.warm_held(&lease.token));
+        assert_eq!(held.support_pin_count(), 1);
+        assert_eq!(warm.opens.load(Ordering::SeqCst), 1);
+        warm.state.manager.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_poll_after_idle_release_warms_the_lease_again() {
+    bounded(async {
+        let warm = idle_bounded(false);
+        let lease = mint(&warm.app).await;
+        poll_until(&warm.app, &lease.stat, is_dl).await;
+        let held = session(&warm.state).await.unwrap();
+        wait_for_pins(&held, 0).await;
+        warm.state
+            .manager
+            .reap_idle_at(Instant::now() + Duration::from_secs(60))
+            .await;
+        assert!(session(&warm.state).await.is_none());
+
+        let (_, statuses) = poll_until(&warm.app, &lease.stat, is_dl).await;
+        assert_eq!(
+            statuses[0], "prebuf",
+            "the resumed poll starts the source again"
+        );
+        assert!(warm.state.ace_sessions.warm_held(&lease.token));
+        assert_eq!(
+            warm.opens.load(Ordering::SeqCst),
+            2,
+            "exactly one more open"
+        );
+        warm.state.manager.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_poll_idle_bound_cancels_a_pending_warm_start() {
+    bounded(async {
+        let warm = idle_bounded(true);
+        let lease = mint(&warm.app).await;
+        assert_eq!(
+            get_json(&warm.app, &lease.stat).await["response"]["status"],
+            "prebuf"
+        );
+        // Past the bound with no polls, the reaper cancels the pending open.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(warm.opens.load(Ordering::SeqCst), 1);
+        warm.release.notify_one();
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            warm.state.manager.list().await.is_empty(),
+            "nothing published"
+        );
+        assert_eq!(warm.state.ace_sessions.active_count(), 1);
+        warm.state.manager.shutdown().await;
+    })
+    .await;
+}
