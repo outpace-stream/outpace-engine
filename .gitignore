@@ -13,3 +13,7 @@
 
 # Cached Inter fonts for tools/readme-hero (downloaded and checksum-verified on demand)
 tools/readme-hero/.fonts/
+
+# Python bytecode from running tool tests
+__pycache__/
+*.pyc
