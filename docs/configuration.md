@@ -33,6 +33,14 @@ Other environment variables parsed by the daemon include:
 - `OUTPACE_BROADCAST_SOURCES` - startup source JSON map, default `{}`; at most 64 names,
   256 KiB UTF-8, URLs up to 8,192 bytes. Duplicate/unknown fields fail startup. Source timing
   defaults: connect 5s, read 15s, reconnect initial 1s, maximum 30s; see the native API limits.
+- `OUTPACE_BROADCAST_CATALOG_REGISTER` - opt-in AceStream catalog registration for broadcasts,
+  default off; strict boolean. Once a public broadcast is announcing, the daemon asks the
+  catalog whether its descriptor is known and uploads it if not, so the catalog-assigned
+  `acestream://` id plays on stock clients. This publishes the transport descriptor (trackers
+  and public key) to the catalog operator, with no unregister call. Failures retry with
+  exponential backoff from 30 seconds up to 30 minutes. Never runs in private peer mode. The raw
+  `PUT /broadcast/<name>` response reports `catalog_content_id`, `null` until registration
+  succeeds.
 - `OUTPACE_ALLOW_NON_GLOBAL_BROADCAST_SOURCE` - independent operator-only source address
   opt-in; only exact `1` enables it, default off. It cannot be set in an API request.
 - `OUTPACE_DATA_DIR` - persistent identity/cache root, default platform data dir
@@ -138,9 +146,16 @@ Other environment variables parsed by the daemon include:
 - `OUTPACE_SUPPORT_SOURCES` - opt-in bounded JSON declarations for autonomous public live
   support. Unset is off; shares provider admission with playback and creates no viewers.
   See [support operation](support-operation.md) for controls and cleanup semantics.
-- `OUTPACE_ENABLE_SEEDING` - reciprocal upload gate over outbound leech connections
-  (answering peers' chunk requests). Self-announce is gated on `OUTPACE_ENABLE_INBOUND`.
-  Outbound reciprocal serving is outside the inbound admission/coordinator budgets.
+- `OUTPACE_METRICS` - serves Prometheus text metrics at `GET /metrics` on the HTTP bind,
+  default off; strict boolean. Off, `/metrics` returns `404`. See the
+  [route reference](native-api.md#http-routes).
+- `OUTPACE_SEED_DEBUG` - when present with any value (even empty), logs every inbound seeding
+  message as `[seed-session]` lines. Very verbose; diagnostics only. Unlike the boolean gates,
+  `0` does not turn it off: unset it instead.
+- `OUTPACE_ENABLE_SEEDING` (default: on) - reciprocal upload gate over outbound leech
+  connections (answering peers' chunk requests); strict boolean. Self-announce is gated on
+  `OUTPACE_ENABLE_INBOUND`. Outbound reciprocal serving is outside the inbound
+  admission/coordinator budgets.
 - `OUTPACE_ENABLE_INBOUND` (default: on) - inbound peer serving (S2) gate. On by default,
   intentionally matching the Acestream engine's out-of-the-box behavior: a full P2P participant
   that binds its peer port (`OUTPACE_PEER_LISTEN`), accepts inbound peers, seeds, and
@@ -153,12 +168,35 @@ Other environment variables parsed by the daemon include:
   normal bridge-mode containers should use a manual router-to-Docker-host TCP forward.
 - `OUTPACE_PORT_MAP_BACKEND` - `auto`, `upnp`, `natpmp`, or `none`; default `auto`.
 - `OUTPACE_PORT_MAP_EXTERNAL_PORT` - optional external TCP port requested from the gateway.
+- `OUTPACE_PROXY` - optional SOCKS5 proxy endpoint, `socks5://[user:password@]host:port`
+  (`socks5h://` is accepted as the same thing; both resolve target names at the proxy). An IPv6
+  host is bracketed; port must be nonzero; credentials are percent-decoded and each must be
+  1-255 bytes; no path, query or fragment. Unset or empty means no proxy. Invalid values fail
+  startup without echoing the value, and the endpoint is never logged with its credentials.
+  Credentials sent to a non-loopback proxy travel unencrypted and are warned about at startup.
+  Setting it while `OUTPACE_PROXY_MODE` is `off` logs that it is unused.
+- `OUTPACE_PROXY_MODE` - `off` (default), `on` or `fallback`; unset or empty means `off`, other
+  values fail startup. `on` and `fallback` require `OUTPACE_PROXY`. `on` proxies outgoing peer
+  connections, UDP tracker announces (SOCKS5 `UDP ASSOCIATE`, turned off if the proxy refuses
+  it) and catalog/search requests from the start, and turns inbound serving and port mapping off;
+  an explicit `OUTPACE_ENABLE_INBOUND=1` or `OUTPACE_ENABLE_PORT_MAPPING=1` is a startup
+  conflict, and `outpace broadcast` refuses to run. `fallback` stays direct until a live start
+  finds no peers or none connects within 10 seconds, then proxies every later peer,
+  tracker, catalog and search connection engine-wide until restart; connections already open
+  stay direct. Transport-file URLs, HLS origins and broadcast pull sources are never proxied.
+  While the proxy is active the DHT is off, the advertised listen port is `0` and there is no
+  self-announce. `GET /network-policy` reports the mode and current path, never the endpoint.
 - `OUTPACE_MANAGED_HLS` - serve descriptors that resolve to an HTTP(S) HLS origin through a
   bounded local relay, default off. Accepts exactly `1`, `true`, `0`, or `false`; anything
   else fails startup. Off, playback routes redirect the player straight to the origin. On,
   the daemon itself fetches origin playlists and media (public destinations only, with DNS
   pinning, deadlines and byte limits). With `OUTPACE_HISTORY_SECONDS` also set, qualifying TS
   origins gain bounded replay. See [origin HLS](native-api.md#origin-hls).
+- `OUTPACE_ENABLE_CAST` - adds the `/cast/*` routes for DLNA/UPnP media renderers, default
+  off; strict boolean. Off, those paths return `404`. Discovery runs only when
+  `GET /cast/targets` asks for it and is cached for 60 seconds (`?refresh=1` searches again);
+  there is no background discovery. `play` needs an `OUTPACE_BIND` the renderer can reach: a
+  loopback bind fails with `409` `loopback_bind`. See the [cast routes](native-api.md#casting).
 - `OUTPACE_ACE_COMPAT` - enables the supported Ace HTTP subset, default on. Accepts
   exactly `1`, `true`, `0`, or `false`. A present value takes precedence over the legacy
   alias, including `0`/`false`; an empty, malformed, or non-Unicode selected value fails
@@ -166,6 +204,38 @@ Other environment variables parsed by the daemon include:
 - `OUTPACE_EXPERIMENTAL_ACE_COMPAT` - deprecated fallback, parsed only when
   `OUTPACE_ACE_COMPAT` is unset, with the same strict boolean rules. Rename it to
   `OUTPACE_ACE_COMPAT` when migrating; an unused invalid alias is ignored.
+- `OUTPACE_COMPAT_ACESTREAM_SERVICES` - enables `GET /search` and its external stream-name index
+  requests, default off; strict boolean. Independent of `OUTPACE_ACE_COMPAT`. Enabling it in
+  private peer mode fails startup. Queries and the server address are exposed to the external
+  plain-HTTP search service; see [stream search](native-api.md#stream-search).
+- `OUTPACE_ACESTREAM_IDENTITY` - present one official Linux AceStream engine profile to peers,
+  trackers, search, catalog and UPnP, default off; strict boolean. Off, the
+  `OUTPACE_ACESTREAM_IDENTITY_*` overrides below are not read at all. On, every override is
+  validated at startup and a bad value fails startup naming the variable; non-Unicode values
+  are errors.
+- `OUTPACE_ACESTREAM_IDENTITY_VERSION` - claimed engine version, default `3.2.11`. Exactly
+  `X.Y.Z` with one- or two-digit parts, `X` 1-9 and `Y`/`Z` 0-99; the numeric code is
+  `X*1000000 + Y*10000 + Z*100`. Used by handshakes, search, catalog and the User-Agent.
+- `OUTPACE_ACESTREAM_IDENTITY_PLATFORM` - claimed platform, default `linux`; only `linux` is
+  accepted.
+- `OUTPACE_ACESTREAM_IDENTITY_DEVICE_ID` - 40-hex device id (case-insensitive). When unset, a
+  random id is generated once and persisted as 20 raw bytes in
+  `<OUTPACE_DATA_DIR>/acestream-device-id` (mode `0600` on Unix); a file of the wrong length
+  fails startup instead of being replaced.
+- `OUTPACE_ACESTREAM_IDENTITY_HARDWARE_KEY` - 40-hex hardware key (case-insensitive). Default is
+  derived the way the official engine does on Linux, from `MemTotal` in `/proc/meminfo`; hosts
+  where that cannot be read must set it or startup fails.
+- `OUTPACE_ACESTREAM_IDENTITY_ASN` / `OUTPACE_ACESTREAM_IDENTITY_COUNTRY` - autonomous system
+  number (positive 32-bit integer, optional `AS`/`as` prefix) and ISO 3166 alpha-2 country (two
+  ASCII letters, case-insensitive). Set both or neither: one alone fails startup. With both set
+  the location lookup is skipped; otherwise, once two distinct peers echo the same globally
+  routable address, one bounded RIPEstat lookup fills them in. It runs at most once per process: a failure
+  (timeout, error status or unusable answer) leaves both unset and is not retried. It is not
+  scheduled while a proxy is active, but a lookup already scheduled when `fallback` engages
+  still goes direct.
+- `OUTPACE_ACESTREAM_IDENTITY_USER_AGENT` - User-Agent for search and AceStream web hosts,
+  default the engine's fixed User-Agent for the claimed version. 1-256 bytes of printable ASCII.
+  Catalog requests keep a per-request Chrome User-Agent.
 - `OUTPACE_ACE_PEERS` - comma-separated bootstrap peer list for the live path.
 - `OUTPACE_TRACKERS` - comma-separated `scheme://…` (typically `udp://host:port/announce`)
   tracker URLs minted into fresh broadcast descriptors for every producer path. Self-announce
@@ -225,6 +295,11 @@ In disk mode each served stream keeps its pieces under
 The directory is removed automatically when the stream is torn down (leech consumer disconnects,
 broadcast `DELETE`, or process exit), and a dedicated cache root is wiped on startup only if it
 is empty or contains `.outpace-cache`, so no per-stream directories accumulate.
+
+Variables named `OUTPACE_TEST_*`, `OUTPACE_RUN_*` or `OUTPACE_DHT_COMPARE_*`, and
+`OUTPACE_CAST_LIVE`, belong to the test suite and harnesses and do nothing in normal operation.
+`tools/docs/check_reference.py` checks that every other `OUTPACE_*` name the daemon source
+reads is documented on this page or in a page it delegates to.
 
 ## Provider session admission
 
