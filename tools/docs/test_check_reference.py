@@ -90,6 +90,21 @@ class LexingTests(unittest.TestCase):
         source = '.route(\n    /* ' + "x" * 200 + ' */\n    "/undocumented",\n    get(h),\n)'
         self.assertEqual(cr.route_paths(source), ["/undocumented"])
 
+    def test_route_call_with_spacing_and_comments_before_its_paren(self):
+        source = 'Router::new().route /* ' + "x" * 100 + ' */ (\n "/new", get(h))'
+        self.assertEqual(cr.route_paths(source), ["/new"])
+
+    def test_spaced_cfg_test_module_is_skipped_but_later_code_is_not(self):
+        source = '#[cfg( test )] mod tests { const A: &str = "OUTPACE_FIXTURE_ONLY"; }\nconst B: &str = "OUTPACE_REAL";'
+        bodies = [body for _, body in cr.string_literals(source)]
+        self.assertEqual(bodies, ["OUTPACE_REAL"])
+
+    def test_route_must_not_match_as_the_tail_of_a_longer_path(self):
+        self.assertFalse(cr.mentions("| `GET /admin/healthz` |", "/healthz"))
+        self.assertTrue(cr.mentions("| `GET /healthz` |", "/healthz"))
+        self.assertTrue(cr.mentions("`GET /streams/<network>/<id>`", "/streams/"))
+        self.assertTrue(cr.mentions("`GET /streams` lists", "/streams"))
+
     def test_string_not_first_route_argument_is_not_a_route(self):
         self.assertEqual(cr.route_paths('.route("/a", get(h)).with("/not-a-route")'), ["/a"])
 

@@ -181,8 +181,9 @@ Other environment variables parsed by the daemon include:
   it) and catalog/search requests from the start, and turns inbound serving and port mapping off;
   an explicit `OUTPACE_ENABLE_INBOUND=1` or `OUTPACE_ENABLE_PORT_MAPPING=1` is a startup
   conflict, and `outpace broadcast` refuses to run. `fallback` stays direct until a live start
-  finds no peers or none connects within 10 seconds, then proxies every later connection
-  engine-wide until restart; connections already open stay direct.
+  finds no peers or none connects within 10 seconds, then proxies every later peer,
+  tracker, catalog and search connection engine-wide until restart; connections already open
+  stay direct. Transport-file URLs, HLS origins and broadcast pull sources are never proxied.
   While the proxy is active the DHT is off, the advertised listen port is `0` and there is no
   self-announce. `GET /network-policy` reports the mode and current path, never the endpoint.
 - `OUTPACE_MANAGED_HLS` - serve descriptors that resolve to an HTTP(S) HLS origin through a
@@ -228,8 +229,10 @@ Other environment variables parsed by the daemon include:
   number (positive 32-bit integer, optional `AS`/`as` prefix) and ISO 3166 alpha-2 country (two
   ASCII letters, case-insensitive). Set both or neither: one alone fails startup. With both set
   the location lookup is skipped; otherwise, once two distinct peers echo the same globally
-  routable address, one bounded RIPEstat lookup fills them in. It is not scheduled while a proxy is active, but
-  a lookup already scheduled when `fallback` engages still goes direct.
+  routable address, one bounded RIPEstat lookup fills them in. It runs at most once per process: a failure
+  (timeout, error status or unusable answer) leaves both unset and is not retried. It is not
+  scheduled while a proxy is active, but a lookup already scheduled when `fallback` engages
+  still goes direct.
 - `OUTPACE_ACESTREAM_IDENTITY_USER_AGENT` - User-Agent for search and AceStream web hosts,
   default the engine's fixed User-Agent for the claimed version. 1-256 bytes of printable ASCII.
   Catalog requests keep a per-request Chrome User-Agent.

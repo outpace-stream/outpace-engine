@@ -67,9 +67,9 @@ LEXEME = re.compile(
     re.S | re.X,
 )
 CFG_TEST_MOD = re.compile(
-    r"\#\[cfg\(test\)\]\s*(?:\#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{"
+    r"\#\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:\#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{"
 )
-ROUTE_CALL = re.compile(r"\.(?:route|nest|route_service|nest_service)\($")
+ROUTE_METHODS = frozenset({"route", "nest", "route_service", "nest_service"})
 BLOCK_DELIMITER = re.compile(r"/\*|\*/")
 LINK = re.compile(r"\]\(([^)\s#]+)(?:#[^)\s]*)?\)")
 
@@ -149,13 +149,30 @@ def route_paths(source: str) -> list[str]:
     for at, body in string_literals(source):
         if not body.startswith("/"):
             continue
-        # Skip whitespace and masked comments back to the call, however long they are.
-        before = at
-        while before and masked[before - 1].isspace():
-            before -= 1
-        if ROUTE_CALL.search(masked, max(0, before - 32), before):
+        if is_first_route_argument(masked, at):
             paths.append(body)
     return paths
+
+
+def is_first_route_argument(masked: str, at: int) -> bool:
+    """Whether the `(` before `at` opens a router call, skipping masked comments of any length."""
+    i = skip_space_back(masked, at)
+    if not i or masked[i - 1] != "(":
+        return False
+    i = skip_space_back(masked, i - 1)
+    start = i
+    while start and (masked[start - 1].isalnum() or masked[start - 1] == "_"):
+        start -= 1
+    if masked[start:i] not in ROUTE_METHODS:
+        return False
+    start = skip_space_back(masked, start)
+    return bool(start) and masked[start - 1] == "."
+
+
+def skip_space_back(masked: str, i: int) -> int:
+    while i and masked[i - 1].isspace():
+        i -= 1
+    return i
 
 
 def rust_sources(root: Path) -> list[Path]:
@@ -200,9 +217,10 @@ def route_key(route: str) -> str:
 
 
 def mentions(text: str, key: str) -> bool:
-    if key.endswith("/"):
-        return key in text
-    return re.search(re.escape(key) + r"(?![A-Za-z0-9_.-])", text) is not None
+    """Whether `key` appears as a whole route, not as the tail of a longer path."""
+    start = r"(?<![A-Za-z0-9_.\-/])"
+    end = "" if key.endswith("/") else r"(?![A-Za-z0-9_.-])"
+    return re.search(start + re.escape(key) + end, text) is not None
 
 
 def linked_docs(doc: Path) -> set[Path]:

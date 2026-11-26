@@ -624,9 +624,10 @@ service on the LAN and tell one to play a live stream. The user guide is the
   (an optional `.ts` suffix is stripped). It holds a viewer on the shared live session while the
   renderer is told about it, then returns `target`, `network`, the canonical `id` and the
   stream `url`. Each `play` mints a new random `/cast/s/<token>.ts` URL; `stop`, a `play` that
-  fails after validation, and a new valid `play` to the same renderer retire the old one and end
-  any response still open. A `play` rejected by validation (wrong `Content-Type`, malformed
-  JSON, unknown `network` or invalid `id`) returns `400` and leaves the current cast untouched.
+  fails while controlling the renderer, and a successful `play` to the same renderer retire the
+  old one and end any response still open. A `play` rejected before that (validation `400`s,
+  an unknown target, or a stream that cannot start) returns its error and leaves the current
+  cast untouched.
 - `GET /cast/targets/<target>/status` returns `target`, `transport_state`, `transport_status`,
   `speed`, a `cast` object (`network`, `id`, `url`, `stream_connections`) or `null`, and
   `fetching`.
