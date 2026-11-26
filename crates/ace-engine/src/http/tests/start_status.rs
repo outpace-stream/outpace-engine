@@ -122,6 +122,8 @@ async fn native_start_failures_return_typed_json_and_status_retains_them() {
             assert_eq!(status_body["phase"], "failed", "{id}: {status_body}");
             assert_eq!(status_body["error"], body["error"], "{id}");
             assert_eq!(status_body["peers"], 0);
+            assert_eq!(status_body["clients"], 0);
+            assert_eq!(status_body["client_list"], json!([]));
             assert_eq!(status_body["network"], "fail");
             assert_eq!(status_body["id"], id);
         }

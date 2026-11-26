@@ -4,8 +4,9 @@
 use crate::provider::{SourceStats, StatsHandle, TsSource};
 use ace_swarm::types::StreamMetadata;
 use bytes::Bytes;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use tokio::sync::{broadcast, watch, Mutex};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,7 +23,9 @@ pub enum StreamEvent {
 /// A live session: pulls from one `TsSource` and broadcasts TS chunks to subscribers.
 pub struct StreamSession {
     tx: broadcast::WeakSender<StreamEvent>,
-    subscribers: Arc<AtomicU64>,
+    /// Every live [`Subscription`]: the subscriber count is this registry's length, so the
+    /// count and the client list can never disagree.
+    clients: Arc<std::sync::Mutex<ClientRegistry>>,
     support_pins: AtomicU64,
     /// Set once by the pump when the first media chunk leaves the session.
     output_started: Arc<AtomicBool>,
@@ -44,10 +47,61 @@ impl Drop for StreamSession {
     }
 }
 
-/// A subscription that decrements the live subscriber count on drop.
+/// Most client entries a [`ClientSnapshot`] carries. The count stays exact past it; only the
+/// reported list is truncated (oldest subscriptions first).
+pub const CLIENT_LIST_CAP: usize = 64;
+
+/// One subscription as reported by the HTTP API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientInfo {
+    /// TCP peer of the HTTP request that opened the subscription, canonicalized so an
+    /// IPv4-mapped IPv6 peer reads as IPv4. `None` until the HTTP layer records it, or for a
+    /// connection served without peer information.
+    pub address: Option<IpAddr>,
+    /// Unix seconds when the subscription was opened.
+    pub since: u64,
+}
+
+/// A consistent `(count, list)` view of a session's subscriptions, taken under one lock.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClientSnapshot {
+    pub count: u64,
+    /// The `count` oldest subscriptions, at most [`CLIENT_LIST_CAP`] of them.
+    pub clients: Vec<ClientInfo>,
+}
+
+/// Entries are appended in subscription order. There is one entry per live
+/// [`Subscription`], each of which already owns a broadcast receiver, so the registry grows
+/// only with state that exists anyway; reporting is capped separately.
+#[derive(Default)]
+struct ClientRegistry {
+    next_id: u64,
+    entries: Vec<(u64, ClientInfo)>,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// A subscription that removes its client entry (and so decrements the live subscriber
+/// count) on drop.
 pub struct Subscription {
     pub rx: broadcast::Receiver<StreamEvent>,
-    count: Arc<AtomicU64>,
+    clients: Arc<std::sync::Mutex<ClientRegistry>>,
+    id: u64,
+}
+
+impl Subscription {
+    /// Record the peer address of the HTTP request that owns this subscription. Called once
+    /// per subscription, never per chunk.
+    pub fn set_client_address(&self, address: IpAddr) {
+        let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, info)) = clients.entries.iter_mut().find(|(id, _)| *id == self.id) {
+            info.address = Some(address.to_canonical());
+        }
+    }
 }
 
 /// Logical support ownership, separate from playback subscriptions.
@@ -69,7 +123,10 @@ impl SupportPin {
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        self.count.fetch_sub(1, Ordering::SeqCst);
+        let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = clients.entries.iter().position(|(id, _)| *id == self.id) {
+            clients.entries.remove(index);
+        }
     }
 }
 
@@ -172,7 +229,7 @@ impl StreamSession {
         control.transfer();
         Arc::new(StreamSession {
             tx: weak_tx,
-            subscribers: Arc::new(AtomicU64::new(0)),
+            clients: Arc::default(),
             support_pins: AtomicU64::new(0),
             output_started,
             stats,
@@ -218,10 +275,23 @@ impl StreamSession {
     }
 
     pub fn subscribe(&self) -> Subscription {
-        self.subscribers.fetch_add(1, Ordering::SeqCst);
+        let rx = self.raw_receiver();
+        let since = unix_now();
+        let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = clients.next_id;
+        clients.next_id += 1;
+        clients.entries.push((
+            id,
+            ClientInfo {
+                address: None,
+                since,
+            },
+        ));
+        drop(clients);
         Subscription {
-            rx: self.raw_receiver(),
-            count: self.subscribers.clone(),
+            rx,
+            clients: self.clients.clone(),
+            id,
         }
     }
 
@@ -236,7 +306,22 @@ impl StreamSession {
     }
 
     pub fn subscriber_count(&self) -> u64 {
-        self.subscribers.load(Ordering::SeqCst)
+        let clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
+        clients.entries.len() as u64
+    }
+
+    /// The subscriber count and up to [`CLIENT_LIST_CAP`] client entries, read together.
+    pub fn client_snapshot(&self) -> ClientSnapshot {
+        let clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
+        ClientSnapshot {
+            count: clients.entries.len() as u64,
+            clients: clients
+                .entries
+                .iter()
+                .take(CLIENT_LIST_CAP)
+                .map(|(_, info)| *info)
+                .collect(),
+        }
     }
 
     /// A receiver that does NOT count as a client (used by internal consumers like the HLS
@@ -505,5 +590,70 @@ mod tests {
             sub.rx.recv().await.unwrap(),
             StreamEvent::Data(Bytes::from_static(b"after"))
         );
+    }
+
+    fn pending_session() -> Arc<StreamSession> {
+        struct Pending;
+        #[async_trait::async_trait]
+        impl TsSource for Pending {
+            async fn next(&mut self) -> Option<Bytes> {
+                std::future::pending().await
+            }
+            fn stats(&self) -> SourceStats {
+                SourceStats::default()
+            }
+        }
+        StreamSession::start(Box::new(Pending), 4)
+    }
+
+    #[tokio::test]
+    async fn client_entries_follow_subscription_lifetime_and_order() {
+        let session = pending_session();
+        let first = session.subscribe();
+        first.set_client_address("::ffff:192.168.1.20".parse().unwrap());
+        let unaddressed = session.subscribe();
+        let last = session.subscribe();
+        last.set_client_address("127.0.0.1".parse().unwrap());
+
+        let snapshot = session.client_snapshot();
+        assert_eq!(snapshot.count, 3);
+        assert_eq!(snapshot.count, session.subscriber_count());
+        let addresses: Vec<_> = snapshot.clients.iter().map(|c| c.address).collect();
+        assert_eq!(
+            addresses,
+            [
+                Some("192.168.1.20".parse().unwrap()),
+                None,
+                Some("127.0.0.1".parse().unwrap())
+            ]
+        );
+        assert!(snapshot.clients.iter().all(|c| c.since > 0));
+
+        drop(unaddressed);
+        let snapshot = session.client_snapshot();
+        assert_eq!(snapshot.count, 2);
+        assert_eq!(snapshot.clients.len(), 2);
+        assert_eq!(
+            snapshot.clients[1].address,
+            Some("127.0.0.1".parse().unwrap())
+        );
+        drop((first, last));
+        assert_eq!(session.client_snapshot(), ClientSnapshot::default());
+        assert_eq!(session.subscriber_count(), 0);
+        session.stop().await;
+    }
+
+    #[tokio::test]
+    async fn client_list_is_capped_while_the_count_stays_exact() {
+        let session = pending_session();
+        let subs: Vec<_> = (0..CLIENT_LIST_CAP + 5)
+            .map(|_| session.subscribe())
+            .collect();
+        let snapshot = session.client_snapshot();
+        assert_eq!(snapshot.count, (CLIENT_LIST_CAP + 5) as u64);
+        assert_eq!(snapshot.clients.len(), CLIENT_LIST_CAP);
+        drop(subs);
+        assert_eq!(session.client_snapshot().count, 0);
+        session.stop().await;
     }
 }

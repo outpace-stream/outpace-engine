@@ -63,6 +63,7 @@ A status response looks like this:
   "phase": "playing",
   "error": null,
   "clients": 1,
+  "client_list": [{"address": "192.168.1.20", "since": 1763100000}],
   "peers": 4,
   "bitrate": 2450000,
   "buffer_ms": 6200,
@@ -78,7 +79,8 @@ A status response looks like this:
 | --- | --- |
 | `phase` | Where the start is: `resolving`, `connecting`, `buffering`, `playing` or `failed`. See below. |
 | `error` | `{"code": ..., "message": ...}` when `phase` is `failed`, otherwise `null`. |
-| `clients` | Direct MPEG-TS viewers. HLS viewers don't add to it. |
+| `clients` | Viewers of the stream: direct MPEG-TS players and compatibility HLS leases. Native HLS (`.m3u8`) viewers don't add to it. See [Who is watching](#who-is-watching). |
+| `client_list` | One `{"address", "since"}` entry per client, oldest first, at most 64. See [Who is watching](#who-is-watching). |
 | `peers` | Connected upstream peers. |
 | `bitrate` | Measured incoming media rate in bits per second, over about five seconds. |
 | `buffer_ms` | Media queued on the **server**. It isn't the player's buffer and can correctly be near zero. |
@@ -101,8 +103,8 @@ A status response looks like this:
 
 The status route answers from the moment a playback URL is opened, before the stream exists.
 While it is still `resolving` or `connecting`, and for about 60 seconds after a start
-`failed`, the response carries only `network`, `id`, `phase`, `error`, `clients` (`0`) and
-`peers` (`0`):
+`failed`, the response carries only `network`, `id`, `phase`, `error`, `clients` (`0`),
+`client_list` (`[]`) and `peers` (`0`):
 
 ```json
 {
@@ -111,6 +113,7 @@ While it is still `resolving` or `connecting`, and for about 60 seconds after a 
   "phase": "failed",
   "error": { "code": "no_peers", "message": "no peer is sharing this stream" },
   "clients": 0,
+  "client_list": [],
   "peers": 0
 }
 ```
@@ -121,6 +124,29 @@ old record. A stopped or cancelled start leaves none.
 The status route never starts a stream. It returns `404` when the stream isn't running and
 has no recent start attempt. Use it (and `/streams`) for monitoring. **Don't poll a playback
 URL as a health check**, because that starts or keeps alive a real stream.
+
+### Who is watching
+
+`GET /streams` and each stream's `/status` list the devices watching it in `client_list`,
+next to the `clients` count:
+
+```json
+{"network": "ace", "id": "cid:0123456789abcdef0123456789abcdef01234567", "clients": 2,
+ "client_list": [{"address": "192.168.1.20", "since": 1763100000},
+                 {"address": "127.0.0.1", "since": 1763100042}]}
+```
+
+- `address` is the IP address the player connected from. Outpace doesn't read
+  `X-Forwarded-For`: behind a reverse proxy, every viewer shows the proxy's address.
+- `since` is when that viewer started, in Unix seconds.
+- A direct MPEG-TS player is one entry for as long as it stays connected. An
+  `/ace/manifest.m3u8` HLS viewer is one entry for its playback lease, recorded from the
+  request that opened it, and leaves when the lease is stopped or expires. A TV you [cast](Casting)
+  to is listed under the TV's address. Native `.m3u8` viewers aren't listed.
+- At most 64 entries are listed; `clients` stays exact beyond that.
+
+Anyone who can reach the HTTP API can see these addresses. Keep `OUTPACE_BIND` on loopback or a
+trusted network, as [Deployment](Deployment) recommends.
 
 ### Stopping a stream
 

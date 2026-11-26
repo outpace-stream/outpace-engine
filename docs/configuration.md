@@ -23,7 +23,10 @@ Other environment variables parsed by the daemon include:
   resolution after catalog failure, default off. Set to `1` on the receiving daemon or
   standalone `play` process for Outpace broadcast Ace links from another daemon. Applies to
   live and VOD; peer results do not populate the catalog-provenance infohash index.
-- `OUTPACE_BIND` - HTTP bind address, default `127.0.0.1:6878`.
+- `OUTPACE_BIND` - HTTP bind address, default `127.0.0.1:6878`. The API has no
+  authentication, and `/streams` lists the IP address of every client watching each stream
+  ([stream clients](native-api.md#stream-clients)), so anyone who can reach this address can
+  see who is watching.
 - `OUTPACE_RTMP_BIND` - RTMP ingest bind address, default `127.0.0.1:1935`.
 - `OUTPACE_BROADCAST_OPTIONS` - strict named startup profile JSON, default `{}`; at most
   64 names and 262144 UTF-8 bytes. Optional title, bitrate in bytes/second, piece length,

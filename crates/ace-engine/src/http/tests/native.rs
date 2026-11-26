@@ -351,6 +351,7 @@ async fn m3u8_playlist_omits_icy_headers() {
 async fn m3u8_stalled_playlist_returns_retryable_503() {
     let response = stream_file_with_hls_timeout(
         State(stalled_hls_state()),
+        ClientAddr(None),
         Path(("stalled".to_string(), "chan.m3u8".to_string())),
         Duration::from_millis(1),
     )
