@@ -81,21 +81,31 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       # The concurrency group serializes runs but admits them in the order they start
-      # waiting, not commit order. Deploy only while this commit is still the tip of
-      # main; otherwise a newer run exists and will deploy the newer docs.
+      # waiting, not commit order. If main has moved on, deploy anyway when no newer
+      # commit touches the site's inputs (the build would be identical, and the path
+      # filter starts no newer run); skip only when a newer commit does, since that
+      # commit's own run publishes the newer docs. Keep SITE_PATHS in sync with `on:`.
       - name: Skip a superseded commit
         id: current
         env:
           GH_TOKEN: ${{ github.token }}
+          SITE_PATHS: "^(docs/wiki/|tools/site/|tools/wiki/|docs/assets/social-preview\\.png$|\\.github/workflows/site\\.yml$)"
         run: |
           set -euo pipefail
           tip="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
-          if [[ "$tip" == "$GITHUB_SHA" ]]; then
-            echo "deploy=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::${GITHUB_SHA} is no longer the tip of main (${tip}); not deploying."
-            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          deploy=true
+          if [[ "$tip" != "$GITHUB_SHA" ]]; then
+            compare="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${tip}")"
+            status="$(jq -r .status <<<"$compare")"
+            changed="$(jq -r '.files[]?.filename' <<<"$compare" | grep -E "$SITE_PATHS" || true)"
+            # The compare API lists at most 300 files; a longer list counts as changed.
+            if [[ "$status" != "ahead" || -n "$changed" ]] \
+                || (( $(jq '.files | length' <<<"$compare") >= 300 )); then
+              deploy=false
+              echo "::notice::main moved to ${tip} with site changes; its run deploys instead."
+            fi
           fi
+          echo "deploy=${deploy}" >> "$GITHUB_OUTPUT"
       - name: Deploy to GitHub Pages
         if: steps.current.outputs.deploy == 'true'
         id: deployment
