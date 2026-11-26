@@ -33,8 +33,10 @@ Outpace listens on `127.0.0.1:6878` by default, which only works when Jellyfin r
 machine **outside** a container. In every other case, bind Outpace to an address Jellyfin can
 reach:
 
-- **Different hosts:** set `OUTPACE_BIND=<lan-address>:6878` and firewall the port to the
-  Jellyfin host. The API has no authentication. See
+- **Different hosts:** make Outpace listen on the LAN and firewall the port to the Jellyfin
+  host. Run directly, set `OUTPACE_BIND=<lan-address>:6878`. With the shipped `compose.yml`,
+  leave `OUTPACE_BIND` alone and set `OUTPACE_HTTP_HOST=<lan-address>`, which publishes the
+  container's port there. The API has no authentication. See
   [Deployment](Deployment#exposing-the-api-safely).
 - **Jellyfin in Docker, Outpace on the host:** bind Outpace to the Docker bridge address (for
   example `172.17.0.1:6878`) and use that address in the playlist. `127.0.0.1` inside the

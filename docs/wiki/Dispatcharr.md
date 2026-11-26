@@ -142,6 +142,12 @@ Both services share the project's default network, so Dispatcharr reaches Outpac
 `ports` entry only controls access from outside Docker. The tested setup used a dedicated Docker
 network and a fixed address rather than this file, but the connection is the same plain HTTP.
 
+Dispatcharr is published on `127.0.0.1:9191` here, so only the Docker host can reach its web UI
+and M3U output. For Jellyfin, Plex or a player on another machine, either publish it on the
+host's LAN address (`"192.168.1.10:9191:9191"`) and firewall that port to your own devices, or
+keep it on loopback behind an authenticating reverse proxy, as for Outpace in
+[Deployment](Deployment#exposing-the-api-safely).
+
 ## Related pages
 
 - [Playing Streams](Playing-Streams): URL forms, status and errors.

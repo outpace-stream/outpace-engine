@@ -33,9 +33,13 @@ LibreELEC wasn't tested.
 This is Kodi's own M3U client. It needs no Ace Stream add-on and talks only to Outpace's native
 URLs.
 
-1. Make Outpace reachable from the Kodi device: set `OUTPACE_BIND` to the Outpace machine's LAN
-   address, and firewall the port to your own devices. The API has no authentication; see
-   [Deployment](Deployment#exposing-the-api-safely).
+1. Make Outpace reachable from the Kodi device, and firewall the port to your own devices. The
+   API has no authentication; see [Deployment](Deployment#exposing-the-api-safely).
+   - Outpace run directly: set `OUTPACE_BIND` to the Outpace machine's LAN address, for example
+     `OUTPACE_BIND=192.168.1.10:6878`.
+   - The shipped `compose.yml`: leave `OUTPACE_BIND` alone (it is `0.0.0.0:6878` inside the
+     container) and set `OUTPACE_HTTP_HOST` to the host's LAN address, which publishes the port
+     there instead of on loopback.
 2. Write a playlist with one native URL per channel:
 
    ```text
@@ -64,7 +68,9 @@ your own tools, matched by `tvg-id`. Without one, channels still play.
 ## Opening a URL directly
 
 Kodi plays a native Outpace URL like any other network stream, from a `.strm` file, a favourite
-or JSON-RPC:
+or JSON-RPC. JSON-RPC over HTTP needs Kodi's web server: turn on **Settings → Services →
+Control → Allow remote control via HTTP**, use the port set there (8080 by default), and add
+`-u user:password` to the command below if you set a username and password.
 
 ```bash
 curl -s -H 'Content-Type: application/json' http://kodi-host:8080/jsonrpc -d '{
