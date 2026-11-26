@@ -141,11 +141,39 @@ jobs:
       - name: Test DHT live-boundary policy
         run: python3 -m unittest discover -s tools/dhtcompare -p 'test_live_[rf]*.py' -v
 
+      # Offline worker launch policy and record validation; run_offline is mocked.
+      - name: Test DHT comparison worker records and launch policy
+        run: python3 -m unittest discover -s tools/dhtcompare -p 'test_worker*.py' -v
+
+      # Ubuntu's AppArmor policy blocks unprivileged user namespaces by default. The two
+      # namespace suites below need them: each creates its own user, network and PID
+      # namespace with loopback only, so nothing reaches the runner's network.
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Test DHT comparison offline confinement
+        run: python3 -m unittest discover -s tools/dhtcompare -p test_isolation.py -v
+
+      # Real-namespace live-boundary cases with no candidate binaries and no public traffic.
+      - name: Test DHT live-boundary namespace
+        run: python3 -m unittest discover -s tools/dhtcompare -p test_live.py -v
+
+      # Mocked daemon processes and loopback HTTP only.
+      - name: Test memory soak session cycles
+        run: python3 -m unittest discover -s tools/memsoak -v
+
       - name: Test release archive verification
         run: python3 -m unittest discover -s tools/release -v
 
       - name: Test CI prerequisite orchestration
         run: python3 -m unittest discover -s tools/ci -v
+
+      # Request encoding against synthetic fixtures; no catalog traffic.
+      - name: Test content id upload research helper
+        run: python3 -m unittest discover -s tools/research -v
 
   hls-audio-synthetic:
     name: HLS audio synthetic
