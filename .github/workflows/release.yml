@@ -308,8 +308,19 @@ jobs:
         with:
           target: ${{ env.TARGET }}
 
+      # Same size-optimised profile as every other release archive.
       - name: Build release binary
-        run: cargo build --locked --release -p ace-engine --bin "$BIN_NAME" --target "$TARGET"
+        run: cargo build --locked --profile dist -p ace-engine --bin "$BIN_NAME" --target "$TARGET"
+
+      # The PR-time check (android.yml) builds --release, so smoke the dist binary shipped here.
+      - name: Start emulated daemon and check health
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_var="CARGO_TARGET_$(tr 'a-z-' 'A-Z_' <<<"$TARGET")_RUNNER"
+          export SMOKE_RUNNER="${!runner_var:-}"
+          echo "runner: ${SMOKE_RUNNER:-native}"
+          sh tools/ci/smoke_daemon.sh "target/$TARGET/dist/$BIN_NAME"
 
       # Not covered by SHA256SUMS: the archive gets its own .sha256 file.
       - name: Package
@@ -320,7 +331,7 @@ jobs:
           set -euo pipefail
           name="${BIN_NAME}-${VERSION}-${TARGET}"
           mkdir -p "dist/${name}"
-          cp "target/${TARGET}/release/${BIN_NAME}" LICENSE README.md "dist/${name}/"
+          cp "target/${TARGET}/dist/${BIN_NAME}" LICENSE README.md "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
 
