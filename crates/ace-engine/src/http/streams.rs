@@ -551,6 +551,7 @@ mod buffer_contract_tests {
     fn native_completion_is_absent_from_compatibility() {
         let p = crate::provider::LivePositionStats {
             pos: Some(1),
+            delivered: None,
             last: Some(2),
             live_first: None,
             live_last: None,

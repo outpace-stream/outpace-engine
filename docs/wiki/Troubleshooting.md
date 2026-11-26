@@ -88,7 +88,7 @@ The `reason` on the `[prebuffer]` line tells you why playback started:
 | --- | --- |
 | `TargetDuration` | The full target was reached. |
 | `Deadline` | The 15-second limit expired; playback started with what was there. |
-| `BacklogExhausted` | Every piece the peers hold up to the live edge has arrived, so playback started with that shorter backlog instead of waiting for the target. |
+| `BacklogExhausted` | Every piece the peers hold up to the live edge has arrived and been handed to the player, so playback started with that shorter backlog instead of waiting for the target. |
 | `ByteLimit` | The 128 MiB cap was hit. |
 | `EndOfStream` | The source ended during startup. |
 | `Disabled` | Prebuffering is off. |

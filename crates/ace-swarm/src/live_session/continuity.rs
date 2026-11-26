@@ -52,6 +52,7 @@ impl Continuity {
             observer.publish_position(
                 Some(LivePosition {
                     pos: Some(self.reasm.next_needed()),
+                    delivered: self.delivered_cursor(),
                     last: Some(self.head),
                     live_first: bounds.map(|b| b.0),
                     live_last: bounds.map(|b| b.1),
@@ -60,6 +61,21 @@ impl Continuity {
                 }),
                 0,
             );
+        }
+    }
+
+    /// Published delivery cursor, never ahead of the reassembler cursor.
+    pub(super) fn delivered_cursor(&self) -> Option<u64> {
+        self.delivered
+            .map(|piece| piece.min(self.reasm.next_needed()))
+    }
+
+    /// Advance the delivery cursor once the staged piece has no output left to send.
+    pub(super) fn note_output_sent(&mut self) {
+        if self.pending_output.is_empty() {
+            if let Some(piece) = self.output_piece.take() {
+                self.delivered = Some(piece.saturating_add(1));
+            }
         }
     }
 
@@ -135,6 +151,8 @@ impl Continuity {
                 ),
                 pending_output: Default::default(),
                 pending_credit: Default::default(),
+                output_piece: None,
+                delivered: None,
                 resync_credit: Vec::new(),
                 resync_tail: 0,
                 output_ceiling: None,

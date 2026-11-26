@@ -410,6 +410,7 @@ pub(super) fn publish_live_stats(
     metrics.publish_position(
         Some(LivePosition {
             pos: Some(c.reasm.next_needed()),
+            delivered: c.delivered_cursor(),
             last: Some(c.head),
             live_first: bounds.map(|(first, _)| first),
             live_last: bounds.map(|(_, last)| last),

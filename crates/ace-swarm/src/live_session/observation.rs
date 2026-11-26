@@ -4,7 +4,13 @@ use std::sync::Arc;
 /// Position and active coverage published by the follower.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LivePosition {
+    /// Reassembler cursor: the next piece not yet taken for output.
     pub pos: Option<u64>,
+    /// Delivery cursor: every piece before it has had all of its output sent to the
+    /// consumer channel (the MPEG-TS resync may still hold one trailing packet). Never
+    /// ahead of `pos`; lags it while a taken piece's segments wait for channel capacity,
+    /// and after an evicted-gap skip until the next piece is sent.
+    pub delivered: Option<u64>,
     pub last: Option<u64>,
     pub live_first: Option<u64>,
     pub live_last: Option<u64>,
