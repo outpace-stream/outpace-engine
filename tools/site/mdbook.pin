@@ -1,0 +1,4 @@
+# mdBook release used by tools/site/build.py in CI (.github/workflows/site.yml).
+# Read after checkout, so it always matches the builder being run. Bump both lines together.
+version=v0.5.4
+sha256=3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7

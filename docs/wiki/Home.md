@@ -2,8 +2,9 @@
   This wiki is generated from docs/wiki/ in the main repository
   (https://github.com/outpace-stream/outpace-engine/tree/main/docs/wiki).
   Edit the files there through a pull request. Every merge to main that
-  touches docs/wiki/ republishes the wiki (.github/workflows/wiki.yml), so
-  edits made in the GitHub wiki web UI are overwritten.
+  touches docs/wiki/ republishes the wiki (.github/workflows/wiki.yml) and the
+  documentation site (.github/workflows/site.yml), so edits made in the
+  GitHub wiki web UI are overwritten.
 -->
 
 # Outpace: the open-source P2P streaming engine
