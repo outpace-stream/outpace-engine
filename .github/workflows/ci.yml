@@ -175,6 +175,13 @@ jobs:
       - name: Test content id upload research helper
         run: python3 -m unittest discover -s tools/research -v
 
+      # Source scan only: env var names and router paths must appear in the reference docs.
+      - name: Check reference docs cover env vars and routes
+        run: python3 tools/docs/check_reference.py
+
+      - name: Test reference doc checker
+        run: python3 -m unittest discover -s tools/docs -v
+
   hls-audio-synthetic:
     name: HLS audio synthetic
     runs-on: ubuntu-26.04

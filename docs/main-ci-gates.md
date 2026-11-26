@@ -24,7 +24,7 @@ renaming one of these jobs; editing the JSON alone does not update GitHub.
 | --- | --- | --- |
 | `Rust lint` | `ci.yml` | Every PR and push to main; rustfmt and Clippy |
 | `Rust test` | `ci.yml` | Every PR and push to main; offline workspace tests |
-| `A/B harness test` | `ci.yml` | Every PR and push to main; offline Python fixtures and loopback HTTP |
+| `A/B harness test` | `ci.yml` | Every PR and push to main; offline Python fixtures and loopback HTTP, plus the reference-doc drift check (`tools/docs/check_reference.py`) |
 | `acestream identifier hygiene` | `hygiene.yml` | Every PR and every branch push; tracked identifier scan |
 
 Neither workflow has a path filter or job condition that skips these checks.
