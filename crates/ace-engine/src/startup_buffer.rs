@@ -26,18 +26,20 @@ enum ReleaseReason {
 /// position update published after the last backlog chunk was delivered.
 const BACKLOG_RECHECK: Duration = Duration::from_millis(250);
 
-/// Upper bound on chunks taken without waiting when the backlog is exhausted. The live
-/// position runs ahead of delivery, so reassembled media can still sit in the source
-/// channel, whose capacity this matches.
+/// Upper bound on chunks taken without waiting when the backlog is exhausted. The
+/// delivery cursor counts media handed to the source channel, which may not have been
+/// read yet; this matches that channel's capacity.
 const READY_DRAIN_LIMIT: usize = 256;
 
-/// Whether a live source reports that only its head piece, at most, is still outstanding.
-/// Sources without live position stats never report an exhausted backlog.
+/// Whether a live source reports that everything but its head piece, at most, has been
+/// delivered to the source channel. This reads the delivery cursor, not the reassembler
+/// cursor: media can still be held inside the session after it is reassembled. Sources
+/// without a delivery cursor never report an exhausted backlog.
 fn live_backlog_exhausted(stats: &SourceStats) -> bool {
     stats
         .livepos
         .as_ref()
-        .and_then(|position| Some(position.pos? >= position.last?))
+        .and_then(|position| Some(position.delivered? >= position.last?))
         .unwrap_or(false)
 }
 
@@ -379,9 +381,9 @@ impl StartupBufferedSource {
         }
     }
 
-    /// Release on an exhausted live backlog. Live position is published before its media
-    /// is delivered, so first take the media that is already readable: it may still reach
-    /// the target, and the release log should count it. Returns the stats it read.
+    /// Release on an exhausted live backlog. Delivered media may still be unread in the
+    /// source channel, so first take the media that is already readable: it may still
+    /// reach the target, and the release log should count it. Returns the stats it read.
     fn release_exhausted_backlog(&mut self) -> SourceStats {
         let stats = self.inner.stats();
         if !live_backlog_exhausted(&stats) {
@@ -1088,9 +1090,18 @@ mod tests {
     }
 
     fn live_position(pos: u64, last: u64) -> Arc<std::sync::Mutex<SourceStats>> {
+        delivery_position(pos, pos, last)
+    }
+
+    fn delivery_position(
+        pos: u64,
+        delivered: u64,
+        last: u64,
+    ) -> Arc<std::sync::Mutex<SourceStats>> {
         Arc::new(std::sync::Mutex::new(SourceStats {
             livepos: Some(crate::provider::LivePositionStats {
                 pos: Some(pos),
+                delivered: Some(delivered),
                 last: Some(last),
                 ..Default::default()
             }),
@@ -1144,6 +1155,20 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn media_held_in_the_session_keeps_the_deadline() {
+        // Reassembly reached the head, but output is still held before the channel.
+        let stats = delivery_position(10, 8, 10);
+        let mut buffered = StartupBufferedSource::new(
+            short_live_backlog(&stats),
+            config(30_000, 1 << 20, 15_000),
+            None,
+        );
+        let started = Instant::now();
+        assert_eq!(buffered.next().await.unwrap()[20], b'a');
+        assert_eq!(Instant::now() - started, Duration::from_secs(15));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn outstanding_live_backlog_keeps_the_deadline() {
         let stats = live_position(5, 10);
         let mut buffered = StartupBufferedSource::new(
@@ -1170,7 +1195,12 @@ mod tests {
         assert!(futures::poll!(next.as_mut()).is_pending());
         tokio::time::advance(Duration::from_secs(2)).await;
         assert!(futures::poll!(next.as_mut()).is_pending());
-        stats.lock().unwrap().livepos.as_mut().unwrap().pos = Some(11);
+        {
+            let mut stats = stats.lock().unwrap();
+            let position = stats.livepos.as_mut().unwrap();
+            position.pos = Some(11);
+            position.delivered = Some(11);
+        }
         assert_eq!(next.await.unwrap()[20], b'a');
         let waited = Instant::now() - started;
         assert!(
@@ -1205,20 +1235,24 @@ mod tests {
 
     #[test]
     fn caught_up_requires_only_the_head_piece_outstanding() {
-        let at = |pos, last| SourceStats {
+        let at = |pos, delivered, last| SourceStats {
             livepos: Some(crate::provider::LivePositionStats {
                 pos,
+                delivered,
                 last,
                 ..Default::default()
             }),
             ..SourceStats::default()
         };
         assert!(!live_backlog_exhausted(&SourceStats::default()));
-        assert!(!live_backlog_exhausted(&at(Some(9), Some(10))));
-        assert!(live_backlog_exhausted(&at(Some(10), Some(10))));
-        assert!(live_backlog_exhausted(&at(Some(11), Some(10))));
-        assert!(!live_backlog_exhausted(&at(None, Some(10))));
-        assert!(!live_backlog_exhausted(&at(Some(10), None)));
+        assert!(!live_backlog_exhausted(&at(Some(9), Some(9), Some(10))));
+        assert!(live_backlog_exhausted(&at(Some(10), Some(10), Some(10))));
+        assert!(live_backlog_exhausted(&at(Some(11), Some(11), Some(10))));
+        assert!(!live_backlog_exhausted(&at(None, None, Some(10))));
+        assert!(!live_backlog_exhausted(&at(Some(10), Some(10), None)));
+        // The reassembler cursor alone is not delivery.
+        assert!(!live_backlog_exhausted(&at(Some(10), Some(9), Some(10))));
+        assert!(!live_backlog_exhausted(&at(Some(10), None, Some(10))));
     }
 
     #[tokio::test]

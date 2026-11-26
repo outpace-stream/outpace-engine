@@ -1111,6 +1111,7 @@ fn measured_state(position: bool) -> AppState {
         upload_rate: 512,
         livepos: position.then_some(crate::provider::LivePositionStats {
             pos: Some(5),
+            delivered: Some(5),
             last: Some(9),
             live_first: Some(2),
             live_last: Some(9),
