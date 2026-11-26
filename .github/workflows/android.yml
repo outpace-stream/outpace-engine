@@ -53,6 +53,10 @@ jobs:
         with:
           target: ${{ env.TARGET }}
 
+      # Deliberately --release, like the other PR-time platform checks: the published archives
+      # use the dist profile (release.yml), whose fat LTO and single codegen unit would
+      # multiply build time for a compile-and-smoke check. dist only adds LTO, codegen-units
+      # and strip on top of release, so this still builds and runs the same code.
       - name: Build release binary
         run: cargo build --locked --release -p ace-engine --bin outpace --target "$TARGET"
 
