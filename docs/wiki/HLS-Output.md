@@ -9,7 +9,7 @@ direct MPEG-TS viewers. Compatibility viewers that ask for a different
 [audio language](#choosing-an-audio-language) can add up to four more packagers to a source,
 so one source normally runs up to five. Right after a source restarts, language packagers from
 before the restart keep serving the viewers that still use them until their leases end, so for
-a short time there can be up to four more.
+a short time a source can run more, but never more than nine packagers in total.
 
 ## When to use HLS instead of MPEG-TS
 
@@ -33,7 +33,7 @@ a short time there can be up to four more.
   return `404`. Worst-case memory per packager is about (window + 1) × the segment ceiling. Each
   audio-language packager keeps its own window and, with [timeshift](Timeshift), its own
   retained history, so plan for up to five times that per source when compatibility clients
-  request languages, and briefly up to nine times right after a source restart.
+  request languages, and briefly up to nine times right after a source restart (a hard limit).
 
 ## Startup
 

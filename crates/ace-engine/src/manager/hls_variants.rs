@@ -17,7 +17,8 @@
 //! - A variant belongs to the session it was created on. A replacement session for the same
 //!   stream never receives it; pinned variants of a finished session keep serving their leases
 //!   until those end and do not count toward the replacement's cap.
-//! - At most [`MAX_AUDIO_VARIANTS`] run per session. Unpinned variants are retired by the idle
+//! - At most [`MAX_AUDIO_VARIANTS`] run per session, and at most
+//!   [`MAX_STREAM_AUDIO_VARIANTS`] per stream counting pinned variants of replaced sessions. Unpinned variants are retired by the idle
 //!   sweep, on stop and on shutdown.
 
 use super::*;
@@ -26,6 +27,17 @@ use ace_media::audio::AudioLanguage;
 /// Distinct non-default audio variants per session. Each costs one packager: its retained
 /// segment window (bounded like the default packager's) plus one broadcast receiver.
 pub(crate) const MAX_AUDIO_VARIANTS: usize = 4;
+
+/// Hard bound on variants a stream holds across sessions. Pinned variants of replaced sessions
+/// do not count toward the current session's [`MAX_AUDIO_VARIANTS`], so repeated replacements
+/// within one lease lifetime could otherwise stack them; past this total, new languages get
+/// the default packager until old leases end.
+pub(crate) const MAX_STREAM_AUDIO_VARIANTS: usize = 2 * MAX_AUDIO_VARIANTS;
+
+/// Whether a new variant fits: under the per-session cap and the per-stream total.
+fn admits(on_session: usize, total: usize) -> bool {
+    on_session < MAX_AUDIO_VARIANTS && total < MAX_STREAM_AUDIO_VARIANTS
+}
 
 #[derive(Default)]
 pub(super) struct HlsVariants {
@@ -114,11 +126,13 @@ impl HlsVariants {
             let id = variant.id;
             return (Some(HlsVariantPin { id, _pin: pin }), retired);
         }
-        if set.entries.iter().filter(|v| v.on(session)).count() >= MAX_AUDIO_VARIANTS {
+        let on_session = set.entries.iter().filter(|v| v.on(session)).count();
+        if !admits(on_session, set.entries.len()) {
             if !std::mem::replace(&mut set.cap_logged, true) {
                 crate::alog!(
-                    "[hls] audio variant limit reached ({MAX_AUDIO_VARIANTS} per stream); \
-                     further languages get the default audio track"
+                    "[hls] audio variant limit reached ({MAX_AUDIO_VARIANTS} per session, \
+                     {MAX_STREAM_AUDIO_VARIANTS} per stream); further languages get the \
+                     default audio track"
                 );
             }
             return (None, retired);
@@ -390,6 +404,19 @@ mod tests {
                 ..HlsConfig::default()
             },
         )
+    }
+
+    #[test]
+    fn admission_bounds_both_the_session_and_the_stream() {
+        assert!(admits(0, 0));
+        assert!(admits(MAX_AUDIO_VARIANTS - 1, MAX_AUDIO_VARIANTS - 1));
+        assert!(!admits(MAX_AUDIO_VARIANTS, MAX_AUDIO_VARIANTS));
+        // A fresh session may add variants beside pinned ones from a replaced session ...
+        assert!(admits(0, MAX_AUDIO_VARIANTS));
+        assert!(admits(3, MAX_STREAM_AUDIO_VARIANTS - 1));
+        // ... but never past the stream total, however many sessions were replaced.
+        assert!(!admits(0, MAX_STREAM_AUDIO_VARIANTS));
+        assert!(!admits(2, MAX_STREAM_AUDIO_VARIANTS + 3));
     }
 
     fn rus() -> AudioLanguage {
