@@ -33,7 +33,9 @@ a short time a source can run more, but never more than nine packagers in total.
   return `404`. Worst-case memory per packager is about (window + 1) × the segment ceiling. Each
   audio-language packager keeps its own window and, with [timeshift](Timeshift), its own
   retained history, so plan for up to five times that per source when compatibility clients
-  request languages, and briefly up to nine times right after a source restart (a hard limit).
+  request languages, and briefly more right after a source restart. Outpace runs at most nine
+  packagers per source, but a stopped packager's segments are freed only once its cleanup ends
+  and any segment request still reading it finishes, so memory can trail that limit briefly.
 
 ## Startup
 

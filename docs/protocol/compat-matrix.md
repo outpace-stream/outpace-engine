@@ -342,6 +342,9 @@ options or new compatibility response keys.
   and do not count toward the new session's cap. A stream never holds more than **eight**
   variants in total across sessions, so with its default packager it runs at most nine
   packagers; past that total, new languages get the default packager until old leases end.
+  This bounds running packagers, not memory at every instant: a retired packager is fenced
+  and cancelled at once, but its retained segments are freed only after its cleanup finishes
+  and the last in-flight segment request releases it.
   Further tracks get the default packager, and `[hls] audio variant limit reached` is
   logged once per stream. A variant whose last lease is stopped, expires or is evicted is
   retired by the next idle sweep (about 30 s); stopping the stream removes all of its
