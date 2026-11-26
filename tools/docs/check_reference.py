@@ -59,7 +59,7 @@ ENV_NAME = re.compile(r"OUTPACE_[A-Z0-9_]+")
 LEXEME = re.compile(
     r"""
     (?P<line_comment>//[^\n]*)
-  | (?P<block_comment>/\*.*?\*/)
+  | (?P<block_comment>/\*)
   | (?P<raw_string>b?r(?P<hashes>\#*)"(?P<raw_body>.*?)"(?P=hashes))
   | (?P<char>b?'(?:\\.|\\u\{[0-9a-fA-F]+\}|[^'\\\n])')
   | (?P<string>b?"(?P<body>(?:\\.|[^"\\])*)")
@@ -69,7 +69,8 @@ LEXEME = re.compile(
 CFG_TEST_MOD = re.compile(
     r"\#\[cfg\(test\)\]\s*(?:\#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{"
 )
-ROUTE_CALL = re.compile(r"\.(?:route|nest|route_service|nest_service)\(\s*$")
+ROUTE_CALL = re.compile(r"\.(?:route|nest|route_service|nest_service)\($")
+BLOCK_DELIMITER = re.compile(r"/\*|\*/")
 LINK = re.compile(r"\]\(([^)\s#]+)(?:#[^)\s]*)?\)")
 
 
@@ -83,22 +84,51 @@ def is_test_file(path: Path) -> bool:
     )
 
 
-def string_literals(source: str) -> list[tuple[int, str]]:
-    """Return `(offset, body)` for each string literal outside comments and test modules."""
-    literals: list[tuple[int, str]] = []
+def lexemes(source: str) -> list[tuple[int, int, str | None]]:
+    """`(start, end, string body or None)` for every comment and string literal, in order.
+
+    Block comments nest in Rust, so their end is found by depth rather than by the regex.
+    """
+    found: list[tuple[int, int, str | None]] = []
+    at = 0
+    while (match := LEXEME.search(source, at)) is not None:
+        kind, start, end = match.lastgroup, match.start(), match.end()
+        body = None
+        if kind == "block_comment":
+            depth = 1
+            while depth and (delimiter := BLOCK_DELIMITER.search(source, end)) is not None:
+                depth += 1 if delimiter.group() == "/*" else -1
+                end = delimiter.end()
+            if depth:
+                end = len(source)
+        elif kind == "raw_string":
+            body = match.group("raw_body")
+        elif kind == "string":
+            body = match.group("body")
+        found.append((start, end, body))
+        at = end
+    return found
+
+
+def mask(source: str, spans: list[tuple[int, int, str | None]]) -> str:
+    """Blank every lexeme, keeping newlines, so braces and calls inside them do not count."""
     masked = list(source)
-    for match in LEXEME.finditer(source):
-        kind = match.lastgroup
-        if kind in ("raw_string", "string"):
-            body = match.group("raw_body") if kind == "raw_string" else match.group("body")
-            literals.append((match.start(), body))
-        # Blank every lexeme so braces inside strings and comments do not count below.
-        for i in range(match.start(), match.end()):
+    for start, end, _ in spans:
+        for i in range(start, end):
             if masked[i] != "\n":
                 masked[i] = " "
-    code = "".join(masked)
-    skipped = test_module_spans(code)
-    return [(at, body) for at, body in literals if not any(a <= at < b for a, b in skipped)]
+    return "".join(masked)
+
+
+def string_literals(source: str) -> list[tuple[int, str]]:
+    """Return `(offset, body)` for each string literal outside comments and test modules."""
+    spans = lexemes(source)
+    skipped = test_module_spans(mask(source, spans))
+    return [
+        (start, body)
+        for start, _, body in spans
+        if body is not None and not any(a <= start < b for a, b in skipped)
+    ]
 
 
 def test_module_spans(code: str) -> list[tuple[int, int]]:
@@ -115,9 +145,15 @@ def test_module_spans(code: str) -> list[tuple[int, int]]:
 def route_paths(source: str) -> list[str]:
     """Paths passed as the first argument of a router `.route(...)`-style call."""
     paths = []
-    masked = LEXEME.sub(lambda m: " " * (m.end() - m.start()), source)
+    masked = mask(source, lexemes(source))
     for at, body in string_literals(source):
-        if body.startswith("/") and ROUTE_CALL.search(masked[max(0, at - 64) : at]):
+        if not body.startswith("/"):
+            continue
+        # Skip whitespace and masked comments back to the call, however long they are.
+        before = at
+        while before and masked[before - 1].isspace():
+            before -= 1
+        if ROUTE_CALL.search(masked, max(0, before - 32), before):
             paths.append(body)
     return paths
 

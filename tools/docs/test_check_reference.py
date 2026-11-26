@@ -78,6 +78,21 @@ class LexingTests(unittest.TestCase):
         bodies = [body for _, body in cr.string_literals(source)]
         self.assertEqual(bodies, ["OUTPACE_REAL"])
 
+    def test_nested_block_comments_are_skipped_whole(self):
+        source = '/* outer /* inner */ "OUTPACE_COMMENT_ONLY" */ const A: &str = "OUTPACE_REAL";'
+        bodies = [body for _, body in cr.string_literals(source)]
+        self.assertEqual(bodies, ["OUTPACE_REAL"])
+
+    def test_unterminated_block_comment_hides_the_rest(self):
+        self.assertEqual(cr.string_literals('/* open /* "OUTPACE_X" */'), [])
+
+    def test_route_found_past_a_long_comment_before_its_path(self):
+        source = '.route(\n    /* ' + "x" * 200 + ' */\n    "/undocumented",\n    get(h),\n)'
+        self.assertEqual(cr.route_paths(source), ["/undocumented"])
+
+    def test_string_not_first_route_argument_is_not_a_route(self):
+        self.assertEqual(cr.route_paths('.route("/a", get(h)).with("/not-a-route")'), ["/a"])
+
     def test_raw_byte_and_escaped_strings(self):
         source = (
             'let a = r#"OUTPACE_RAW "quoted""#;\n'
