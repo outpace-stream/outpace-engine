@@ -1076,6 +1076,9 @@ impl VodHlsLayout {
 }
 
 #[cfg(test)]
+mod bench;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::HlsConfig;

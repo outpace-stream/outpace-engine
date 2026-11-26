@@ -64,6 +64,8 @@ pub mod startup_buffer;
 pub mod support;
 pub mod support_config;
 pub mod support_control;
+#[cfg(test)]
+pub(crate) mod test_media;
 pub mod testprovider;
 pub mod transport_url;
 #[cfg(windows)]
