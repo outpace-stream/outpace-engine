@@ -61,6 +61,7 @@ fn single_active_peer(min_piece: i64, max_piece: i64) -> ActivePeers {
     active
 }
 
+mod attribution;
 mod authentication;
 
 mod credit;

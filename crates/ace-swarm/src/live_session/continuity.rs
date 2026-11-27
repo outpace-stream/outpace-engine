@@ -175,6 +175,7 @@ impl Continuity {
                 active_peers: ActivePeers::new(),
                 received_chunks: BTreeMap::new(),
                 piece_producers: BTreeMap::new(),
+                solo: Default::default(),
                 #[cfg(test)]
                 contribution_observer: None,
                 requested_at: HashMap::new(),
@@ -223,6 +224,10 @@ impl Continuity {
         self.scheduler.clear_in_flight();
         self.active_peers = ActivePeers::new();
         self.received_chunks.clear();
+        // Peer ids restart with each pool, so no solo owner survives; its partial goes too.
+        for piece in self.solo.release_all() {
+            self.restart_solo_piece(piece);
+        }
         // Retained partial and authenticated ahead pieces keep their producer evidence.
         if !self.has_delivery_work() {
             self.requested_at.clear();
@@ -246,6 +251,7 @@ impl Continuity {
             self.arm_output_gate();
         }
         self.piece_producers.retain(|&piece, _| piece >= resume);
+        self.solo.prune_below(resume);
         resume
     }
 
@@ -324,6 +330,41 @@ impl Continuity {
         self.requested_at.remove(&piece);
     }
 
+    /// Whether every accepted block of `piece`, plus the block from `addr` that just
+    /// completed it, came from `addr`. Call before the piece's bookkeeping is released.
+    pub(super) fn single_source(&self, piece: u64, addr: SocketAddrV4) -> bool {
+        self.piece_producers
+            .get(&piece)
+            .is_none_or(|producer| *producer == Some(addr))
+    }
+
+    /// A solo piece lost its owner: forget that owner's partial bytes so the next peer
+    /// fetches every chunk itself, and requeue it. Peer slots are left to the caller,
+    /// so a silent owner's held slot steers the retry to another peer.
+    pub(super) fn restart_solo_piece(&mut self, piece: u64) {
+        self.reasm.discard_partial(piece);
+        self.received_chunks.remove(&piece);
+        self.piece_producers.remove(&piece);
+        self.scheduler.on_drop(piece);
+        self.requested_at.remove(&piece);
+    }
+
+    /// Owned solo pieces whose owner has sent nothing for the solo silence timeout,
+    /// restarted for another peer. Empty, without allocating, on the normal path.
+    pub(super) fn release_silent_solo(&mut self, now: EffectiveInstant) -> Vec<u64> {
+        if self.solo.is_empty() {
+            return Vec::new();
+        }
+        self.solo.prune_below(self.reasm.next_needed());
+        let silent = self
+            .solo
+            .release_silent(now, self.live_recovery.solo_silence_timeout());
+        for &piece in &silent {
+            self.restart_solo_piece(piece);
+        }
+        silent
+    }
+
     /// While the startup decision withholds output, completed pieces cannot drain, so the
     /// scheduler must remember them (#521); otherwise use the ordinary completion path.
     /// Only a piece the reassembler actually holds is remembered: a receipt count that
@@ -378,6 +419,7 @@ impl Continuity {
             .iter()
             .filter(|(_, &at)| now.duration_since(at) >= self.live_recovery.request_timeout())
             .map(|(&p, _)| p)
+            .filter(|&p| self.solo.is_empty() || !self.solo.owned(p))
             .collect()
     }
 
@@ -411,6 +453,7 @@ impl Continuity {
         self.requested_at.retain(|&p, _| p >= floor);
         self.received_chunks.retain(|&p, _| p >= floor);
         self.piece_producers.retain(|&p, _| p >= floor);
+        self.solo.prune_below(floor);
         self.next_needed_since = now;
         Some(floor)
     }
@@ -446,6 +489,7 @@ impl Continuity {
         self.requested_at.retain(|&p, _| p >= target);
         self.received_chunks.retain(|&p, _| p >= target);
         self.piece_producers.retain(|&p, _| p >= target);
+        self.solo.prune_below(target);
         self.next_needed_since = now;
         Some(target)
     }

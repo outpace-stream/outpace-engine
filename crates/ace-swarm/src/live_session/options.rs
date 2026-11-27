@@ -22,6 +22,21 @@ impl LiveRecoveryOptions {
         Duration::from_millis(self.request_timeout_ms)
     }
 
+    /// How long a peer fetching a piece alone after a signature failure (#561) may stay
+    /// silent before the piece moves to another peer, measured from assignment or the
+    /// owner's latest contributing chunk: twice the request timeout (3 s by default),
+    /// kept one check interval inside the stale-upstream timeout so the handover runs
+    /// before the pool is declared stale, and never below the request timeout.
+    pub(crate) fn solo_silence_timeout(&self) -> Duration {
+        self.request_timeout()
+            .saturating_mul(2)
+            .min(
+                self.stale_upstream_timeout()
+                    .saturating_sub(self.request_check_interval()),
+            )
+            .max(self.request_timeout())
+    }
+
     pub fn stale_upstream_timeout(&self) -> Duration {
         Duration::from_millis(self.stale_upstream_timeout_ms)
     }
