@@ -769,7 +769,7 @@ impl PoolActor<'_> {
                     }
                 }
             }
-            m @ PeerMessage::Piece { .. } => match self.on_piece(addr, m).await {
+            m @ PeerMessage::Piece { .. } => match self.on_piece(peer_id, addr, m).await {
                 PieceOutcome::Skip => return None,
                 PieceOutcome::Progress { activity, output } => {
                     made_activity = activity;
@@ -920,7 +920,7 @@ impl PoolActor<'_> {
         }
         None
     }
-    async fn on_piece(&mut self, addr: SocketAddrV4, m: PeerMessage) -> PieceOutcome {
+    async fn on_piece(&mut self, peer_id: u64, addr: SocketAddrV4, m: PeerMessage) -> PieceOutcome {
         let mut made_activity = false;
         let made_output = false;
 
@@ -936,6 +936,13 @@ impl PoolActor<'_> {
             {
                 return PieceOutcome::Skip;
             }
+            // A piece refetched alone after a signature failure (#561) takes chunks only
+            // from its owner, so a second failure is attributable to that peer.
+            if !self.continuity.solo.is_empty()
+                && !self.continuity.solo.accepts(piece, peer_id, addr)
+            {
+                return PieceOutcome::Skip;
+            }
             let outcome = match self.continuity.reasm.add_live_chunk(
                 piece,
                 lc.chunk,
@@ -945,7 +952,8 @@ impl PoolActor<'_> {
             ) {
                 Ok(outcome) => outcome,
                 Err(e) => {
-                    if e == ace_wire::WireError::SignatureRejected {
+                    let signature_rejected = e == ace_wire::WireError::SignatureRejected;
+                    if signature_rejected {
                         self.continuity
                             .recovery_event(RecoveryEvent::SignatureReject);
                     }
@@ -956,7 +964,23 @@ impl PoolActor<'_> {
                         "[ace] {addr}: dropped piece {piece} block: {e:?}",
                         addr = self.seed.peer_policy.log_endpoint(addr)
                     );
+                    // Read the evidence before the piece's bookkeeping is released.
+                    let solo_owner = signature_rejected
+                        && !self.continuity.solo.is_empty()
+                        && self.continuity.solo.owned_by(piece, peer_id, addr);
+                    let single_source =
+                        signature_rejected && self.continuity.single_source(piece, addr);
                     self.continuity.release_rejected_piece(piece);
+                    if signature_rejected {
+                        self.attribute_signature_failure(
+                            peer_id,
+                            addr,
+                            piece,
+                            solo_owner,
+                            single_source,
+                        )
+                        .await;
+                    }
                     let newly_lost = advance_pool_requests(
                         &mut self.peers,
                         self.continuity,
@@ -968,6 +992,9 @@ impl PoolActor<'_> {
                 }
             };
             if outcome.completed {
+                if !self.continuity.solo.is_empty() {
+                    self.continuity.solo.complete(piece);
+                }
                 if !self.continuity.stats_scan.pending() {
                     self.continuity.invalidate_stats();
                 }
@@ -985,6 +1012,11 @@ impl PoolActor<'_> {
                 }
             }
             if outcome.contributed {
+                if !self.continuity.solo.is_empty() {
+                    self.continuity
+                        .solo
+                        .touch(piece, self.continuity.output_clock.now(Instant::now()));
+                }
                 self.continuity
                     .piece_producers
                     .entry(piece)
@@ -1022,6 +1054,54 @@ impl PoolActor<'_> {
             output: made_output,
         }
     }
+    /// A completed piece failed its source signature (#561). The piece goes solo, so
+    /// the next peer fetches all of it alone. Only a failed solo fetch proves its owner
+    /// bad: that peer is disconnected and kept out of selection. A first failure, from
+    /// one peer or several, penalises nobody, so a lone transiently wrong upstream is
+    /// retried rather than banned.
+    async fn attribute_signature_failure(
+        &mut self,
+        peer_id: u64,
+        addr: SocketAddrV4,
+        piece: u64,
+        solo_owner: bool,
+        single_source: bool,
+    ) {
+        let log_addr = self.seed.peer_policy.log_endpoint(addr);
+        if !self.continuity.solo.mark(piece) {
+            crate::alog!("[ace] piece {piece}: solo refetch tracker full; retrying from the pool");
+        }
+        if !solo_owner {
+            if single_source {
+                crate::alog!(
+                    "[ace] {log_addr}: piece {piece} failed source signature; penalising none on a first failure, refetching from one peer"
+                );
+            } else {
+                crate::alog!(
+                    "[ace] piece {piece}: failed source signature with blocks from several peers; penalising none, refetching from one peer"
+                );
+            }
+            return;
+        }
+        crate::alog!(
+            "[ace] {log_addr}: solo fetch of piece {piece} failed source signature; disconnecting and avoiding it for {:?}",
+            reconnect::REJECTED_PEER_COOLDOWN
+        );
+        // The ordinary loss path also refreshes stale source transports when the
+        // last producer goes; an empty pool ends after this message is handled.
+        handle_pool_peer_loss(
+            peer_id,
+            &mut self.peers,
+            self.continuity,
+            self.chunks_per_piece,
+            self.candidates,
+            &mut self.loss_count,
+            self.peer_count,
+        )
+        .await;
+        self.candidates.rejected(addr, Instant::now());
+    }
+
     fn start_output(&mut self) {
         if self.output_reservation.is_none() {
             self.continuity.settle_prefetch_floor();

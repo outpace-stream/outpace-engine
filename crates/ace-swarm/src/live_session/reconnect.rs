@@ -8,6 +8,9 @@ const MAX_CANDIDATES: usize = 1024;
 // A stream normally has one source. Bound priority announcements so bad sources cannot
 // place an arbitrarily long run of timeouts in front of healthy PEX/discovery peers.
 const MAX_SOURCES: usize = 8;
+/// How long a peer proven to send bytes failing the source signature (#561) stays out
+/// of reconnect and refill selection.
+pub(super) const REJECTED_PEER_COOLDOWN: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum CandidateKind {
@@ -23,6 +26,15 @@ struct Candidate {
     admissions: u64,
     explorations: u64,
     retry_at: Instant,
+    /// Set for a peer that served bytes failing source verification; no later
+    /// retry bookkeeping may make it eligible before this.
+    rejected_until: Option<Instant>,
+}
+
+impl Candidate {
+    fn retry_after(&mut self, at: Instant) {
+        self.retry_at = self.rejected_until.map_or(at, |until| at.max(until));
+    }
 }
 
 #[derive(Default)]
@@ -88,6 +100,7 @@ impl SessionCandidates {
             admissions: 0,
             explorations: 0,
             retry_at: Instant::now(),
+            rejected_until: None,
         });
     }
 
@@ -177,7 +190,7 @@ impl SessionCandidates {
 
     pub(super) fn attempting(&mut self, addr: SocketAddrV4, until: Instant) {
         if let Some(c) = self.entries.iter_mut().find(|c| c.addr == addr) {
-            c.retry_at = until;
+            c.retry_after(until);
         }
     }
 
@@ -189,8 +202,19 @@ impl SessionCandidates {
             } else {
                 8
             };
-            c.retry_at =
-                now + Duration::from_secs((1u64 << c.failures.saturating_sub(1).min(3)).min(cap));
+            c.retry_after(
+                now + Duration::from_secs((1u64 << c.failures.saturating_sub(1).min(3)).min(cap)),
+            );
+        }
+    }
+
+    /// The peer was proven to send bytes failing the source signature: keep it out of
+    /// selection for [`REJECTED_PEER_COOLDOWN`], whatever later bookkeeping happens.
+    pub(super) fn rejected(&mut self, addr: SocketAddrV4, now: Instant) {
+        if let Some(c) = self.entries.iter_mut().find(|c| c.addr == addr) {
+            let until = now + REJECTED_PEER_COOLDOWN;
+            c.rejected_until = Some(c.rejected_until.map_or(until, |old| old.max(until)));
+            c.retry_after(until);
         }
     }
 
@@ -203,7 +227,7 @@ impl SessionCandidates {
         }
         if let Some(c) = self.entries.iter_mut().find(|c| c.addr == addr) {
             c.failures = 0;
-            c.retry_at = Instant::now();
+            c.retry_after(Instant::now());
         }
     }
 
@@ -211,7 +235,7 @@ impl SessionCandidates {
     // new exploration. Preserve failure history while allowing fresh window validation.
     pub(super) fn refresh_stale_transport(&mut self, addr: SocketAddrV4, now: Instant) {
         if let Some(candidate) = self.entries.iter_mut().find(|c| c.addr == addr) {
-            candidate.retry_at = now;
+            candidate.retry_after(now);
         }
     }
 
@@ -286,6 +310,28 @@ mod tests {
         assert_eq!(
             candidates.entries[0].retry_at,
             now + Duration::from_secs(13)
+        );
+    }
+
+    #[test]
+    fn rejected_peer_stays_out_of_selection_through_later_bookkeeping() {
+        let mut candidates = SessionCandidates::default();
+        candidates.learn(addr(1), CandidateKind::Source);
+        candidates.learn(addr(2), CandidateKind::Discovered);
+        let now = Instant::now();
+        candidates.failed(addr(1), now);
+        candidates.rejected(addr(1), now);
+        // Neither a later short failure backoff, a productive reset, nor a stale-window
+        // refresh may shorten the cooldown.
+        candidates.failed(addr(1), now + Duration::from_secs(1));
+        candidates.productive(addr(1));
+        candidates.refresh_stale_transport(addr(1), now);
+        candidates.attempting(addr(1), now);
+        let before = now + REJECTED_PEER_COOLDOWN - Duration::from_millis(1);
+        assert_eq!(candidates.eligible(before), vec![addr(2)]);
+        assert_eq!(
+            candidates.eligible(now + REJECTED_PEER_COOLDOWN),
+            vec![addr(1), addr(2)]
         );
     }
 

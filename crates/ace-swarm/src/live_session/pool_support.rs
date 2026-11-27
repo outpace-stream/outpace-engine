@@ -278,7 +278,7 @@ pub(super) async fn advance_pool_requests(
     let mut failed = HashSet::new();
     for assignment in assignments {
         let admitted = if failed.contains(&assignment.peer_id) {
-            false
+            None
         } else if let Some(peer) = peers.get(&assignment.peer_id) {
             if peer
                 .commands
@@ -291,18 +291,28 @@ pub(super) async fn advance_pool_requests(
                 // Retain this generation for its queued reliable events.
                 peer.worker.abort();
                 failed.insert(assignment.peer_id);
-                false
+                None
             } else {
-                true
+                Some(peer.addr)
             }
         } else {
-            false
+            None
         };
-        if admitted {
+        if let Some(addr) = admitted {
             continuity
                 .requested_at
                 .entry(assignment.piece)
                 .or_insert(now);
+            // A solo piece (#561) belongs to the peer that was just asked for all of it.
+            if !continuity.solo.is_empty()
+                && continuity
+                    .solo
+                    .assign(assignment.piece, assignment.peer_id, addr, now)
+            {
+                continuity.reasm.discard_partial(assignment.piece);
+                continuity.received_chunks.remove(&assignment.piece);
+                continuity.piece_producers.remove(&assignment.piece);
+            }
         } else {
             // Undo only the unsent selection, not old admitted work or B's slots.
             continuity
@@ -490,10 +500,20 @@ pub(super) async fn retransmit_stalled_requests(
         }
         changed = true;
     }
+    let silent = continuity.release_silent_solo(continuity.output_clock.now(now));
+    if !silent.is_empty() {
+        crate::alog!(
+            "[ace] handing over {} solo piece(s) whose peer stayed silent > {:?} (from {})",
+            silent.len(),
+            continuity.live_recovery.solo_silence_timeout(),
+            continuity.reasm.next_needed()
+        );
+        changed = true;
+    }
     if changed {
         let mut lost = advance_pool_requests(peers, continuity, chunks_per_piece).await;
         let mut released = false;
-        for piece in timed_out {
+        for piece in timed_out.into_iter().chain(silent) {
             if !continuity.requested_at.contains_key(&piece) {
                 continuity.active_peers.complete_everywhere(piece);
                 released = true;
@@ -562,6 +582,11 @@ pub(super) fn drop_peer_runtime(
     continuity.publish_upstreams();
     for piece in continuity.active_peers.remove(peer_id) {
         continuity.scheduler.on_drop(piece);
+    }
+    if !continuity.solo.is_empty() {
+        for piece in continuity.solo.release_peer(peer_id) {
+            continuity.restart_solo_piece(piece);
+        }
     }
     let addr = peer.addr;
     continuity.workers.retire(peer_id, peer);

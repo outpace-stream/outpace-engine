@@ -116,6 +116,11 @@ Check the stream's `/status` while it stalls:
 - `recovery.skipped_evicted_gaps` climbing: peers no longer had the pieces Outpace needed, so
   it skipped ahead. That shows up as a jump or glitch in the picture.
 - `bitrate` far below `metadata.bitrate`: not enough upload capacity in the swarm.
+- `recovery.signature_rejects` climbing: peers sent pieces that failed the broadcaster's
+  signature. Outpace never plays those bytes. It fetches the failed piece again from a single
+  peer, and a peer whose solo fetch fails again is disconnected and not redialled for two
+  minutes. A first failure penalises nobody, because the piece's blocks may have come from
+  several peers.
 
 Matching log lines:
 
@@ -125,6 +130,7 @@ Matching log lines:
 [ace] rebuilding upstream pool: reason=PoolStale ...
 [ace] next needed piece evicted from all upstream windows; skipping ahead to ...
 [ace] cursor fell too far behind live edge ...; re-syncing forward to piece ...
+[ace] ...: solo fetch of piece ... failed source signature; disconnecting and avoiding it for 120s
 ```
 
 What helps:

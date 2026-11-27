@@ -179,6 +179,7 @@ use support::{
 use support::{read_peer_window, read_window_max, should_refresh_stale_deadline};
 
 mod reconnect;
+mod solo;
 use reconnect::{CandidateKind, SessionCandidates};
 mod warm_peers;
 pub use warm_peers::WarmPeerCache;
@@ -658,6 +659,8 @@ pub(super) struct Continuity {
     pub(super) received_chunks: BTreeMap<u64, HashSet<u16>>,
     /// None marks mixed producers; entries share the bounded reassembly accept window.
     pub(super) piece_producers: BTreeMap<u64, Option<SocketAddrV4>>,
+    /// Pieces that failed source verification and must be refetched from one peer (#561).
+    pub(super) solo: solo::SoloPieces,
     #[cfg(test)]
     pub(super) contribution_observer: Option<mpsc::UnboundedSender<(u64, SocketAddrV4)>>,
     /// When each still-outstanding piece was (re-)requested — drives per-piece retransmission
