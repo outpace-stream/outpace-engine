@@ -1067,3 +1067,23 @@ fn trusted_head_follows_the_freshest_window_before_output() {
     c.refresh_trusted_head();
     assert_eq!(c.head, 1_000);
 }
+
+/// #565 review: a peer admitted into a resumed pool widens the request bound at once,
+/// while its uncorroborated edge still leaves the trusted head alone.
+#[test]
+fn an_admitted_peer_claim_widens_requests_but_not_the_trusted_head() {
+    let (mut c, _) = Continuity::fresh(
+        &info(),
+        0,
+        100,
+        PREFETCH_PIECES,
+        LiveRecoveryConfig::default(),
+    );
+    c.emitted = 1;
+    let addr: SocketAddrV4 = "1.2.3.4:8621".parse().unwrap();
+    c.register_active_peer(1, addr, win(0, 100));
+    c.register_active_peer(2, addr, win(0, 200));
+    c.refresh_trusted_head();
+    assert_eq!(c.head, 100);
+    assert_eq!(c.request_head(), 200);
+}

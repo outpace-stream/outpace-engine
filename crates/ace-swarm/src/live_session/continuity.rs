@@ -611,6 +611,9 @@ impl Continuity {
         addr: SocketAddrV4,
         window: WireLivePosition,
     ) {
+        // An admitted peer's claim bounds requests at once; the trusted head waits for
+        // corroboration in `refresh_trusted_head` (#560).
+        self.advertised_head = self.advertised_head.max(window.max_piece.max(0) as u64);
         self.active_peers.insert(id, addr, window);
     }
 
