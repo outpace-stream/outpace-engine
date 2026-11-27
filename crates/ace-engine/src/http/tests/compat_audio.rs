@@ -246,16 +246,29 @@ async fn normalized_hls_ignores_the_language_preference() {
 }
 
 /// Read a direct TS body until it carries a PMT and return that PMT's elementary order.
+/// Bounded: a stalled body fails after 5 s, and one that never carries a PMT fails after 4 MiB.
 async fn ts_pmt_order(response: Response) -> Vec<u16> {
+    const LIMIT: usize = 4 << 20;
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body().into_data_stream();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut bytes = Vec::new();
-    loop {
-        bytes.extend_from_slice(&body.next().await.unwrap().unwrap());
-        if let Some(order) = first_pmt_order(&bytes[..bytes.len() / 188 * 188]) {
+    let mut scanned = 0;
+    while bytes.len() < LIMIT {
+        let chunk = tokio::time::timeout_at(deadline, body.next())
+            .await
+            .unwrap_or_else(|_| panic!("no PMT within 5 s ({} body bytes)", bytes.len()))
+            .expect("body ended before a PMT")
+            .unwrap();
+        bytes.extend_from_slice(&chunk);
+        let complete = bytes.len() / 188 * 188;
+        // Rescan only the newly completed packets.
+        if let Some(order) = first_pmt_order(&bytes[scanned..complete]) {
             return order;
         }
+        scanned = complete;
     }
+    panic!("no PMT in the first {LIMIT} body bytes");
 }
 
 #[tokio::test]
