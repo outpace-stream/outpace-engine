@@ -467,3 +467,60 @@ async fn a_lookup_retries_a_store_the_lock_blocked_on_first_load() {
     drop(blocked);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_repeated_forget_retries_the_eviction_write_it_still_owes() {
+    let dir = temp_dir();
+    let store = DescriptorFallback::new(&dir, 8);
+    store.record(KEY, &info(7));
+    store.settled().await;
+    drop(store);
+    let holder = DescriptorFallback::new(&dir, 8);
+    holder.lookup([9; 20]).await; // takes the lock
+    let blocked = DescriptorFallback::new(&dir, 8);
+    blocked.forget(KEY);
+    blocked.settled().await;
+    drop(holder);
+    // Already pending, but the disk never saw the eviction: this forget must write it.
+    blocked.forget(KEY);
+    blocked.settled().await;
+    drop(blocked);
+    let store = DescriptorFallback::new(&dir, 8);
+    assert!(store.lookup(KEY).await.is_none(), "evicted on disk");
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_overflowing_eviction_set_never_restores_a_forgotten_row() {
+    let dir = temp_dir();
+    let store = DescriptorFallback::new(&dir, 8);
+    store.record(KEY, &info(7));
+    store.settled().await;
+    drop(store);
+    let holder = DescriptorFallback::new(&dir, 8);
+    holder.lookup([9; 20]).await; // takes the lock
+    let blocked = DescriptorFallback::new(&dir, 8);
+    for index in 0..MAX_ENTRIES as u64 {
+        let mut other = [0xee; 20];
+        other[..8].copy_from_slice(&index.to_be_bytes());
+        blocked.forget(other);
+    }
+    blocked.forget(KEY); // past the pending-eviction bound
+    blocked.settled().await;
+    drop(holder);
+    blocked.record([2; 20], &info(2));
+    blocked.settled().await;
+    assert!(
+        blocked.lookup(KEY).await.is_none(),
+        "reopen must not resurrect it"
+    );
+    assert!(blocked.lookup([2; 20]).await.is_some());
+    drop(blocked);
+    let store = DescriptorFallback::new(&dir, 8);
+    assert!(store.lookup(KEY).await.is_none(), "evicted on disk");
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}

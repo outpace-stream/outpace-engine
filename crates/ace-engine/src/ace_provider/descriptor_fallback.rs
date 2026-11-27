@@ -76,6 +76,20 @@ struct State {
     /// Ids forgotten before the file's rows were merged: skipped when they merge, so a forget
     /// can never erase a descriptor recorded after it, and a reopen cannot resurrect one.
     forgotten: HashSet<[u8; 20]>,
+    /// More evictions arrived before the merge than `forgotten` holds: the merge then keeps no
+    /// disk row at all, so none of them can come back.
+    forgotten_overflow: bool,
+}
+
+impl State {
+    /// A write that failed or was blocked still owes the disk this snapshot, and the backoff
+    /// allows another attempt.
+    fn write_retry_due(&self) -> bool {
+        self.persisted != self.revision
+            && self
+                .failed_at
+                .is_some_and(|at| at.elapsed() >= REOPEN_BACKOFF)
+    }
 }
 
 enum Io {
@@ -164,10 +178,7 @@ impl DescriptorFallback {
             if let Some(existing) = state.entries.get(&key) {
                 if existing.info == *info && time.saturating_sub(existing.at) < REFRESH_SECS {
                     // Unchanged, but a blocked write may still owe the disk this snapshot.
-                    let retry = state.persisted != state.revision
-                        && state
-                            .failed_at
-                            .is_some_and(|at| at.elapsed() >= REOPEN_BACKOFF);
+                    let retry = state.write_retry_due();
                     drop(state);
                     if retry {
                         inner.start_writer();
@@ -185,18 +196,26 @@ impl DescriptorFallback {
     pub(crate) fn forget(&self, key: [u8; 20]) {
         let Some(inner) = &self.0 else { return };
         inner.outages.lock().unwrap().retain(|(id, _)| *id != key);
-        let write = {
+        let (changed, retry) = {
             let mut state = inner.state.lock().unwrap();
             let removed = state.entries.remove(&key).is_some();
             // The file's rows are not merged yet: the entry may exist only on disk, so the merge
-            // skips it. Bounded: the merge that opens the store clears the set.
+            // skips it. Bounded: past the bound the merge keeps no disk row, and the merge that
+            // opens the store clears both.
             let pending = !state.disk_merged
-                && state.forgotten.len() < MAX_ENTRIES
-                && state.forgotten.insert(key);
-            removed || pending
+                && if state.forgotten.len() < MAX_ENTRIES {
+                    state.forgotten.insert(key)
+                } else {
+                    !std::mem::replace(&mut state.forgotten_overflow, true)
+                };
+            let changed = removed || pending;
+            // Already evicted in memory, but a blocked or failed write may still owe the disk.
+            (changed, !changed && state.write_retry_due())
         };
-        if write {
+        if changed {
             inner.schedule_write();
+        } else if retry {
+            inner.start_writer();
         }
     }
 
@@ -417,9 +436,10 @@ impl Inner {
         if from_disk {
             // Even an unreadable file counts as merged: the next write replaces it.
             let forgotten = std::mem::take(&mut state.forgotten);
+            let overflow = std::mem::take(&mut state.forgotten_overflow);
             // Entries recorded before the load are fresher than anything on disk.
             for (key, stored) in restored {
-                if !forgotten.contains(&key) {
+                if !overflow && !forgotten.contains(&key) {
                     state.entries.entry(key).or_insert(stored);
                 }
             }
