@@ -63,7 +63,7 @@ The **Avail.** column shows where each setting is available:
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_BIND` | `127.0.0.1:6878` | socket address | all | HTTP API, playback, HLS and ingest. Set `0.0.0.0:6878` to reach it from other machines, and protect it with a firewall or proxy first. [Casting](Casting) needs a LAN-reachable address here: on loopback, `play` fails with `409 loopback_bind`. |
+| `OUTPACE_BIND` | `127.0.0.1:6878` | socket address | all | HTTP API, playback, HLS and ingest. Set `0.0.0.0:6878` to reach it from other machines, and protect it with a firewall or proxy first. Anyone who can reach it can see the IP address of every viewer in `/streams` (see [Playing Streams](Playing-Streams#who-is-watching)). [Casting](Casting) needs a LAN-reachable address here: on loopback, `play` fails with `409 loopback_bind`. |
 | `OUTPACE_RTMP_BIND` | `127.0.0.1:1935` | socket address | all | RTMP ingest for [broadcasting](Broadcasting). Use port `0` for a random local port if you never use RTMP. |
 | `OUTPACE_PEER_LISTEN` | `0.0.0.0:8621` | socket address | all | TCP peer listener. Its port is also the port Outpace announces, so the router's external port must match. See [NAT and Port Mapping](NAT-and-Port-Mapping). |
 

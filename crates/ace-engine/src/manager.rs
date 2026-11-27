@@ -16,6 +16,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 
+mod hls_variants;
+pub use hls_variants::HlsVariantPin;
+#[cfg(test)]
+pub(crate) use hls_variants::MAX_AUDIO_VARIANTS;
+
 /// A resolved VOD plus its last-access time (for idle expiry), keyed by `(network, id)`.
 type VodCacheEntry = (Arc<dyn VodContent>, Instant);
 type StreamKey = (String, String);
@@ -371,6 +376,8 @@ pub struct StreamManager {
     // Completion handles only: never retain media or cancel a replacement generation.
     stopping: StdMutex<StopCompletions>,
     packagers: Mutex<HashMap<(String, String), HlsEntry>>,
+    /// Bounded per-stream audio-language packagers on the same sessions.
+    hls_variants: hls_variants::HlsVariants,
     /// Synchronous pending/cancellation bookkeeping so a dropped future cleans up in `Drop`.
     hls_transitions: Arc<StdMutex<HlsLifecycleState>>,
     /// Serializes only short HLS publication/reap/stop map operations, never provider work.
@@ -574,6 +581,7 @@ impl StreamManager {
             sessions: Mutex::new(HashMap::new()),
             stopping: StdMutex::new(HashMap::new()),
             packagers: Mutex::new(HashMap::new()),
+            hls_variants: Default::default(),
             hls_transitions: Arc::new(StdMutex::new(HlsLifecycleState::default())),
             hls_finalization: Mutex::new(()),
             session_start_locks: StdMutex::new(HashMap::new()),
@@ -1506,6 +1514,8 @@ impl StreamManager {
                 entry.media.stop();
                 entry.control.cancel();
             }
+            let variants = self.hls_variants.take_stream(&key);
+            drop(self.retire_hls_variants(variants.into_iter().map(|e| (key.clone(), e))));
             let session = self.sessions.lock().await.remove(&key);
             if let Some(session) = &session {
                 self.record_stop(&key, session.completion_receiver());
@@ -1560,6 +1570,31 @@ impl StreamManager {
                     n.clone(),
                     i.clone(),
                     s.subscriber_count(),
+                    s.metadata().clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Active sessions as `(network, id, clients, metadata)`, each client snapshot taken
+    /// atomically so its count and list agree.
+    pub async fn list_clients(
+        &self,
+    ) -> Vec<(
+        String,
+        String,
+        crate::session::ClientSnapshot,
+        StreamMetadata,
+    )> {
+        self.sessions
+            .lock()
+            .await
+            .iter()
+            .map(|((n, i), s)| {
+                (
+                    n.clone(),
+                    i.clone(),
+                    s.client_snapshot(),
                     s.metadata().clone(),
                 )
             })
@@ -1646,6 +1681,8 @@ impl StreamManager {
                     controls.push(entry.control);
                 }
             }
+            controls
+                .extend(self.retire_hls_variants(self.hls_variants.take_idle(&retained_sessions)));
             (controls, retired_sessions)
         };
         IdleRetirement {
@@ -1715,6 +1752,7 @@ impl StreamManager {
                 entry.control.cancel();
             }
             controls.extend(entries.drain().map(|(_, entry)| entry.control));
+            controls.extend(self.retire_hls_variants(self.hls_variants.take_all()));
             sessions.extend(
                 self.sessions
                     .lock()

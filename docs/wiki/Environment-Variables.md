@@ -28,7 +28,7 @@ See [Releases and Versions](Releases-and-Versions) for publication status.
 | [`OUTPACE_ALLOW_NON_GLOBAL_BROADCAST_SOURCE`](Configuration#broadcasting-and-ingest) | off | all | Exact `1`: allow private and loopback broadcast pull sources. |
 | [`OUTPACE_ALLOW_NON_GLOBAL_TRANSPORT`](Configuration#discovery-trackers-and-resolution) | off | all | Exact `1`: allow transport-file URLs on private hosts. |
 | [`OUTPACE_BEP9_CONTENT_ID_FALLBACK`](Configuration#discovery-trackers-and-resolution) | `false` | all | Resolve content ids from peer metadata when the catalog fails. |
-| [`OUTPACE_BIND`](Configuration#network-and-listeners) | `127.0.0.1:6878` | all | HTTP API address. The container sets `0.0.0.0:6878`. [Casting](Casting) needs a LAN address. |
+| [`OUTPACE_BIND`](Configuration#network-and-listeners) | `127.0.0.1:6878` | all | HTTP API address. The container sets `0.0.0.0:6878`. [Casting](Casting) needs a LAN address. Anyone who can reach it sees viewers' IP addresses in `/streams`. |
 | [`OUTPACE_BROADCAST_OPTIONS`](Configuration#broadcasting-and-ingest) | `{}` | all | Per-broadcast metadata profiles (JSON). |
 | [`OUTPACE_BROADCAST_CATALOG_REGISTER`](Configuration#broadcasting-and-ingest) | `false` | edge | Register public broadcasts with the AceStream catalog. |
 | [`OUTPACE_BROADCAST_SOURCES`](Configuration#broadcasting-and-ingest) | `{}` | all | HTTP(S) MPEG-TS pull sources started at boot (JSON). Treat as a secret. |

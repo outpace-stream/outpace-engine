@@ -16,7 +16,7 @@ pub(super) fn route(cast: Arc<CastService>) -> MethodRouter<AppState> {
 async fn dispatch(
     State(s): State<AppState>,
     Extension(cast): Extension<Arc<CastService>>,
-    method: Method,
+    (method, client): (Method, ClientAddr),
     Path(path): Path<String>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
@@ -36,12 +36,12 @@ async fn dispatch(
         ["targets"] if get => list_targets(&cast, query.as_deref()).await,
         ["targets", target, "play"] if post => {
             let body = is_json(&headers).then_some(&body[..]);
-            play(&s, &cast, target, body).await
+            play(&s, &cast, &client, target, body).await
         }
         ["targets", target, "stop"] if post => stop(&cast, target).await,
         ["targets", target, "status"] if get => status(&cast, target).await,
         // Renderers often probe the stream with HEAD; hyper sends no body for it.
-        ["s", file] if get || method == Method::HEAD => cast_stream(&s, &cast, file).await,
+        ["s", file] if get || method == Method::HEAD => cast_stream(&s, &cast, &client, file).await,
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -157,7 +157,13 @@ async fn list_targets(cast: &CastService, query: Option<&str>) -> Response {
 /// `POST /cast/targets/{target}/play` with `{"network":"ace","id":"..."}`.
 /// `body` is `None` unless the request is `application/json`: requiring it makes a browser
 /// preflight any cross-origin attempt.
-async fn play(s: &AppState, cast: &CastService, target: &str, body: Option<&[u8]>) -> Response {
+async fn play(
+    s: &AppState,
+    cast: &CastService,
+    client: &ClientAddr,
+    target: &str,
+    body: Option<&[u8]>,
+) -> Response {
     // Fail on a loopback bind before anything else, so the error is the actionable one.
     if let Err(error) = cast.check_bind() {
         return error_response(&error);
@@ -194,6 +200,9 @@ async fn play(s: &AppState, cast: &CastService, target: &str, body: Option<&[u8]
         Ok(warm) => warm,
         Err(error) => return stream_error(error),
     };
+    // The warm viewer counts as a client while `play` runs, so it is listed as the
+    // controller that asked for the cast.
+    client.record(&warm.1);
     let result = cast.play(target, network, &id, "Outpace live stream").await;
     drop(warm);
     match result {
@@ -247,7 +256,12 @@ async fn status(cast: &CastService, target: &str) -> Response {
 
 /// `GET /cast/s/{token}.ts` — the stream a renderer was told to play. Serves the ordinary
 /// shared live session and counts the open response for `status`.
-async fn cast_stream(s: &AppState, cast: &CastService, file: &str) -> Response {
+async fn cast_stream(
+    s: &AppState,
+    cast: &CastService,
+    client: &ClientAddr,
+    file: &str,
+) -> Response {
     let Some((active, guard)) = file
         .strip_suffix(".ts")
         .and_then(|token| cast.open_stream(token))
@@ -265,6 +279,8 @@ async fn cast_stream(s: &AppState, cast: &CastService, file: &str) -> Response {
         Ok(session) => session,
         Err(error) => return stream_error(error),
     };
+    // Each renderer fetch is one client, listed under the renderer's address.
+    client.record(&session.1);
     let response = stream_session_response(session, s.manager.hls_startup_timeout()).await;
     if !response.status().is_success() {
         return response;

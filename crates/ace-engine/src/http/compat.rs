@@ -6,6 +6,7 @@ use ace_swarm::resolve::HlsOrigin;
 
 pub(super) async fn ace_getstream(
     State(s): State<AppState>,
+    client: ClientAddr,
     headers: HeaderMap,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Response {
@@ -41,9 +42,11 @@ pub(super) async fn ace_getstream(
         return Json(json!({ "response": null, "error": "no ace network registered" }))
             .into_response();
     };
-    let token = s
-        .ace_sessions
-        .mint(selection.playback_id.clone(), selection.session_key.clone());
+    let token = s.ace_sessions.mint_with_audio(
+        selection.playback_id.clone(),
+        selection.session_key.clone(),
+        preferred_audio_language(&params),
+    );
     let base = request_base(&headers);
     let playback_id = selection.playback_id;
     let public_id = selection.public_id;
@@ -81,8 +84,10 @@ pub(super) async fn ace_getstream(
         s.ace_sessions.remove_owned(&playback_id, &token);
         return StatusCode::NOT_FOUND.into_response();
     };
+    let language = s.ace_sessions.ts_audio_language(&token);
     match opened {
         Ok(session) => {
+            client.record(&session.1);
             ace_stream_session_response(
                 session,
                 expires_at,
@@ -93,6 +98,7 @@ pub(super) async fn ace_getstream(
                     token,
                 }),
                 s.manager.hls_startup_timeout(),
+                language,
             )
             .await
         }
@@ -117,6 +123,7 @@ pub(super) async fn ace_getstream(
 /// official documented control-URL shape. Both paths use the same native `HlsPackager`.
 pub(super) async fn ace_manifest(
     State(s): State<AppState>,
+    client: ClientAddr,
     headers: HeaderMap,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Response {
@@ -153,7 +160,7 @@ pub(super) async fn ace_manifest(
             .into_response();
     };
 
-    let (_pkg, session, pin) = match s
+    let (pkg, session, pin) = match s
         .manager
         .get_or_start_compatibility_hls(&network, &selection.session_key)
         .await
@@ -178,9 +185,25 @@ pub(super) async fn ace_manifest(
         }
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
-    let token = s
-        .ace_sessions
-        .mint_hls(selection.playback_id.clone(), selection.session_key, pin);
+    // The lease's pin is its one client entry: the address of the request that opened it,
+    // recorded once here and removed with the pin when the lease ends. Playlist and
+    // segment fetches do no client bookkeeping.
+    client.record(&pin);
+    // A preference resolves once, against the shared session's tables, to a bounded variant.
+    let variant = match preferred_audio_language(&params) {
+        Some(language) => {
+            s.manager
+                .compatibility_hls_audio(&network, &selection.session_key, &pkg, &session, language)
+                .await
+        }
+        None => None,
+    };
+    let token = s.ace_sessions.mint_hls_with_audio(
+        selection.playback_id.clone(),
+        selection.session_key,
+        pin,
+        variant,
+    );
     let base = request_base(&headers);
     let playback_url = format!("{base}/ace/m/{}/{}.m3u8", selection.playback_id, token);
 
@@ -305,7 +328,7 @@ async fn ace_hls_view_playback(
     let Some(network) = ace_network(&s) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(pkg) = s.manager.get_hls(&network, &session_key).await else {
+    let Some(pkg) = lease_hls(&s, &network, &session_key, token).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
     // Replay coordinates belong to the packager they were prepared on, never a replacement.
@@ -346,7 +369,7 @@ async fn ace_hls_view_playback(
     };
     // Removal/replacement and authorization take precedence over both snapshots and 503s.
     // Revalidate the lease after the asynchronous manager lookup as well.
-    let current = s.manager.get_hls(&network, &session_key).await;
+    let current = lease_hls(&s, &network, &session_key, token).await;
     if !current.is_some_and(|current| Arc::ptr_eq(&current, &pkg))
         || *cancel.borrow()
         || Instant::now() >= expires_at
@@ -412,7 +435,7 @@ async fn ace_hls_view_segment(
     let Some(network) = ace_network(&s) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(pkg) = s.manager.get_hls(&network, &session_key).await else {
+    let Some(pkg) = lease_hls(&s, &network, &session_key, token).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if s.ace_sessions
@@ -453,6 +476,28 @@ async fn ace_hls_view_segment(
     }
 }
 
+/// The packager a lease serves: the exact audio variant entry it pinned (none once that entry
+/// is removed or failed, never a later variant for the same track), else the default packager.
+async fn lease_hls(
+    s: &AppState,
+    network: &str,
+    session_key: &str,
+    token: &str,
+) -> Option<Arc<crate::hls::HlsPackager>> {
+    match s.ace_sessions.hls_audio_variant(token) {
+        Some(variant) => s.manager.get_hls_variant(network, session_key, variant),
+        None => s.manager.get_hls(network, session_key).await,
+    }
+}
+
+/// `preferred_audio_language`: exactly three ASCII letters (ISO 639-2), case-insensitive.
+/// Any other value is ignored, like an omitted parameter.
+fn preferred_audio_language(
+    params: &HashMap<String, String>,
+) -> Option<ace_media::audio::AudioLanguage> {
+    ace_media::audio::AudioLanguage::parse(params.get("preferred_audio_language")?)
+}
+
 fn history_error_response(error: HlsHistoryError) -> Response {
     let status = match error {
         HlsHistoryError::Gone => StatusCode::GONE,
@@ -486,6 +531,7 @@ async fn open_for_lease(
 
 pub(super) async fn ace_playback(
     State(s): State<AppState>,
+    client: ClientAddr,
     Path((id, token)): Path<(String, String)>,
 ) -> Response {
     let Some(network) = ace_network(&s) else {
@@ -504,12 +550,14 @@ pub(super) async fn ace_playback(
             // This response's own subscription now keeps the source; a stat-poll warm hold
             // has done its job.
             s.ace_sessions.release_warm(&id, &token);
+            client.record(&session.1);
             ace_stream_session_response(
                 session,
                 expires_at,
                 cancel,
                 None,
                 s.manager.hls_startup_timeout(),
+                s.ace_sessions.ts_audio_language(&token),
             )
             .await
         }
@@ -785,7 +833,7 @@ async fn ace_command_json(
     let Some(session_key) = s.ace_sessions.validate(id, token) else {
         return command_error(EXPIRED);
     };
-    let Some(pkg) = s.manager.get_hls(&network, &session_key).await else {
+    let Some(pkg) = lease_hls(s, &network, &session_key, token).await else {
         return command_error("playback source expired");
     };
     // Preparation never changes the current view; only a successful commit does. A seek is
@@ -872,7 +920,7 @@ async fn timeshift_status(s: &AppState, id: &str, token: &str) -> serde_json::Va
     let Some(key) = s.ace_sessions.validate(id, token) else {
         return json!({ "supported": false, "reason": "session_expired" });
     };
-    let Some(pkg) = s.manager.get_hls(&network, &key).await else {
+    let Some(pkg) = lease_hls(s, &network, &key, token).await else {
         return json!({ "supported": false, "reason": "source_expired" });
     };
     let Some((view, _)) = s.ace_sessions.hls_view(id, token) else {

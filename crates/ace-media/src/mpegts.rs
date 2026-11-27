@@ -315,6 +315,8 @@ pub struct VideoAccessPointState {
     cached_pmt: Option<Vec<u8>>,
     service_name: Option<String>,
     program_number: Option<u16>,
+    /// Per-viewer audio language preference applied by [`Self::observe_mut`]; survives resets.
+    audio_language: Option<crate::audio::AudioLanguage>,
 }
 
 impl VideoAccessPointState {
@@ -357,10 +359,12 @@ impl VideoAccessPointState {
         let name = self.service_name.take();
         let allow_mpeg2 = self.allow_mpeg2;
         let preserve_transport_identity = self.preserve_transport_identity;
+        let audio_language = self.audio_language;
         *self = Self {
             service_name: name,
             allow_mpeg2,
             preserve_transport_identity,
+            audio_language,
             ..Self::default()
         };
     }
@@ -371,26 +375,53 @@ impl VideoAccessPointState {
         }
         let pid = ts_pid(packet);
         if pid == 0 {
-            if let Some(mapping) = parse_pat_first_program(packet) {
-                self.cached_pat = Some(packet.to_vec());
-                let program = mapping.map(|(program, _)| program);
-                let pmt_pid = mapping.map(|(_, pid)| pid);
-                if self.pmt_pid != pmt_pid || self.program_number != program {
-                    self.cached_pmt = None;
-                    self.video_pid = None;
-                    self.video_codec = None;
-                }
-                self.program_number = program;
-                self.pmt_pid = pmt_pid;
-            }
+            self.observe_pat(packet);
         } else if Some(pid) == self.pmt_pid {
-            if let Some(video) = parse_pmt_video(packet, self.program_number, self.allow_mpeg2) {
-                self.cached_pmt = Some(packet.to_vec());
-                self.video_pid = video.map(|(pid, _)| pid);
-                self.video_codec = video.map(|(_, codec)| codec);
-            }
+            self.observe_pmt(packet);
         }
         Some(pid) == self.video_pid && is_random_access_point(packet, self.video_codec)
+    }
+
+    /// Like [`Self::observe`], but first reorders a PMT packet in place for this viewer's audio
+    /// language preference, so the cached table prefix and the forwarded packet agree. Only PMT
+    /// packets pay for the preference check; every other packet takes the same path as `observe`.
+    pub fn observe_mut(&mut self, packet: &mut [u8]) -> bool {
+        if packet.len() != TS_PACKET_LEN || packet[0] != 0x47 {
+            return false;
+        }
+        let pid = ts_pid(packet);
+        if pid == 0 {
+            self.observe_pat(packet);
+        } else if Some(pid) == self.pmt_pid {
+            if let Some(language) = self.audio_language {
+                crate::audio::prefer_audio_track(packet, language);
+            }
+            self.observe_pmt(packet);
+        }
+        Some(pid) == self.video_pid && is_random_access_point(packet, self.video_codec)
+    }
+
+    fn observe_pat(&mut self, packet: &[u8]) {
+        if let Some(mapping) = parse_pat_first_program(packet) {
+            self.cached_pat = Some(packet.to_vec());
+            let program = mapping.map(|(program, _)| program);
+            let pmt_pid = mapping.map(|(_, pid)| pid);
+            if self.pmt_pid != pmt_pid || self.program_number != program {
+                self.cached_pmt = None;
+                self.video_pid = None;
+                self.video_codec = None;
+            }
+            self.program_number = program;
+            self.pmt_pid = pmt_pid;
+        }
+    }
+
+    fn observe_pmt(&mut self, packet: &[u8]) {
+        if let Some(video) = parse_pmt_video(packet, self.program_number, self.allow_mpeg2) {
+            self.cached_pmt = Some(packet.to_vec());
+            self.video_pid = video.map(|(pid, _)| pid);
+            self.video_codec = video.map(|(_, codec)| codec);
+        }
     }
 
     pub fn table_prefix(&self) -> Option<Vec<u8>> {
@@ -523,6 +554,13 @@ impl KeyframeGate {
         self.access.preserve_transport_identity();
     }
 
+    /// Reorder every PMT this viewer receives so the best track tagged `language` is the first
+    /// audio entry (see [`crate::audio::prefer_audio_track`]). All tracks are still forwarded.
+    /// Without a matching track the PMT passes unchanged. Set before the first push.
+    pub fn prefer_audio_language(&mut self, language: crate::audio::AudioLanguage) {
+        self.access.audio_language = Some(language);
+    }
+
     /// Re-arm the gate (drop its buffer and re-require a keyframe) while preserving its
     /// configured title, so a mid-stream reset keeps injecting/filtering the SDT.
     pub fn reset(&mut self) {
@@ -564,7 +602,7 @@ impl KeyframeGate {
         let mut resumed = None;
         let mut i = 0;
         while i + TS_PACKET_LEN <= self.buf.len() {
-            let pkt = &self.buf[i..i + TS_PACKET_LEN];
+            let pkt = &mut self.buf[i..i + TS_PACKET_LEN];
             if self.filter_sdt && ts_pid(pkt) == SDT_PID {
                 // Filter in both phases: even the scan-budget trigger must not
                 // publish upstream SDT into this gate's owned continuity sequence.
@@ -577,7 +615,7 @@ impl KeyframeGate {
                 continue;
             }
             if self.locked {
-                let access_point = self.access.observe(pkt);
+                let access_point = self.access.observe_mut(pkt);
                 if self.filter_sdt && access_point {
                     append_gate_tables(&self.access, &mut self.next_sdt_counter, &mut out);
                 }
@@ -591,7 +629,7 @@ impl KeyframeGate {
                 continue;
             }
             self.scanned += 1;
-            if self.access.observe(pkt) {
+            if self.access.observe_mut(pkt) {
                 // Lock on the keyframe: hand the player the tables, then the keyframe.
                 append_gate_tables(&self.access, &mut self.next_sdt_counter, &mut out);
                 append_resumed_packet(&mut self.mark_discontinuity, None, pkt, &mut out);
@@ -2009,6 +2047,59 @@ mod tests {
         input.extend(ts(VIDEO_PID, false, false, &[0xAA; 16])); // mid-GOP only
         input.extend(ts(AUDIO_PID, true, false, &[0xCC; 16]));
         assert!(g.push(&input).is_empty(), "no keyframe yet -> emit nothing");
+    }
+
+    #[test]
+    fn gate_audio_language_rewrites_only_pmt_packets_and_survives_reset() {
+        use crate::audio::{prefer_audio_track, AudioLanguage};
+        use crate::test_stream::{stream, PMT_PID};
+        let rus = AudioLanguage::parse("rus").unwrap();
+        let source = stream(60);
+        let mut expected_pmt = crate::test_stream::pmt(&crate::test_stream::AUDIO);
+        assert!(prefer_audio_track(&mut expected_pmt, rus));
+        let run = |gate: &mut KeyframeGate| {
+            let mut out = Vec::new();
+            for chunk in source.chunks(64 * 188 + 7) {
+                out.extend(gate.push(chunk));
+            }
+            out
+        };
+        let default = run(&mut KeyframeGate::with_service_name(Some(
+            "Synthetic".into(),
+        )));
+        let mut preferred = KeyframeGate::with_service_name(Some("Synthetic".into()));
+        preferred.prefer_audio_language(rus);
+        let mut output = run(&mut preferred);
+        assert_eq!(default.len(), output.len());
+        let mut pmts = 0;
+        for (a, b) in default.chunks(188).zip(output.chunks(188)) {
+            if ts_pid(a) == PMT_PID {
+                pmts += 1;
+                assert_eq!(
+                    a[4..],
+                    crate::test_stream::pmt(&crate::test_stream::AUDIO)[4..]
+                );
+                assert_eq!(a[..4], b[..4], "header and continuity are the source's");
+                assert_eq!(b[4..], expected_pmt[4..]);
+            } else {
+                assert_eq!(a, b, "non-PMT packets are forwarded unchanged");
+            }
+        }
+        assert!(
+            pmts > 20,
+            "the locked prefix and every repeat are rewritten"
+        );
+        // A discontinuity re-arm keeps the viewer's preference.
+        preferred.reset_for_discontinuity();
+        output.clear();
+        for chunk in source.chunks(188 * 10) {
+            output.extend(preferred.push(chunk));
+        }
+        let first_pmt = output
+            .chunks(188)
+            .find(|p| ts_pid(p) == PMT_PID)
+            .expect("tables after re-lock");
+        assert_eq!(first_pmt[4..], expected_pmt[4..]);
     }
 
     #[test]

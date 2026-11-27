@@ -1,7 +1,9 @@
 use crate::hls::{HlsHistorySnapshot, HlsPackager};
+use crate::manager::HlsVariantPin;
 use crate::provider::ProviderError;
 use crate::session::{Subscription, SupportPin};
 use crate::start_status::StartError;
+use ace_media::audio::AudioLanguage;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -29,6 +31,8 @@ pub(super) struct AceLease {
     warm: WarmState,
     /// Identifies the current warm start, so a cancelled earlier start never settles a later one.
     warm_epoch: u64,
+    /// The caller's `preferred_audio_language`, resolved for this lease's route.
+    audio: LeaseAudio,
 }
 
 /// A TS JSON lease starts nothing when minted. Its first stat poll starts the shared source
@@ -89,6 +93,17 @@ pub(super) enum WarmPoll {
     Origin,
     /// Not starting anything: an HLS lease, a held source, or playback already opened.
     Settled,
+}
+
+/// A lease's audio-language preference. HLS resolves it once, when the lease is minted.
+#[derive(Default)]
+pub(super) enum LeaseAudio {
+    #[default]
+    Default,
+    /// Direct TS: reorder this viewer's PMT for the language.
+    Ts(AudioLanguage),
+    /// HLS: serve, and keep alive, the variant packager for the resolved track.
+    Hls(HlsVariantPin),
 }
 
 struct HlsViewState {
@@ -186,22 +201,16 @@ impl AceSessionStore {
         self
     }
 
+    #[cfg(test)]
     pub(super) fn mint(&self, playback_id: String, session_key: String) -> String {
-        use rand::TryRng;
-        let mut bytes = [0_u8; 32];
-        rand::rngs::SysRng
-            .try_fill_bytes(&mut bytes)
-            .expect("OS randomness for playback token");
-        let token = hex::encode(bytes);
-        self.insert_at(token.clone(), playback_id, session_key, Instant::now());
-        token
+        self.mint_with_audio(playback_id, session_key, None)
     }
 
-    pub(super) fn mint_hls(
-        self: &Arc<Self>,
+    pub(super) fn mint_with_audio(
+        &self,
         playback_id: String,
         session_key: String,
-        pin: Subscription,
+        language: Option<AudioLanguage>,
     ) -> String {
         use rand::TryRng;
         let mut bytes = [0_u8; 32];
@@ -209,7 +218,40 @@ impl AceSessionStore {
             .try_fill_bytes(&mut bytes)
             .expect("OS randomness for playback token");
         let token = hex::encode(bytes);
-        self.insert_hls_at(token.clone(), playback_id, session_key, Instant::now(), pin);
+        let audio = language.map_or(LeaseAudio::Default, LeaseAudio::Ts);
+        self.insert_with_pin(
+            token.clone(),
+            playback_id,
+            session_key,
+            Instant::now(),
+            None,
+            audio,
+        );
+        token
+    }
+
+    pub(super) fn mint_hls_with_audio(
+        self: &Arc<Self>,
+        playback_id: String,
+        session_key: String,
+        pin: Subscription,
+        variant: Option<HlsVariantPin>,
+    ) -> String {
+        use rand::TryRng;
+        let mut bytes = [0_u8; 32];
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut bytes)
+            .expect("OS randomness for playback token");
+        let token = hex::encode(bytes);
+        let audio = variant.map_or(LeaseAudio::Default, LeaseAudio::Hls);
+        self.insert_with_pin(
+            token.clone(),
+            playback_id,
+            session_key,
+            Instant::now(),
+            Some(pin),
+            audio,
+        );
         self.ensure_hls_reaper();
         self.wake_hls_reaper();
         token
@@ -311,6 +353,7 @@ impl AceSessionStore {
         drop(idle);
     }
 
+    #[cfg(test)]
     pub(super) fn insert_at(
         &self,
         token: String,
@@ -318,7 +361,14 @@ impl AceSessionStore {
         session_key: String,
         now: Instant,
     ) {
-        self.insert_with_pin(token, playback_id, session_key, now, None);
+        self.insert_with_pin(
+            token,
+            playback_id,
+            session_key,
+            now,
+            None,
+            LeaseAudio::Default,
+        );
     }
 
     fn insert_with_pin(
@@ -328,6 +378,7 @@ impl AceSessionStore {
         session_key: String,
         now: Instant,
         hls_pin: Option<Subscription>,
+        audio: LeaseAudio,
     ) {
         let mut hls_schedule_changed = hls_pin.is_some();
         self.purge_expired(now);
@@ -360,6 +411,7 @@ impl AceSessionStore {
                 hls_view,
                 warm: WarmState::Cold,
                 warm_epoch: 0,
+                audio,
             },
         );
         drop(leases);
@@ -368,15 +420,20 @@ impl AceSessionStore {
         }
     }
 
-    pub(super) fn insert_hls_at(
-        &self,
-        token: String,
-        playback_id: String,
-        session_key: String,
-        now: Instant,
-        pin: Subscription,
-    ) {
-        self.insert_with_pin(token, playback_id, session_key, now, Some(pin));
+    /// The direct-TS audio language a lease was minted with.
+    pub(super) fn ts_audio_language(&self, token: &str) -> Option<AudioLanguage> {
+        match self.leases.lock().unwrap().get(token)?.audio {
+            LeaseAudio::Ts(language) => Some(language),
+            _ => None,
+        }
+    }
+
+    /// The id of the exact HLS audio variant entry a lease pins, if any.
+    pub(super) fn hls_audio_variant(&self, token: &str) -> Option<u64> {
+        match &self.leases.lock().unwrap().get(token)?.audio {
+            LeaseAudio::Hls(pin) => Some(pin.id()),
+            _ => None,
+        }
     }
 
     pub(super) fn validate(&self, playback_id: &str, token: &str) -> Option<String> {
