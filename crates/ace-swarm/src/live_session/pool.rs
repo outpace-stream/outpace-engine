@@ -63,7 +63,7 @@ pub(super) async fn activate_upstream_peer_with_policy(
     let activation::Prepared { upstream, permit } = activation::prepare_with_policy(
         activation::Start {
             cursor: start,
-            head: continuity.head,
+            head: continuity.trusted_head(),
         },
         upstream,
         identity,
@@ -106,6 +106,7 @@ fn commit_upstream_peer(
     // leaves its runtime, gossip reader, and request slots intact.
     let replaced = replacing.and_then(|(peers, id)| drop_peer_runtime(id, peers, continuity));
     continuity.register_active_peer(peer_id, upstream.addr, upstream.window);
+    continuity.refresh_trusted_head();
     continuity.set_peer_unchoked(peer_id, upstream.unchoked);
     if continuity.reconnect_pool {
         continuity.recovery_event(RecoveryEvent::UpstreamReconnect);
