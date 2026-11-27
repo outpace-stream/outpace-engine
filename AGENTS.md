@@ -12,6 +12,26 @@ Crates live under `crates/`: `ace-wire` for peer-wire codecs, `ace-tracker` for 
 - `cargo run -p ace-engine --bin outpace -- serve`: start the daemon.
 - `cargo build --release -p ace-engine --bin outpace`: build the release binary.
 
+## Local Build Storage & Worktree Hygiene
+
+Local disk space is a limited resource. Do not leave a full Rust build cache in every worktree: repeated Outpace builds have accumulated hundreds of GiB and caused `No space left on device` failures.
+
+- Before a substantial local build, check available space on the build filesystem (`df -h`) and the size of the selected build cache (`du -sh "$CARGO_TARGET_DIR"` when it exists). If less than 30 GiB is available, recover disposable build space before starting; check again before a large cross-compilation or release matrix. Treat a cache above 40 GiB as a cleanup trigger, not a reason to create another cache.
+- For ordinary local development, reuse one cache across Outpace worktrees. Set this in the shell running Cargo (including validation commands), rather than committing an absolute machine-specific path:
+
+  ```sh
+  export CARGO_TARGET_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/outpace/cargo-target"
+  export CARGO_INCREMENTAL=0
+  mkdir -p "$CARGO_TARGET_DIR"
+  ```
+
+  Disabling incremental compilation saves space at the cost of slower rebuilds. Do not change release optimization, debug information, or benchmark settings solely to save disk space without considering the validation being performed.
+- Cargo commands sharing this directory may wait for its build lock; do not bypass the lock by creating a new cache for each agent. Build outputs now live under `$CARGO_TARGET_DIR`, so check scripts that assume `./target/` and pass the actual binary path where supported. Run the intended build through Cargo before using a cached executable; do not assume a binary left by another worktree matches your source.
+- Use separate, explicitly named target directories only when required, such as simultaneous before/after comparisons or tooling that requires `./target/`. Keep each comparison binary separate so another build cannot overwrite it. Record temporary cache paths and remove their generated outputs when validation finishes and no build or running task needs them. Never clean a shared cache while another agent is using it.
+- Prefer focused crate/test commands while iterating; run the required workspace gates before submission. Avoid repeating full builds across profiles, toolchains, feature sets, or target architectures without a validation need.
+- Before creating another worktree, inspect `git worktree list` and reuse a suitable existing task worktree when safe. At task completion, report remaining temporary caches and worktrees. Remove a task worktree only after checking tracked changes, untracked/ignored files, and whether its branch or detached commits must be preserved. Never use forced removal or delete branches merely to reclaim space.
+- Cleanup is limited to confirmed generated, untracked build outputs. A directory named `target` can contain source code; verify its role and Git tracking before deleting it. Preserve source files, fixtures, captures, and unfinished work.
+
 ## Coding Style & Naming Conventions
 
 Use the pinned Rust toolchain in `rust-toolchain.toml` and `rustfmt`. Follow Rust naming conventions: `snake_case` for modules, functions, variables, and tests; `PascalCase` for types and traits; `SCREAMING_SNAKE_CASE` for constants/env vars. Keep protocol parsing deterministic and covered by vectors where practical. Prefer focused modules that match crate boundaries.
