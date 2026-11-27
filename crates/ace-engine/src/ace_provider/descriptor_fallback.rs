@@ -236,22 +236,23 @@ impl DescriptorFallback {
             let loader = Arc::clone(inner);
             let tasks = Arc::clone(&inner.tasks);
             tasks.active.fetch_add(1, Ordering::SeqCst);
-            // The blocking task signals completion itself, so a cancelled lookup still settles.
+            // The blocking task finishes the job itself, so a cancelled lookup still settles
+            // and still starts the write it owes.
             tokio::task::spawn_blocking(move || {
                 loader.ensure_loaded();
+                // A reopen merged the file under changes a blocked write still owes it.
+                let owed = {
+                    let state = loader.state.lock().unwrap();
+                    state.disk_merged && state.persisted != state.revision
+                };
+                if owed {
+                    loader.start_writer();
+                }
                 drop(loader);
                 tasks.finish();
             })
             .await
             .ok()?;
-            // A reopen merged the file under changes a blocked write still owes it: write them.
-            let owed = {
-                let state = inner.state.lock().unwrap();
-                state.disk_merged && state.persisted != state.revision
-            };
-            if owed {
-                inner.start_writer();
-            }
         }
         let state = inner.state.lock().unwrap();
         let stored = state.entries.get(&key)?;

@@ -565,3 +565,36 @@ async fn a_cancelled_cold_lookup_still_settles() {
     drop(store);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+// Deliberate: the I/O lock stalls the blocking loader, not this task, so the lookup can be
+// cancelled mid-load deterministically.
+#[allow(clippy::await_holding_lock)]
+async fn a_cancelled_reopening_lookup_still_writes_what_it_owes() {
+    let dir = temp_dir();
+    let store = DescriptorFallback::new(&dir, 8);
+    store.record(KEY, &info(7));
+    store.settled().await;
+    drop(store);
+    let holder = DescriptorFallback::new(&dir, 8);
+    holder.lookup([9; 20]).await; // takes the lock
+    let blocked = DescriptorFallback::new(&dir, 8);
+    blocked.forget(KEY);
+    blocked.settled().await;
+    drop(holder);
+    // The reopening lookup is dropped while its load waits on the store's I/O lock; the load
+    // then runs to the end without it.
+    {
+        let io = blocked.0.as_ref().unwrap().io.lock().unwrap();
+        let cancelled = tokio::time::timeout(Duration::from_millis(50), blocked.lookup(KEY)).await;
+        assert!(cancelled.is_err(), "the lookup must be cancelled mid-load");
+        drop(io);
+    }
+    blocked.settled().await;
+    drop(blocked);
+    let store = DescriptorFallback::new(&dir, 8);
+    assert!(store.lookup(KEY).await.is_none(), "evicted on disk");
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
