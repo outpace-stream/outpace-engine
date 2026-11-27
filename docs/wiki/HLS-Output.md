@@ -7,9 +7,10 @@ incoming MPEG-TS into segments, keeps a sliding window of them and serves a live
 HLS viewers of one source share one packager, and every packager shares the download with any
 direct MPEG-TS viewers. Compatibility viewers that ask for a different
 [audio language](#choosing-an-audio-language) can add up to four more packagers to a source,
-so one source normally runs up to five. Right after a source restarts, language packagers from
-before the restart keep serving the viewers that still use them until their leases end, so for
-a short time a source can run more, but never more than nine packagers in total.
+so one source normally runs up to five. When a source restarts or is cleaned up while viewers
+still hold language packagers, those packagers keep serving them until their leases end, so for
+a while a source can run more, but never more than nine packagers in total. A language packager
+that is being shut down still counts until it has stopped.
 
 ## When to use HLS instead of MPEG-TS
 

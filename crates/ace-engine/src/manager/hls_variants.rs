@@ -17,9 +17,15 @@
 //! - A variant belongs to the session it was created on. A replacement session for the same
 //!   stream never receives it; pinned variants of a finished session keep serving their leases
 //!   until those end and do not count toward the replacement's cap.
+//! - A request resolves its language, then revalidates that choice under the admission lock:
+//!   if the PMT moved the language while it waited, it resolves again. Existing leases stay on
+//!   the PID they pinned.
 //! - At most [`MAX_AUDIO_VARIANTS`] run per session, and at most
-//!   [`MAX_STREAM_AUDIO_VARIANTS`] per stream counting pinned variants of replaced sessions. Unpinned variants are retired by the idle
-//!   sweep, on stop and on shutdown.
+//!   [`MAX_STREAM_AUDIO_VARIANTS`] per stream counting pinned variants of replaced or removed
+//!   sessions. A retired variant's worker keeps counting against both limits until it has
+//!   exited; a request that needs that slot waits for the exit (within the HLS startup
+//!   timeout) instead of running one worker over the limit. Unpinned variants are retired by
+//!   the idle sweep, on stop and on shutdown.
 
 use super::*;
 use ace_media::audio::AudioLanguage;
@@ -43,12 +49,59 @@ fn admits(on_session: usize, total: usize) -> bool {
 pub(super) struct HlsVariants {
     sets: StdMutex<HashMap<StreamKey, VariantSet>>,
     next_id: std::sync::atomic::AtomicU64,
+    /// Signalled when a request has resolved its PID and is about to take the admission lock.
+    #[cfg(test)]
+    resolved: tokio::sync::Notify,
 }
 
 #[derive(Default)]
 struct VariantSet {
     entries: Vec<VariantEntry>,
+    /// Retired workers that may still be running. Bounded by the limits: a worker only retires
+    /// from `entries` (whose slot it keeps), and each is pruned once it has exited.
+    retiring: Vec<RetiringWorker>,
     cap_logged: bool,
+    /// Every worker this set started, to measure concurrent workers in tests.
+    #[cfg(test)]
+    spawned: Vec<watch::Receiver<bool>>,
+    #[cfg(test)]
+    peak_workers: usize,
+}
+
+/// A retired variant worker that still holds its slot on `session` and in the stream total.
+struct RetiringWorker {
+    session: Weak<StreamSession>,
+    done: watch::Receiver<bool>,
+}
+
+impl VariantSet {
+    /// Forget retired workers that have exited (or whose cleanup ended without confirmation).
+    fn prune_retiring(&mut self) {
+        self.retiring
+            .retain(|worker| !*worker.done.borrow() && worker.done.has_changed().is_ok());
+    }
+
+    /// Move `gone` out of the live set, keeping its workers counted until they exit.
+    fn retire(&mut self, gone: Vec<VariantEntry>) -> Vec<HlsEntry> {
+        gone.into_iter()
+            .map(|variant| {
+                self.retiring.push(RetiringWorker {
+                    done: variant.entry.control.completion_receiver(),
+                    session: variant.session,
+                });
+                variant.entry
+            })
+            .collect()
+    }
+}
+
+/// Result of one admission attempt.
+enum Admission {
+    Pinned(HlsVariantPin),
+    /// At a limit with no retiring worker to wait for: serve the default packager.
+    Full,
+    /// A limit is held only by a retiring worker: wait for this completion, then retry.
+    Retiring(watch::Receiver<bool>),
 }
 
 struct VariantEntry {
@@ -96,23 +149,25 @@ impl HlsVariants {
             .map(|variant| variant.entry.media.clone())
     }
 
-    /// Pin the `pid` variant of `session`, creating it under the cap. Failed variants, and
-    /// unpinned variants of any session, are retired first, so the cap is a hard bound; they
-    /// are returned for the caller to fence and cancel.
+    /// Pin the `pid` variant of `session`, creating it under the limits. Failed variants, and
+    /// unpinned variants of any session, are retired first and returned for the caller to fence
+    /// and cancel; their workers keep counting against the limits until they exit.
     fn acquire(
         &self,
         key: &StreamKey,
         pid: u16,
         session: &Arc<StreamSession>,
         create: impl FnOnce() -> HlsEntry,
-    ) -> (Option<HlsVariantPin>, Vec<HlsEntry>) {
+    ) -> (Admission, Vec<HlsEntry>) {
         let mut sets = self.sets.lock().unwrap();
         let set = sets.entry(key.clone()).or_default();
+        set.prune_retiring();
         let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut set.entries)
             .into_iter()
             .partition(|v| !v.failed() && (v.pinned() || (v.on(session) && v.pid == pid)));
         set.entries = keep;
-        let retired = gone.into_iter().map(|variant| variant.entry).collect();
+        let retired = set.retire(gone);
+        // Reuse works at any limit: it starts no worker.
         if let Some(variant) = set
             .entries
             .iter_mut()
@@ -124,10 +179,24 @@ impl HlsVariants {
                 pin
             });
             let id = variant.id;
-            return (Some(HlsVariantPin { id, _pin: pin }), retired);
+            return (Admission::Pinned(HlsVariantPin { id, _pin: pin }), retired);
         }
         let on_session = set.entries.iter().filter(|v| v.on(session)).count();
-        if !admits(on_session, set.entries.len()) {
+        let total = set.entries.len();
+        let retiring_on =
+            |w: &&RetiringWorker| std::ptr::eq(w.session.as_ptr(), Arc::as_ptr(session));
+        let retiring_on_session = set.retiring.iter().filter(retiring_on).count();
+        if !admits(on_session + retiring_on_session, total + set.retiring.len()) {
+            if admits(on_session, total) {
+                // Only retiring workers hold the limit: wait for one that frees the binding slot.
+                let session_bound = on_session + retiring_on_session >= MAX_AUDIO_VARIANTS;
+                let worker = set
+                    .retiring
+                    .iter()
+                    .find(|w| !session_bound || retiring_on(w))
+                    .expect("a retiring worker holds the limit");
+                return (Admission::Retiring(worker.done.clone()), retired);
+            }
             if !std::mem::replace(&mut set.cap_logged, true) {
                 crate::alog!(
                     "[hls] audio variant limit reached ({MAX_AUDIO_VARIANTS} per session, \
@@ -135,31 +204,44 @@ impl HlsVariants {
                      default audio track"
                 );
             }
-            return (None, retired);
+            return (Admission::Full, retired);
         }
         let pin = Arc::new(());
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let entry = create();
+        #[cfg(test)]
+        {
+            set.spawned.push(entry.control.completion_receiver());
+            let running = set.spawned.iter().filter(|done| !*done.borrow()).count();
+            set.peak_workers = set.peak_workers.max(running);
+        }
         set.entries.push(VariantEntry {
             id,
             pid,
             session: Arc::downgrade(session),
-            entry: create(),
+            entry,
             pins: Arc::downgrade(&pin),
         });
-        (Some(HlsVariantPin { id, _pin: pin }), retired)
+        (Admission::Pinned(HlsVariantPin { id, _pin: pin }), retired)
     }
 
+    /// Remove every variant of a stream. Their workers keep counting against the stream's
+    /// limits until they exit, so a restart right after a stop cannot exceed them.
     pub(super) fn take_stream(&self, key: &StreamKey) -> Vec<HlsEntry> {
-        self.sets
-            .lock()
-            .unwrap()
-            .remove(key)
-            .into_iter()
-            .flat_map(|set| set.entries)
-            .map(|variant| variant.entry)
-            .collect()
+        let mut sets = self.sets.lock().unwrap();
+        let Some(set) = sets.get_mut(key) else {
+            return Vec::new();
+        };
+        set.prune_retiring();
+        let gone = std::mem::take(&mut set.entries);
+        let retired = set.retire(gone);
+        set.cap_logged = false;
+        if set.retiring.is_empty() {
+            sets.remove(key);
+        }
+        retired
     }
 
     pub(super) fn take_all(&self) -> Vec<(StreamKey, HlsEntry)> {
@@ -173,19 +255,21 @@ impl HlsVariants {
             .collect()
     }
 
-    /// Remove every variant of a stream with no live session, and every variant that has failed
-    /// or that no lease pins any more.
-    pub(super) fn take_idle(&self, retained: &HashSet<StreamKey>) -> Vec<(StreamKey, HlsEntry)> {
+    /// Remove every variant that has failed or that no lease pins any more. A pinned variant
+    /// survives even when its session was removed (by EOF or by the idle sweep): it keeps
+    /// serving its leases until they end, and only counts toward the per-stream total.
+    pub(super) fn take_idle(&self) -> Vec<(StreamKey, HlsEntry)> {
         let mut sets = self.sets.lock().unwrap();
         let mut idle = Vec::new();
         sets.retain(|key, set| {
-            let keep_stream = retained.contains(key);
+            set.prune_retiring();
             let (live, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut set.entries)
                 .into_iter()
-                .partition(|variant| keep_stream && variant.pinned() && !variant.failed());
+                .partition(|variant| variant.pinned() && !variant.failed());
             set.entries = live;
-            idle.extend(gone.into_iter().map(|variant| (key.clone(), variant.entry)));
-            !set.entries.is_empty()
+            let retired = set.retire(gone);
+            idle.extend(retired.into_iter().map(|entry| (key.clone(), entry)));
+            !set.entries.is_empty() || !set.retiring.is_empty()
         });
         idle
     }
@@ -236,52 +320,80 @@ impl StreamManager {
         {
             return None;
         }
-        let crate::hls::AudioChoice::Track(pid) = default
-            .wait_audio_choice(language, self.hls_startup_timeout())
-            .await
-        else {
-            return None;
-        };
         let id = &*self.canonical_id(network, id);
         let key = (network.to_string(), id.to_string());
-        let _finalizing = self.hls_finalization.lock().await;
-        if self
-            .shutting_down
-            .load(std::sync::atomic::Ordering::Acquire)
-            || !self
-                .sessions
-                .lock()
+        let deadline = tokio::time::Instant::now() + self.hls_startup_timeout();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let crate::hls::AudioChoice::Track(pid) =
+                default.wait_audio_choice(language, remaining).await
+            else {
+                return None;
+            };
+            #[cfg(test)]
+            self.hls_variants.resolved.notify_waiters();
+            let mut retiring = {
+                let _finalizing = self.hls_finalization.lock().await;
+                if self
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    || !self
+                        .sessions
+                        .lock()
+                        .await
+                        .get(&key)
+                        .is_some_and(|current| Arc::ptr_eq(current, session))
+                {
+                    return None;
+                }
+                // The PMT may have moved the language while this request waited for the lock.
+                match default.audio_choice(language) {
+                    crate::hls::AudioChoice::Track(current) if current == pid => {}
+                    crate::hls::AudioChoice::Default => return None,
+                    // Bounded: a PMT that keeps moving cannot hold the request past its deadline.
+                    _ if tokio::time::Instant::now() >= deadline => return None,
+                    _ => continue,
+                }
+                let (admission, retired) = self.hls_variants.acquire(&key, pid, session, || {
+                    let media = HlsPackager::create_with_history(
+                        session,
+                        self.hls,
+                        false,
+                        self.hls_history,
+                        self.hls_history_budget.clone(),
+                    );
+                    media.set_audio_track(pid);
+                    let control = crate::hls_audio::spawn_worker(
+                        session,
+                        media.clone(),
+                        self.hls,
+                        None,
+                        &self.cleanup,
+                    );
+                    crate::alog!(
+                        "[hls] audio variant started: language={} pid={pid:#x}",
+                        language.as_str()
+                    );
+                    HlsEntry { media, control }
+                });
+                // Request cancellation now; dropping the controls transfers their joins.
+                drop(
+                    self.retire_hls_variants(retired.into_iter().map(|entry| (key.clone(), entry))),
+                );
+                match admission {
+                    Admission::Pinned(pin) => return Some(pin),
+                    Admission::Full => return None,
+                    Admission::Retiring(done) => done,
+                }
+            };
+            // A retiring worker still holds the slot: wait for it to exit, then retry.
+            if tokio::time::timeout_at(deadline, wait_cleanup(&mut retiring))
                 .await
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(current, session))
-        {
-            return None;
+                .is_err()
+            {
+                return None;
+            }
         }
-        let (pin, retired) = self.hls_variants.acquire(&key, pid, session, || {
-            let media = HlsPackager::create_with_history(
-                session,
-                self.hls,
-                false,
-                self.hls_history,
-                self.hls_history_budget.clone(),
-            );
-            media.set_audio_track(pid);
-            let control = crate::hls_audio::spawn_worker(
-                session,
-                media.clone(),
-                self.hls,
-                None,
-                &self.cleanup,
-            );
-            crate::alog!(
-                "[hls] audio variant started: language={} pid={pid:#x}",
-                language.as_str()
-            );
-            HlsEntry { media, control }
-        });
-        // Dropping the retired controls transfers their joins to the cleanup coordinator.
-        drop(self.retire_hls_variants(retired.into_iter().map(|entry| (key.clone(), entry))));
-        pin
     }
 
     /// The exact variant packager a lease pinned (`variant` is [`HlsVariantPin::id`]), unless
@@ -343,6 +455,21 @@ mod tests {
         opens: Arc<AtomicUsize>,
         end_after: Option<u64>,
         switch_after: Option<(u64, Tracks)>,
+        tracks: Tracks,
+        /// Switch to the layout once the flag is set (test-controlled timing).
+        switch_on: Option<(Arc<std::sync::atomic::AtomicBool>, Tracks)>,
+    }
+
+    impl Default for Provider {
+        fn default() -> Self {
+            Self {
+                opens: Arc::default(),
+                end_after: None,
+                switch_after: None,
+                tracks: &AUDIO,
+                switch_on: None,
+            }
+        }
     }
 
     struct Source {
@@ -350,6 +477,7 @@ mod tests {
         frames: u64,
         end_after: Option<u64>,
         switch_after: Option<(u64, Tracks)>,
+        switch_on: Option<(Arc<std::sync::atomic::AtomicBool>, Tracks)>,
     }
 
     #[async_trait]
@@ -361,6 +489,11 @@ mod tests {
             }
             if let Some((at, tracks)) = self.switch_after {
                 if self.frames == at {
+                    self.generator.set_tracks(tracks);
+                }
+            }
+            if let Some((flag, tracks)) = &self.switch_on {
+                if flag.swap(false, Ordering::SeqCst) {
                     self.generator.set_tracks(tracks);
                 }
             }
@@ -382,10 +515,11 @@ mod tests {
         async fn open(&self, _id: &str) -> Result<Box<dyn TsSource>, ProviderError> {
             self.opens.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(Source {
-                generator: Generator::new(&AUDIO),
+                generator: Generator::new(self.tracks),
                 frames: 0,
                 end_after: self.end_after,
                 switch_after: self.switch_after,
+                switch_on: self.switch_on.clone(),
             }))
         }
     }
@@ -430,6 +564,7 @@ mod tests {
             opens: opens.clone(),
             end_after: Some(100),
             switch_after: None,
+            ..Provider::default()
         });
         let support = manager.acquire_support("multi", "a").await.unwrap();
         let (pkg, first, _lease) = manager
@@ -481,6 +616,7 @@ mod tests {
             opens: Arc::default(),
             end_after: None,
             switch_after: None,
+            ..Provider::default()
         });
         let (pkg, session, _lease) = manager
             .get_or_start_compatibility_hls("multi", "a")
@@ -525,6 +661,7 @@ mod tests {
             opens: Arc::default(),
             end_after: None,
             switch_after: Some((60, &MOVED)),
+            ..Provider::default()
         });
         let (pkg, session, _lease) = manager
             .get_or_start_compatibility_hls("multi", "a")
@@ -546,6 +683,8 @@ mod tests {
             manager.get_hls_variant("multi", "a", first.id()).is_none(),
             "a failed variant is unavailable, even to its own lease"
         );
+        // The default packager must have seen the same PMT before the retry resolves.
+        wait_for_choice(&pkg, crate::hls::AudioChoice::Track(0x104)).await;
         let again = manager
             .compatibility_hls_audio("multi", "a", &pkg, &session, rus())
             .await
@@ -557,6 +696,207 @@ mod tests {
             manager.hls_variant_count("multi", "a"),
             1,
             "the failed entry was retired"
+        );
+        manager.shutdown().await;
+    }
+
+    async fn wait_for_choice(pkg: &HlsPackager, expected: crate::hls::AudioChoice) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pkg.audio_choice(rus()) != expected {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("default packager never resolved `rus` to {expected:?}"));
+    }
+
+    fn variant_pid(manager: &StreamManager, key: &str, id: u64) -> Option<u16> {
+        let sets = manager.hls_variants.sets.lock().unwrap();
+        sets.get(&("multi".to_string(), key.to_string()))?
+            .entries
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| v.pid)
+    }
+
+    #[tokio::test]
+    async fn pinned_variant_survives_a_sweep_that_removes_its_session_without_eof() {
+        let manager = manager(Provider::default());
+        let (pkg, first, lease) = manager
+            .get_or_start_compatibility_hls("multi", "a")
+            .await
+            .unwrap();
+        let pin = manager
+            .compatibility_hls_audio("multi", "a", &pkg, &first, rus())
+            .await
+            .unwrap();
+        let media = manager.get_hls_variant("multi", "a", pin.id()).unwrap();
+        // No subscriber, support pin or native access remains: the sweep removes the live
+        // (not ended) session, but the still-pinned variant keeps serving its lease.
+        drop(lease);
+        manager.sweep_idle_for_test().await;
+        assert!(
+            manager.get("multi", "a").await.is_none(),
+            "session swept, not ended"
+        );
+        let kept = manager.get_hls_variant("multi", "a", pin.id()).unwrap();
+        assert!(Arc::ptr_eq(&kept, &media));
+        // A replacement session gets its own variant; the old one does not count toward it.
+        let (pkg, second, _lease) = manager
+            .get_or_start_compatibility_hls("multi", "a")
+            .await
+            .unwrap();
+        let fresh = manager
+            .compatibility_hls_audio("multi", "a", &pkg, &second, rus())
+            .await
+            .unwrap();
+        assert_ne!(fresh.id(), pin.id());
+        assert_eq!(manager.hls_variant_count("multi", "a"), 2);
+        // Once its lease ends, the next sweep retires it.
+        drop(pin);
+        manager.sweep_idle_for_test().await;
+        assert!(manager.get_hls_variant("multi", "a", fresh.id()).is_some());
+        assert_eq!(manager.hls_variant_count("multi", "a"), 1);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn admission_re_resolves_when_the_pmt_moves_during_the_lock_wait() {
+        // `rus` moves from 0x102 to 0x104, and 0x102 stays as Spanish.
+        const MOVED: [(u16, u8, &[u8; 3]); 3] = [
+            (0x101, 0x0f, b"eng"),
+            (0x102, 0x0f, b"spa"),
+            (0x104, 0x0f, b"rus"),
+        ];
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let manager = manager(Provider {
+            switch_on: Some((flag.clone(), &MOVED)),
+            ..Provider::default()
+        });
+        let (pkg, session, _lease) = manager
+            .get_or_start_compatibility_hls("multi", "a")
+            .await
+            .unwrap();
+        // An existing lease on 0x102, admitted before the move.
+        let existing = manager
+            .compatibility_hls_audio("multi", "a", &pkg, &session, rus())
+            .await
+            .unwrap();
+        assert_eq!(variant_pid(&manager, "a", existing.id()), Some(0x102));
+        // A second request resolves 0x102, then blocks on the admission lock.
+        let guard = manager.hls_finalization.lock().await;
+        // Registered before the spawn, so only this request's resolution can complete it.
+        let resolved = manager.hls_variants.resolved.notified();
+        tokio::pin!(resolved);
+        resolved.as_mut().enable();
+        let request = {
+            let (manager, pkg, session) = (manager.clone(), pkg.clone(), session.clone());
+            tokio::spawn(async move {
+                manager
+                    .compatibility_hls_audio("multi", "a", &pkg, &session, rus())
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), resolved)
+            .await
+            .expect("the request resolved before the lock");
+        flag.store(true, Ordering::SeqCst);
+        wait_for_choice(&pkg, crate::hls::AudioChoice::Track(0x104)).await;
+        drop(guard);
+        let pin = request
+            .await
+            .unwrap()
+            .expect("a variant for the moved track");
+        assert_eq!(variant_pid(&manager, "a", pin.id()), Some(0x104));
+        // The existing lease stays on its original PID, which is still in the PMT.
+        assert_eq!(variant_pid(&manager, "a", existing.id()), Some(0x102));
+        assert!(manager
+            .get_hls_variant("multi", "a", existing.id())
+            .is_some());
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stopped_variant_workers_keep_counting_until_they_exit() {
+        let manager = manager(Provider::default());
+        let (pkg, session, _lease) = manager
+            .get_or_start_compatibility_hls("multi", "a")
+            .await
+            .unwrap();
+        let _pin = manager
+            .compatibility_hls_audio("multi", "a", &pkg, &session, rus())
+            .await
+            .unwrap();
+        let key = ("multi".to_string(), "a".to_string());
+        let stopped = manager.hls_variants.take_stream(&key);
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(
+            manager.hls_variants.sets.lock().unwrap()[&key]
+                .retiring
+                .len(),
+            1,
+            "a stopped worker still holds its slot in the stream total"
+        );
+        let mut done: Vec<_> = stopped
+            .iter()
+            .map(|entry| entry.control.completion_receiver())
+            .collect();
+        drop(manager.retire_hls_variants(stopped.into_iter().map(|e| (key.clone(), e))));
+        for done in &mut done {
+            assert!(wait_cleanup(done).await);
+        }
+        // Once it has exited, the next sweep forgets the empty set.
+        drop(manager.hls_variants.take_idle());
+        assert!(!manager.hls_variants.sets.lock().unwrap().contains_key(&key));
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_retiring_worker_holds_its_slot_until_it_exits() {
+        const SIX: [(u16, u8, &[u8; 3]); 6] = [
+            (0x101, 0x0f, b"eng"),
+            (0x102, 0x0f, b"rus"),
+            (0x103, 0x0f, b"spa"),
+            (0x104, 0x0f, b"fra"),
+            (0x105, 0x0f, b"deu"),
+            (0x106, 0x0f, b"ita"),
+        ];
+        let manager = manager(Provider {
+            tracks: &SIX,
+            ..Provider::default()
+        });
+        let (pkg, session, _lease) = manager
+            .get_or_start_compatibility_hls("multi", "a")
+            .await
+            .unwrap();
+        let language = |code| AudioLanguage::parse(code).unwrap();
+        let mut pins = Vec::new();
+        for code in ["rus", "spa", "fra", "deu"] {
+            pins.push(
+                manager
+                    .compatibility_hls_audio("multi", "a", &pkg, &session, language(code))
+                    .await
+                    .unwrap(),
+            );
+        }
+        // Reusing a pinned variant at the limit still works.
+        let again = manager
+            .compatibility_hls_audio("multi", "a", &pkg, &session, language("rus"))
+            .await
+            .unwrap();
+        assert_eq!(again.id(), pins[0].id());
+        // Unpin `spa` and ask for `ita`: its worker must not start before `spa`'s has exited.
+        drop(pins.remove(1));
+        let ita = manager
+            .compatibility_hls_audio("multi", "a", &pkg, &session, language("ita"))
+            .await
+            .expect("admitted once the retired worker exited");
+        assert_eq!(variant_pid(&manager, "a", ita.id()), Some(0x106));
+        let key = ("multi".to_string(), "a".to_string());
+        let peak = manager.hls_variants.sets.lock().unwrap()[&key].peak_workers;
+        assert_eq!(
+            peak, MAX_AUDIO_VARIANTS,
+            "never more workers than the limit"
         );
         manager.shutdown().await;
     }

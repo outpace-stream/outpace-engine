@@ -301,7 +301,10 @@ options or new compatibility response keys.
 - **Matching.** The code is compared with every entry of each audio stream's
   ISO_639_language_descriptor (tag `0x0a`) in the current single-packet PMT. Among
   matching tracks the preference order is ADTS AAC, then MPEG audio or AC-3, then other
-  recognized audio; PMT order breaks ties. No match leaves the default behavior.
+  recognized audio; PMT order breaks ties. No match leaves the default behavior. A
+  track's descriptor loop must be well formed for its tags to count: an ISO 639 body
+  that is not a whole number of 4-byte entries, or a truncated descriptor anywhere in
+  the loop, means that track does not match.
 - **TS.** Every track is still delivered. Only the requesting viewer's PMT is rewritten:
   the matched track moves to the program's first audio entry and the CRC is recomputed;
   PIDs, descriptors, version and continuity are unchanged. Players that start the first
@@ -318,28 +321,36 @@ options or new compatibility response keys.
 
   The request resolves the language to an elementary PID once, against the shared
   source's current PMT (on a cold start it waits up to `OUTPACE_HLS_STARTUP_TIMEOUT_MS`
-  for the first PMT). A language that resolves to the default selection uses the default
-  packager; any other result is served by the variant for exactly that PID.
+  for the first PMT). Before admitting a variant, the request checks that choice again
+  under the admission lock; if the PMT moved the language while it waited, it resolves
+  again. A language that resolves to the default selection uses the default packager;
+  any other result is served by the variant for exactly that PID.
 - **A variant carries exactly its PID.** It never re-resolves the language and never
   switches tracks. If a later PMT still lists the PID, the variant keeps carrying it, even
-  if its language tag changed. If the PID leaves the PMT (or the PSI stops supporting
-  selection), the variant fails. A failed variant is treated as gone: its leases get the
+  if its language tag changed. If a usable PMT no longer lists the PID, or PAT/PMT
+  disables native selection (for example several programs), the variant fails. Other
+  evidence, such as a scrambled packet on another PID before the first PMT, does not
+  fail it; it waits for the PSI. A failed variant is treated as gone: its leases get the
   unavailable response (404) and the next manifest request re-resolves and starts a fresh
   variant.
 - **Leases are bound to their exact variant.** A lease only ever reads the variant entry
   it pinned, never a later packager for the same PID. Stopping the stream removes all of
   its variants, so their leases get 404 for playlists and segments until the client
   requests a new manifest. A variant also belongs to the session it was created on: a
-  replacement session for the same stream (for example after the source ended) never
-  receives it, and the old one keeps serving its existing leases until they end.
+  replacement session for the same stream never receives it. When the session is removed,
+  whether by source EOF or by the idle sweep, the variants its leases still pin keep serving
+  those leases until they end.
 - **One download, bounded variants.** Every viewer shares the stream's one upstream
   session. Each distinct non-default track adds one native packager (a *variant*) on that
   session: one more broadcast receiver and its own bounded segment window, the same
   `OUTPACE_HLS_SEGMENT_PACKETS` × (`OUTPACE_HLS_WINDOW_SEGMENTS` + 1) ceiling as the
   default packager, plus any retained history, charged to the one global history budget.
-  At most **four** variants run per session. After a session is replaced (for example on
-  source EOF), variants of the old session that leases still pin keep serving those leases
-  and do not count toward the new session's cap. A stream never holds more than **eight**
+  At most **four** variants run per session. After a session is removed or replaced,
+  variants of the old session that leases still pin keep serving those leases and do not
+  count toward the new session's cap. A retired variant's worker keeps counting against
+  both limits until it has actually exited; a request that needs that slot waits for the
+  exit (within `OUTPACE_HLS_STARTUP_TIMEOUT_MS`), so a limit is never exceeded, even
+  briefly. A stream never holds more than **eight**
   variants in total across sessions, so with its default packager it runs at most nine
   packagers; past that total, new languages get the default packager until old leases end.
   This bounds running packagers, not memory at every instant: a retired packager is fenced
