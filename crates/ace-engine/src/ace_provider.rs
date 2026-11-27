@@ -14,6 +14,7 @@ mod announce;
 mod catalog_resolution;
 #[cfg(test)]
 mod content_id_policy_tests;
+pub(crate) mod descriptor_fallback;
 #[cfg(test)]
 mod discovery_tests;
 #[cfg(test)]
@@ -21,6 +22,7 @@ mod private_policy_tests;
 use announce::announce_seeder_periodically;
 pub use announce::{announce_infohash_periodically, announce_infohash_periodically_dynamic};
 use catalog_resolution::{CatalogLookupError, CatalogResolutionCache};
+use descriptor_fallback::DescriptorFallback;
 mod live;
 #[cfg(test)]
 use live::AceSource;
@@ -285,6 +287,9 @@ pub struct AceProvider {
     /// Free space a disk-mode VOD start keeps on the cache filesystem (see [`crate::disk_space`]).
     vod_disk_reserve: u64,
     warm_peers: WarmPeerCache,
+    /// Last-known-good catalog descriptors, used only when the catalog is unreachable (#562).
+    /// Disabled unless configured, and always in private mode.
+    descriptor_fallback: DescriptorFallback,
     /// Records the public IP peers echo back in `yourip` on our outbound handshakes (issue #22).
     /// `None` unless inbound serving is enabled — with inbound off we can't be dialed anyway, so
     /// harvesting is inert (never wired). Shared with the inbound listener and the daemon's
@@ -322,6 +327,7 @@ impl AceProvider {
             vod_disk_reserve: crate::disk_space::DEFAULT_VOD_DISK_RESERVE_BYTES,
             cache_dir: PathBuf::new(),
             warm_peers: WarmPeerCache::memory(),
+            descriptor_fallback: DescriptorFallback::default(),
             reachability: None,
         }
     }
@@ -343,6 +349,7 @@ impl AceProvider {
             self.announce_peer_port = tokio::sync::watch::channel(None).1;
             self.reachability = None;
             self.warm_peers = WarmPeerCache::memory();
+            self.descriptor_fallback = DescriptorFallback::default();
             self.resolve_cache = CatalogResolutionCache::new(RESOLVE_CACHE_TTL);
             self.peer_resolve_cache = ResolveCache::new(RESOLVE_CACHE_TTL);
             self.infohash_index = InfohashIndex::new(INFOHASH_INDEX_CAPACITY);
@@ -478,6 +485,18 @@ impl AceProvider {
             WarmPeerCache::new(&cache_dir, false)
         };
         self.cache_dir = cache_dir;
+        self
+    }
+
+    /// Keep up to `entries` last-known-good live descriptors under `dir`, served only when the
+    /// catalog cannot be reached (#562). `0` entries or an empty `dir` disables the fallback;
+    /// private mode always does.
+    pub fn with_descriptor_fallback(mut self, dir: PathBuf, entries: usize) -> Self {
+        self.descriptor_fallback = if self.peer_policy.is_private() {
+            DescriptorFallback::default()
+        } else {
+            DescriptorFallback::new(&dir, entries)
+        };
         self
     }
 
@@ -738,6 +757,10 @@ pub(crate) mod test_support {
 
     pub(crate) fn bep9_enabled(provider: &super::AceProvider) -> bool {
         provider.bep9_content_id_fallback
+    }
+
+    pub(crate) fn descriptor_fallback_enabled(provider: &super::AceProvider) -> bool {
+        provider.descriptor_fallback.is_enabled()
     }
 
     /// A synthetic live `AceStreamTransport` built with outpace's own encoder and a freshly

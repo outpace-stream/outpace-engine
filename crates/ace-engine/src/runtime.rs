@@ -9,7 +9,10 @@ use crate::broadcast_pull::{
     parse_non_global_source_opt_in, parse_source_configs, validate_source_map,
     ValidatedSourceConfig,
 };
-use crate::config::{load_or_create_identity, safe_in_memory_pool_limit, CacheType, Config};
+use crate::config::{
+    load_or_create_identity, safe_in_memory_pool_limit, CacheType, Config,
+    MAX_DESCRIPTOR_FALLBACK_ENTRIES,
+};
 #[cfg(test)]
 use crate::http::router;
 use crate::http::{AppState, BroadcastState};
@@ -298,6 +301,18 @@ pub fn config_from_env() -> Result<Config, Box<dyn std::error::Error>> {
     if let Some(v) = bool_from_env("OUTPACE_BEP9_CONTENT_ID_FALLBACK")? {
         config.bep9_content_id_fallback = v;
     }
+    match std::env::var("OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES") {
+        Ok(v) => {
+            config.descriptor_fallback_entries = v.parse().map_err(|_| {
+                format!("OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES must be an integer from 0 to {MAX_DESCRIPTOR_FALLBACK_ENTRIES}")
+            })?;
+            validate_descriptor_fallback_entries(config.descriptor_fallback_entries)?;
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES must be valid UTF-8".into());
+        }
+    }
     if let Some(v) = bool_from_env("OUTPACE_BROADCAST_CATALOG_REGISTER")? {
         config.broadcast_catalog_register = v;
     }
@@ -401,6 +416,16 @@ fn inbound_admission_from_config(config: &Config) -> ace_swarm::listen::InboundA
     .admission()
 }
 
+fn validate_descriptor_fallback_entries(entries: usize) -> Result<(), Box<dyn std::error::Error>> {
+    if entries > MAX_DESCRIPTOR_FALLBACK_ENTRIES {
+        return Err(format!(
+            "OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES must be at most {MAX_DESCRIPTOR_FALLBACK_ENTRIES}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn bool_from_env(name: &str) -> Result<Option<bool>, Box<dyn std::error::Error>> {
     let value = match std::env::var(name) {
         Ok(value) => value,
@@ -484,6 +509,12 @@ fn preflight_disk_cache_paths(config: &Config) -> Result<(), Box<dyn std::error:
     if data.starts_with(&cache) {
         return Err("OUTPACE_CACHE_DIR must not equal or contain OUTPACE_DATA_DIR".into());
     }
+    if cache.starts_with(data.join(crate::config::DESCRIPTOR_FALLBACK_SUBDIR)) {
+        return Err(
+            "OUTPACE_CACHE_DIR must not be inside the descriptor store <OUTPACE_DATA_DIR>/descriptors"
+                .into(),
+        );
+    }
     ensure_disk_cache_is_dedicated(&cache)
 }
 
@@ -522,6 +553,16 @@ fn prepare_disk_cache_paths(config: &mut Config) -> Result<(), Box<dyn std::erro
             "OUTPACE_CACHE_DIR {} must not equal or contain OUTPACE_DATA_DIR {}; use a cache directory nested inside the data directory or a separate path",
             config.cache_dir.display(),
             config.data_dir.display()
+        )
+        .into());
+    }
+    // The wiped cache must not swallow the descriptor fallback store either (#562).
+    let descriptors = data_dir.join(crate::config::DESCRIPTOR_FALLBACK_SUBDIR);
+    if cache_dir.starts_with(&descriptors) {
+        return Err(format!(
+            "OUTPACE_CACHE_DIR {} must not be inside {}, which keeps last-known-good descriptors",
+            config.cache_dir.display(),
+            descriptors.display()
         )
         .into());
     }
@@ -738,6 +779,10 @@ fn url_host_from_ip(ip: IpAddr) -> String {
 fn ace_provider_from_config(provider: AceProvider, config: &Config) -> AceProvider {
     provider
         .with_bep9_content_id_fallback(config.bep9_content_id_fallback)
+        .with_descriptor_fallback(
+            config.descriptor_fallback_dir(),
+            config.descriptor_fallback_entries,
+        )
         .with_prefetch_pieces(config.prefetch_pieces)
         .with_startup_buffer(config.startup_buffer)
         .with_live_recovery(config.live_recovery)
@@ -765,6 +810,7 @@ pub async fn build_runtime(
     if config.session_buffer == 0 {
         return Err("OUTPACE_SESSION_BUFFER must be >= 1".into());
     }
+    validate_descriptor_fallback_entries(config.descriptor_fallback_entries)?;
     config.startup_buffer.validate()?;
     config.live_recovery.validate()?;
     config.hls.validate()?;
@@ -1963,6 +2009,82 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_fallback_env_defaults_on_bounds_and_disables_with_zero() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let name = "OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES";
+        let _restore = EnvRestore::clear(&[name, "OUTPACE_DATA_DIR"]);
+        let config = config_from_env().unwrap();
+        assert_eq!(config.descriptor_fallback_entries, 64);
+        assert_eq!(
+            config.descriptor_fallback_dir(),
+            config.data_dir.join("descriptors"),
+            "outside the cache dir, which disk mode wipes at startup"
+        );
+        for (value, expected) in [("0", 0), ("1", 1), ("512", 512)] {
+            std::env::set_var(name, value);
+            assert_eq!(
+                config_from_env().unwrap().descriptor_fallback_entries,
+                expected
+            );
+        }
+        for invalid in ["", "-1", "513", "64 ", "many"] {
+            std::env::set_var(name, invalid);
+            assert!(config_from_env().unwrap_err().to_string().contains(name));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            std::env::set_var(name, std::ffi::OsStr::from_bytes(b"6\xff"));
+            assert!(config_from_env().unwrap_err().to_string().contains(name));
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_config_rejects_an_oversized_descriptor_fallback_before_any_disk_work() {
+        let root = std::env::temp_dir().join(format!(
+            "outpace-descriptor-entries-{}",
+            rand::random::<u64>()
+        ));
+        let config = Config {
+            data_dir: root.clone(),
+            descriptor_fallback_entries: MAX_DESCRIPTOR_FALLBACK_ENTRIES + 1,
+            enable_inbound: false,
+            ..Config::default()
+        };
+        let error = build_runtime(config, vec![])
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES"),
+            "{error}"
+        );
+        assert!(
+            !root.exists(),
+            "validation runs before any directory is created"
+        );
+    }
+
+    #[test]
+    fn daemon_provider_receives_descriptor_fallback_from_config() {
+        for (entries, enabled) in [(0, false), (8, true)] {
+            let config = Config {
+                descriptor_fallback_entries: entries,
+                ..Config::default()
+            };
+            let provider = ace_provider_from_config(
+                AceProvider::new(Arc::new(ace_wire::identity::Identity::generate()), 0),
+                &config,
+            );
+            assert_eq!(
+                crate::ace_provider::test_support::descriptor_fallback_enabled(&provider),
+                enabled
+            );
+        }
+    }
+
+    #[test]
     fn bep9_fallback_env_defaults_off_and_parses_strictly() {
         let _guard = ENV_LOCK.lock().unwrap();
         let name = "OUTPACE_BEP9_CONTENT_ID_FALLBACK";
@@ -2642,6 +2764,31 @@ mod tests {
         };
         prepare_disk_cache_paths(&mut config).unwrap();
         assert!(config.cache_dir.starts_with(&config.data_dir));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disk_cache_inside_the_descriptor_store_is_rejected() {
+        let root = std::env::temp_dir().join(format!(
+            "outpace-cache-in-descriptors-{}",
+            rand::random::<u64>()
+        ));
+        for cache_dir in [root.join("descriptors"), root.join("descriptors/cache")] {
+            let mut config = Config {
+                data_dir: root.clone(),
+                cache_type: CacheType::Disk,
+                cache_dir,
+                ..Config::default()
+            };
+            assert!(preflight_disk_cache_paths(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("descriptor store"));
+            assert!(prepare_disk_cache_paths(&mut config)
+                .unwrap_err()
+                .to_string()
+                .contains("last-known-good descriptors"));
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

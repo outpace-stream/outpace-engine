@@ -175,9 +175,9 @@ See [Seeding and Peers](Seeding-and-Peers).
 
 | Setting | Default | Accepted values | Avail. | Notes |
 | --- | --- | --- | --- | --- |
-| `OUTPACE_DATA_DIR` | platform data dir + `outpace` | directory | all | Identity and broadcast state. Container: `/var/lib/outpace`. Keep it persistent and private. |
+| `OUTPACE_DATA_DIR` | platform data dir + `outpace` | directory | all | Identity, broadcast state and [last-known-good descriptors](#last-known-good-descriptors). Container: `/var/lib/outpace`. Keep it persistent and private. |
 | `OUTPACE_CACHE_TYPE` | `memory` | `memory` or `disk` | all | Where retained pieces for seeding are kept. `disk` saves RAM on small machines. |
-| `OUTPACE_CACHE_DIR` | `<data dir>/cache` | directory | all | Disk cache root, used only with `disk`. Wiped at startup. It may be inside the data directory, but it must not be the data directory or contain it. |
+| `OUTPACE_CACHE_DIR` | `<data dir>/cache` | directory | all | Disk cache root, used only with `disk`. Wiped at startup. It may be inside the data directory, but it must not be the data directory, contain it, or sit inside `<data dir>/descriptors`. A cache you kept under `descriptors/` must move elsewhere before you upgrade. |
 | `OUTPACE_SEED_STORE_BYTES` | `134217728` (128 MiB) | bytes | all | Ceiling on retained pieces **per stream** (not a total). In memory mode it is capped per platform (about 512 MiB on 32-bit, 8 GiB on 64-bit). It must hold at least one full piece of every broadcast you run. |
 | `OUTPACE_SEED_RETENTION_SECS` | `45` | seconds, `0` = byte cap only | all | For live streams, keep only about this many seconds of recent pieces, so memory follows the bitrate instead of filling the byte cap. VOD always uses the byte cap. |
 | `OUTPACE_VOD_DISK_RESERVE_BYTES` | `268435456` (256 MiB) | bytes, `0` = 5% margin only | 1.2.0 | Free space a VOD download must leave on the cache filesystem with `disk`. See [VOD free-space check](#vod-free-space-check). |
@@ -248,8 +248,45 @@ See [Private Peer Mode](Private-Peer-Mode).
 | --- | --- | --- | --- | --- |
 | `OUTPACE_ACE_PEERS` | unset | comma-separated `IPv4:port` | all | Extra bootstrap peers tried on every live stream. In public mode malformed entries are skipped silently; in private mode they must be in the allowlist. |
 | `OUTPACE_BEP9_CONTENT_ID_FALLBACK` | `false` | boolean | all | If the catalog can't resolve a content id, ask peers for its metadata. Needed to play an Outpace broadcast's `acestream://` link from a **different** daemon. |
+| `OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES` | `64` | integer `0`–`512`, `0` = off | edge | How many content ids keep their last good catalog descriptor, so they still play while the catalog is unreachable. See [Last-known-good descriptors](#last-known-good-descriptors). |
 | `OUTPACE_ALLOW_NON_GLOBAL_TRANSPORT` | off | exact `1` | all | Allow transport-file URLs on private, loopback or CGNAT hosts. Link-local, multicast and documentation ranges stay blocked. For self-hosted LAN swarms. |
 | `OUTPACE_TRACKER_ALLOW_NON_GLOBAL` | off | exact `1` | all | Allow announcing to trackers on private or local addresses. For self-hosted or offline swarms. |
+
+### Last-known-good descriptors
+
+Playing a content id normally needs an answer from the AceStream catalog. After every successful
+lookup of a live content id, Outpace saves the descriptor (the swarm's infohash, trackers,
+geometry, source key and title) in `<data dir>/descriptors/`. If the catalog can't be reached
+later, for example because your network blocks its hosts or it is down after a restart, the
+stream starts from the saved descriptor. The swarm's peers are often still reachable when the
+catalog isn't.
+
+- The saved copy is used **only** when the catalog can't be reached: a timeout, a refused or
+  failed connection, or every catalog host answering with an error status such as `503`. A
+  reply that rejects the id, including "not found", never falls back.
+- A fresh catalog answer always wins and replaces the saved copy, because live infohashes
+  change.
+- The first start that falls back still waits for every catalog host to fail, which takes up
+  to about 16 seconds. Starts of the same id in the next 30 seconds then use the saved copy
+  without waiting for the catalog again.
+- Descriptors older than 30 days are dropped. When the store is full, the oldest descriptor
+  is dropped first.
+- Only live swarm descriptors are kept. HLS origin links are signed for each playback and
+  are never saved, and VOD files aren't included.
+- A descriptor served from the saved copy isn't used to make its infohash playable on its
+  own (`ih:`). Only fresh catalog answers do that.
+- The default of `64` covers a typical channel list in about 64 KiB of disk. Each entry is
+  limited to 8 KiB, so the file stays at about 4 MiB or less even at the `512` maximum. Set `0` to
+  turn the fallback off. Private peer mode never uses it. With
+  `OUTPACE_BEP9_CONTENT_ID_FALLBACK` on, a saved descriptor is tried before asking peers.
+- The file is private to the daemon user (`0600` in a `0700` directory). Outpace ignores it
+  if it is malformed, a symlink, or readable by others. A malformed file is replaced after
+  the next successful lookup. If another Outpace process (such as `outpace play`) holds the
+  store, descriptors are kept in memory and the store is opened again on a later save. On Windows the descriptors are kept in memory only, so the
+  fallback works only until the daemon restarts.
+
+The log shows `[resolve] catalog unreachable; using the last-known-good descriptor stored
+<N>m ago` each time a saved descriptor is used.
 
 ## Limits and admission
 

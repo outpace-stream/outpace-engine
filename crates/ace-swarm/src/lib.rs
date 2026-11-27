@@ -34,6 +34,7 @@ pub mod listen;
 pub mod live_session;
 pub mod peer_policy;
 pub mod portmap;
+pub mod private_dir;
 pub mod proxy;
 pub mod reachability;
 pub mod resolve;

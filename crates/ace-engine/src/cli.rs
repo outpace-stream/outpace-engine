@@ -329,6 +329,10 @@ fn play_provider_from_config(
         .with_vod_disk_reserve(config.vod_disk_reserve_bytes)
         .with_seeding_enabled(config.enable_seeding)
         .with_bep9_content_id_fallback(config.bep9_content_id_fallback)
+        .with_descriptor_fallback(
+            config.descriptor_fallback_dir(),
+            config.descriptor_fallback_entries,
+        )
         .with_prefetch_pieces(config.prefetch_pieces)
         .with_startup_buffer(config.startup_buffer)
         .with_live_recovery(config.live_recovery)

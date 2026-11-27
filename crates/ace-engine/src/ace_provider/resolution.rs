@@ -84,11 +84,24 @@ impl AceProvider {
                 ));
             }
         } else {
+            // A fallback for this id moments ago: serve it again rather than wait through every
+            // catalog host's timeout a second time (a compat start prepares, then opens).
+            if self.descriptor_fallback.recent_outage(&key) {
+                if let Some(info) = self.stored_descriptor(key).await? {
+                    return Ok(ResolvedContentId::Provider(info));
+                }
+            }
             let catalog_error = match self.resolve_cache.resolve_with(content_id, catalog).await {
                 Ok(info) => {
-                    info.ensure_playable().map_err(ProviderStartFailure::from)?;
+                    if let Err(error) = info.ensure_playable() {
+                        // A protected catalog answer supersedes the stored descriptor.
+                        self.descriptor_fallback.forget(key);
+                        return Err(ProviderStartFailure::from(error));
+                    }
                     crate::alog!("[ace] resolved content id via catalog");
                     self.infohash_index.put(info.clone());
+                    // A fresh result always replaces the stored one: live infohashes rotate.
+                    self.descriptor_fallback.record(key, &info);
                     return Ok(ResolvedContentId::Catalog(info));
                 }
                 Err(CatalogLookupError::Capacity) => {
@@ -101,6 +114,18 @@ impl AceProvider {
                 }
                 Err(CatalogLookupError::Catalog(error)) => error,
             };
+            if matches!(
+                catalog_error.as_ref(),
+                ResolveError::HlsOrigin(_)
+                    | ResolveError::Hls(_)
+                    | ResolveError::ProtectedContent
+                    | ResolveError::InvalidProtection
+                    | ResolveError::Transport(_)
+            ) {
+                // An authenticated descriptor that is not a playable swarm supersedes the
+                // stored one.
+                self.descriptor_fallback.forget(key);
+            }
             match catalog_error.as_ref() {
                 // A classified HLS descriptor is not a catalog outage: it must not be
                 // reinterpreted as raw-hash peer data, and its signed URL is never cached.
@@ -121,6 +146,15 @@ impl AceProvider {
                     ));
                 }
                 _ => {}
+            }
+            // Stale-if-error: only an unreachable catalog (or one whose every host gave an
+            // unusable reply), never a rejected or not-found reply. It comes before the opted-in
+            // BEP-9 fallback: the stored copy is a catalog-authenticated descriptor.
+            if catalog_error.is_catalog_outage() {
+                if let Some(info) = self.stored_descriptor(key).await? {
+                    self.descriptor_fallback.note_outage(key);
+                    return Ok(ResolvedContentId::Provider(info));
+                }
             }
             if !self.bep9_content_id_fallback {
                 return Err(ProviderStartFailure::new(
@@ -207,6 +241,23 @@ impl AceProvider {
             StartFailureKind::Discovery,
             ProviderError::NoPeers("content-id resolution: no metadata peer responded".into()),
         ))
+    }
+
+    /// The stored last-known-good descriptor for a content id whose catalog is unreachable.
+    /// It is provider-resolved, never a catalog alias: the infohash index stays fresh-only.
+    async fn stored_descriptor(
+        &self,
+        key: [u8; 20],
+    ) -> Result<Option<StreamInfo>, ProviderStartFailure> {
+        let Some((info, age)) = self.descriptor_fallback.lookup(key).await else {
+            return Ok(None);
+        };
+        info.ensure_playable().map_err(ProviderStartFailure::from)?;
+        crate::alog!(
+            "[resolve] catalog unreachable; using the last-known-good descriptor stored {}m ago",
+            age.as_secs() / 60
+        );
+        Ok(Some(info))
     }
 
     /// Resolve a live `id` to a verified [`StreamInfo`]: the single resolver behind every live
@@ -883,5 +934,166 @@ mod classified_tests {
         );
         assert!(!error.kind.retryable());
         assert!(error.error.to_string().contains("blocked address"));
+    }
+}
+
+// Restart tests need the on-disk store, which is Unix-only.
+#[cfg(all(test, unix))]
+mod descriptor_fallback_tests {
+    use super::*;
+    use crate::ace_provider::descriptor_fallback::tests::{info, temp_dir};
+    use crate::start_failure::StartFailureKind;
+    use ace_swarm::resolve::ResolveFailureKind;
+
+    const ID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn provider(dir: &Path, entries: usize) -> AceProvider {
+        AceProvider::new(Arc::new(Identity::generate()), 0)
+            .with_descriptor_fallback(dir.to_owned(), entries)
+    }
+
+    async fn resolve(
+        provider: &AceProvider,
+        catalog: Result<StreamInfo, ResolveError>,
+    ) -> Result<ResolvedContentId, ProviderStartFailure> {
+        provider
+            .resolve_content_id_prepared_with_catalog_classified(ID, async move { catalog })
+            .await
+    }
+
+    /// Resolve once through a fresh provider, as after a restart, and let its writes finish.
+    async fn restarted(
+        dir: &Path,
+        catalog: Result<StreamInfo, ResolveError>,
+    ) -> Result<ResolvedContentId, ProviderStartFailure> {
+        let provider = provider(dir, 8);
+        let result = resolve(&provider, catalog).await;
+        provider.descriptor_fallback.settled().await;
+        result
+    }
+
+    fn outage() -> Result<StreamInfo, ResolveError> {
+        Err(ResolveError::CatalogNetwork("synthetic catalog timeout"))
+    }
+
+    #[tokio::test]
+    async fn network_failure_after_restart_serves_the_last_known_good_descriptor() {
+        let dir = temp_dir();
+        assert!(matches!(
+            restarted(&dir, Ok(info(7))).await,
+            Ok(ResolvedContentId::Catalog(stored)) if stored == info(7)
+        ));
+        let provider = provider(&dir, 8);
+        let served = resolve(&provider, outage()).await.unwrap();
+        // Provider-resolved: a stale descriptor never becomes a catalog infohash alias.
+        assert!(matches!(&served, ResolvedContentId::Provider(stored) if *stored == info(7)));
+        assert!(provider
+            .verified_info_for_infohash(&infohash_hex(&info(7).infohash))
+            .is_err());
+        // The outage marker serves the next start without waiting on the catalog again.
+        let again = provider
+            .resolve_content_id_prepared_with_catalog_classified(ID, async {
+                panic!("a just-failed catalog is not retried within the outage window")
+            })
+            .await
+            .unwrap();
+        assert!(matches!(again, ResolvedContentId::Provider(stored) if stored == info(7)));
+        provider.descriptor_fallback.settled().await;
+        drop(provider);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn definitive_catalog_answers_never_fall_back() {
+        let dir = temp_dir();
+        restarted(&dir, Ok(info(7))).await.unwrap();
+        for rejected in [
+            ResolveError::Catalog("synthetic not found"),
+            ResolveError::Catalog("bad catalog xml"),
+        ] {
+            let failure = restarted(&dir, Err(rejected)).await.err().unwrap();
+            assert_eq!(
+                failure.kind,
+                StartFailureKind::Resolution(ResolveFailureKind::RejectedMetadata)
+            );
+        }
+        // A rejection keeps the entry for a later outage; an HLS handoff evicts it. Hosts
+        // that all reply with an unusable status are an outage too.
+        assert!(restarted(&dir, outage()).await.is_ok());
+        assert!(matches!(
+            restarted(&dir, Err(ResolveError::CatalogUnavailable("catalog http status"))).await,
+            Ok(ResolvedContentId::Provider(stored)) if stored == info(7)
+        ));
+        let handoff = restarted(
+            &dir,
+            Err(ResolveError::HlsOrigin(Box::new(
+                ace_swarm::resolve::HlsOrigin {
+                    manifest_url: "https://cdn.example.test/live.m3u8?token=synthetic".into(),
+                    metadata: Default::default(),
+                },
+            ))),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(handoff.error, ProviderError::DirectHls(_)));
+        let failure = restarted(&dir, outage()).await.err().unwrap();
+        assert_eq!(
+            failure.kind,
+            StartFailureKind::Resolution(ResolveFailureKind::Network)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_protected_result_evicts_the_stored_descriptor() {
+        let dir = temp_dir();
+        restarted(&dir, Ok(info(7))).await.unwrap();
+        let mut protected = info(8);
+        protected.protection = Some(ace_wire::protection::Protection::Protected);
+        let failure = restarted(&dir, Ok(protected)).await.err().unwrap();
+        assert_eq!(
+            failure.kind,
+            StartFailureKind::Resolution(ResolveFailureKind::ProtectedContent)
+        );
+        let failure = restarted(&dir, outage()).await.err().unwrap();
+        assert_eq!(
+            failure.kind,
+            StartFailureKind::Resolution(ResolveFailureKind::Network),
+            "the protected answer superseded the stored descriptor"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_result_replaces_the_stored_descriptor() {
+        let dir = temp_dir();
+        restarted(&dir, Ok(info(7))).await.unwrap();
+        // The live infohash rotated.
+        restarted(&dir, Ok(info(8))).await.unwrap();
+        assert!(matches!(
+            restarted(&dir, outage()).await,
+            Ok(ResolvedContentId::Provider(stored)) if stored == info(8)
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disabled_fallback_and_private_mode_keep_network_failures() {
+        let dir = temp_dir();
+        restarted(&dir, Ok(info(7))).await.unwrap();
+        let disabled = provider(&dir, 0);
+        assert!(!disabled.descriptor_fallback.is_enabled());
+        let failure = resolve(&disabled, outage()).await.err().unwrap();
+        assert!(matches!(failure.error, ProviderError::Network(_)));
+        let policy =
+            || ace_swarm::peer_policy::PeerPolicy::from_private_peers(Some("127.0.0.1:1")).unwrap();
+        let private = provider(&dir, 8).with_peer_policy(policy());
+        assert!(!private.descriptor_fallback.is_enabled());
+        let private = AceProvider::new(Arc::new(Identity::generate()), 0)
+            .with_peer_policy(policy())
+            .with_descriptor_fallback(dir.clone(), 8);
+        assert!(!private.descriptor_fallback.is_enabled());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
