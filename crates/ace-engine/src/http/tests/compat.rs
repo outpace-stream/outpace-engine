@@ -886,6 +886,7 @@ async fn ace_stat_and_stop_track_content_id_session() {
     let minted: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let token = minted["response"]["playback_session_id"].as_str().unwrap();
     let stat_path = format!("/ace/stat/cid:{content_id}/{token}");
+    // The first poll starts the source in the background and reports start-up.
     let idle = app
         .clone()
         .oneshot(Request::get(&stat_path).body(Body::empty()).unwrap())
@@ -897,7 +898,7 @@ async fn ace_stat_and_stop_track_content_id_session() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], serde_json::Value::Null);
-    assert_eq!(json["response"]["status"], "idle");
+    assert_eq!(json["response"]["status"], "prebuf");
     assert_eq!(json["response"]["infohash"], content_id);
     assert_eq!(
         json["response"]["metadata"],
@@ -1174,18 +1175,20 @@ async fn native_stats_serializes_missing_recovery_as_null() {
 }
 
 #[tokio::test]
-async fn measured_stats_schema_idle_unknown_and_invalid_token_do_not_start() {
+async fn measured_stats_schema_starting_unknown_and_invalid_token() {
     let st = measured_state(false);
     let token = st.ace_sessions.mint("stats".into(), "stats".into());
-    let Json(idle) = ace_stat(State(st.clone()), Path(("stats".into(), token.clone()))).await;
-    assert_eq!(idle["response"]["speed_down"], 0);
-    assert_eq!(
-        idle["response"].get("livepos"),
-        Some(&serde_json::Value::Null)
-    );
     let Json(error) = ace_stat(State(st.clone()), Path(("stats".into(), "invalid".into()))).await;
     assert!(error["error"].is_string());
     assert!(st.manager.list().await.is_empty());
+    // A valid lease with no source yet reports start-up with zero speeds and no position.
+    let Json(starting) = ace_stat(State(st.clone()), Path(("stats".into(), token.clone()))).await;
+    assert_eq!(starting["response"]["status"], "prebuf");
+    assert_eq!(starting["response"]["speed_down"], 0);
+    assert_eq!(
+        starting["response"].get("livepos"),
+        Some(&serde_json::Value::Null)
+    );
     let _session = st.manager.get_or_start("fix", "stats").await.unwrap();
     let Json(active) = ace_stat(State(st), Path(("stats".into(), token))).await;
     assert_eq!(
