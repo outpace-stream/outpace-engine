@@ -26,10 +26,11 @@ fn resume_cursor_matches_existing_window_policy_at_edges() {
         "future minimum may resync forward"
     );
 
-    continuity.reasm.skip_to(11);
-    continuity.head = 10;
-    assert!(agrees(&continuity, win(1, 10)), "caught-up edge fallback");
-    assert!(!agrees(&continuity, win(1, 9)), "below caught-up head");
+    // Caught up: the cursor (12, the fresh start) waits on the piece after the head.
+    continuity.reasm.skip_to(12);
+    continuity.head = 11;
+    assert!(agrees(&continuity, win(1, 11)), "caught-up edge fallback");
+    assert!(!agrees(&continuity, win(1, 10)), "below caught-up head");
 
     continuity.reasm.skip_to(u64::MAX);
     continuity.head = u64::MAX;
@@ -977,4 +978,112 @@ fn retained_output_resume_preserves_request_age() {
     c.resume("127.0.0.1:1234".parse().unwrap(), 30, 40);
     assert_eq!(c.requested_at.get(&c.reasm.next_needed()), Some(&before));
     assert_eq!(c.next_needed_since, before);
+}
+
+/// #560: the trusted head needs a second vote once output exists; a departed peer's
+/// vote leaves with it, and a lone survivor is followed within one request horizon.
+#[test]
+fn trusted_head_needs_corroboration_and_forgets_departed_votes() {
+    let policy = LiveRecoveryConfig::default();
+    let step = policy.max_piece_advance;
+    let (mut c, _) = Continuity::fresh(&info(), 0, 100, PREFETCH_PIECES, policy);
+    c.emitted = 1;
+    let addr: SocketAddrV4 = "1.2.3.4:8621".parse().unwrap();
+    c.register_active_peer(1, addr, win(0, 100));
+    c.register_active_peer(2, addr, win(0, 100));
+    c.update_peer_window(2, 0, 1_000_000);
+    c.refresh_trusted_head();
+    assert_eq!(c.head, 100, "a lone outlier does not move the trusted head");
+    assert_eq!(
+        c.request_head(),
+        100,
+        "only the actor raises the request bound"
+    );
+
+    c.update_peer_window(1, 0, 101);
+    c.refresh_trusted_head();
+    assert_eq!(
+        c.head, 101,
+        "the second-highest edge advances with honest progress"
+    );
+
+    // The honest peer leaves: the liar is now the only evidence. It moves the head at
+    // most one horizon past the highest piece received (100), however often it repeats.
+    c.active_peers.remove(1);
+    for claim in 1_000_000..1_000_064 {
+        c.update_peer_window(2, 0, claim);
+        c.refresh_trusted_head();
+        assert_eq!(c.head, 100 + step, "repeated lone claims must not ratchet");
+    }
+
+    // A sole honest survivor is followed exactly as its pieces arrive, never stalls.
+    c.active_peers.remove(2);
+    c.register_active_peer(3, addr, win(0, (100 + step) as i64));
+    for edge in 101 + step..110 + step {
+        c.complete_scheduled(edge - 1);
+        c.update_peer_window(3, 0, edge);
+        c.refresh_trusted_head();
+        assert_eq!(c.head, edge);
+    }
+
+    // The head never moves backward, even when the remaining votes are lower.
+    c.register_active_peer(4, addr, win(0, 50));
+    c.refresh_trusted_head();
+    assert_eq!(c.head, 109 + step);
+}
+
+/// #560 review: requests may run ahead of the trusted head, so the cursor can pass it.
+/// Resume decisions must then measure candidates against the cursor, not the lagging head.
+#[test]
+fn a_cursor_past_the_trusted_head_rejects_windows_behind_it() {
+    let (mut c, _) = Continuity::fresh(
+        &info(),
+        0,
+        100,
+        PREFETCH_PIECES,
+        LiveRecoveryConfig::default(),
+    );
+    c.emitted = 1;
+    c.reasm.skip_to(181);
+    assert_eq!(c.head, 100);
+    assert_eq!(c.trusted_head(), 180);
+    assert!(!c.window_can_resume(&win(0, 120)));
+    assert!(c.window_can_resume(&win(0, 180)));
+}
+
+/// Before the first byte, a fresher independent window wins (#170, #521).
+#[test]
+fn trusted_head_follows_the_freshest_window_before_output() {
+    let (mut c, _) = Continuity::fresh(
+        &info(),
+        7,
+        8,
+        PREFETCH_PIECES,
+        LiveRecoveryConfig::default(),
+    );
+    let addr: SocketAddrV4 = "1.2.3.4:8621".parse().unwrap();
+    c.register_active_peer(1, addr, win(7, 8));
+    c.register_active_peer(2, addr, win(990, 1_000));
+    c.refresh_trusted_head();
+    assert_eq!(c.head, 1_000);
+}
+
+/// #565 review: a peer admitted into a resumed pool widens the request bound at once,
+/// while its uncorroborated edge still leaves the trusted head alone.
+#[test]
+fn an_admitted_peer_claim_widens_requests_but_not_the_trusted_head() {
+    let (mut c, _) = Continuity::fresh(
+        &info(),
+        0,
+        100,
+        PREFETCH_PIECES,
+        LiveRecoveryConfig::default(),
+    );
+    c.emitted = 1;
+    let addr: SocketAddrV4 = "1.2.3.4:8621".parse().unwrap();
+    c.register_active_peer(1, addr, win(0, 100));
+    c.register_active_peer(2, addr, win(0, 200));
+    c.refresh_trusted_head();
+    assert_eq!(c.head, 100);
+    assert_eq!(c.request_head(), 200);
 }
