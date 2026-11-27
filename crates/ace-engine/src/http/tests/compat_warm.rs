@@ -161,6 +161,8 @@ async fn horus_style_client_starts_a_cold_stream_with_one_open() {
         );
 
         let (_, statuses) = poll_until(&warm.app, &lease.stat, is_dl).await;
+        // `dl` only means the session exists; the warm task may not have settled its pin yet.
+        wait_held(&warm.state, &lease.token).await;
         assert_eq!(statuses[0], "prebuf", "the first poll starts the source");
         assert!(statuses
             .iter()
@@ -225,6 +227,8 @@ async fn stopping_a_polled_lease_releases_its_hold_to_idle_cleanup() {
         let warm = warm_state(false, Outcome::Play, AceSessionStore::default());
         let lease = mint(&warm.app).await;
         poll_until(&warm.app, &lease.stat, is_dl).await;
+        // `dl` only means the session exists; the warm task may not have settled its pin yet.
+        wait_held(&warm.state, &lease.token).await;
         assert!(warm.state.ace_sessions.warm_held(&lease.token));
         let held = session(&warm.state).await.unwrap();
 
@@ -281,6 +285,8 @@ async fn an_expired_polled_lease_releases_its_hold_without_further_requests() {
         );
         let lease = mint(&warm.app).await;
         poll_until(&warm.app, &lease.stat, is_dl).await;
+        // `dl` only means the session exists; the warm task may not have settled its pin yet.
+        wait_held(&warm.state, &lease.token).await;
         let held = session(&warm.state).await.unwrap();
         assert_eq!(held.support_pin_count(), 1);
         // Nothing touches the lease store: the lease reaper alone must end the hold.
@@ -338,6 +344,16 @@ fn idle_bounded(pending: bool) -> Warm {
     )
 }
 
+async fn wait_held(state: &AppState, token: &str) {
+    for _ in 0..300 {
+        if state.ace_sessions.warm_held(token) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the warm lease never settled as held");
+}
+
 async fn wait_for_pins(held: &StreamSession, pins: u64) {
     for _ in 0..300 {
         if held.support_pin_count() == pins {
@@ -354,6 +370,8 @@ async fn an_unpolled_warm_hold_is_released_after_the_poll_idle_bound() {
         let warm = idle_bounded(false);
         let lease = mint(&warm.app).await;
         poll_until(&warm.app, &lease.stat, is_dl).await;
+        // `dl` only means the session exists; the warm task may not have settled its pin yet.
+        wait_held(&warm.state, &lease.token).await;
         let held = session(&warm.state).await.unwrap();
         assert_eq!(held.support_pin_count(), 1);
         // No further requests: the lease reaper alone ends the hold.
@@ -380,6 +398,8 @@ async fn regular_polls_keep_a_warm_hold_past_the_poll_idle_bound() {
         let warm = idle_bounded(false);
         let lease = mint(&warm.app).await;
         poll_until(&warm.app, &lease.stat, is_dl).await;
+        // `dl` only means the session exists; the warm task may not have settled its pin yet.
+        wait_held(&warm.state, &lease.token).await;
         let held = session(&warm.state).await.unwrap();
         let until = Instant::now() + Duration::from_millis(700);
         while Instant::now() < until {
@@ -409,6 +429,8 @@ async fn a_poll_after_idle_release_warms_the_lease_again() {
         assert!(session(&warm.state).await.is_none());
 
         let (_, statuses) = poll_until(&warm.app, &lease.stat, is_dl).await;
+        // `dl` only means the session exists; the warm task may not have settled its pin yet.
+        wait_held(&warm.state, &lease.token).await;
         assert_eq!(
             statuses[0], "prebuf",
             "the resumed poll starts the source again"
