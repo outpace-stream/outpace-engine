@@ -93,7 +93,11 @@ impl AceProvider {
             }
             let catalog_error = match self.resolve_cache.resolve_with(content_id, catalog).await {
                 Ok(info) => {
-                    info.ensure_playable().map_err(ProviderStartFailure::from)?;
+                    if let Err(error) = info.ensure_playable() {
+                        // A protected catalog answer supersedes the stored descriptor.
+                        self.descriptor_fallback.forget(key);
+                        return Err(ProviderStartFailure::from(error));
+                    }
                     crate::alog!("[ace] resolved content id via catalog");
                     self.infohash_index.put(info.clone());
                     // A fresh result always replaces the stored one: live infohashes rotate.
@@ -1037,6 +1041,26 @@ mod descriptor_fallback_tests {
         assert_eq!(
             failure.kind,
             StartFailureKind::Resolution(ResolveFailureKind::Network)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_protected_result_evicts_the_stored_descriptor() {
+        let dir = temp_dir();
+        restarted(&dir, Ok(info(7))).await.unwrap();
+        let mut protected = info(8);
+        protected.protection = Some(ace_wire::protection::Protection::Protected);
+        let failure = restarted(&dir, Ok(protected)).await.err().unwrap();
+        assert_eq!(
+            failure.kind,
+            StartFailureKind::Resolution(ResolveFailureKind::ProtectedContent)
+        );
+        let failure = restarted(&dir, outage()).await.err().unwrap();
+        assert_eq!(
+            failure.kind,
+            StartFailureKind::Resolution(ResolveFailureKind::Network),
+            "the protected answer superseded the stored descriptor"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

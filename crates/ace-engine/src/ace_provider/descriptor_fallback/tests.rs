@@ -445,3 +445,22 @@ async fn a_forget_survives_a_lock_miss_until_the_disk_reflects_it() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_lookup_retries_a_store_the_lock_blocked_on_first_load() {
+    let dir = temp_dir();
+    let store = DescriptorFallback::new(&dir, 8);
+    store.record(KEY, &info(7));
+    store.settled().await;
+    drop(store);
+    let holder = DescriptorFallback::new(&dir, 8);
+    holder.lookup([9; 20]).await; // takes the lock
+    let blocked = DescriptorFallback::new(&dir, 8);
+    assert!(blocked.lookup(KEY).await.is_none(), "locked out on first load");
+    drop(holder);
+    // No record or forget in between: the lookup alone reopens the store.
+    assert_eq!(blocked.lookup(KEY).await.unwrap().0, info(7));
+    drop(blocked);
+    let _ = std::fs::remove_dir_all(dir);
+}

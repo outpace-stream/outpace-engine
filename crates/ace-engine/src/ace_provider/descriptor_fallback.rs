@@ -203,7 +203,17 @@ impl DescriptorFallback {
     /// The stored descriptor for `key` and its age, loading the file on first use.
     pub(crate) async fn lookup(&self, key: [u8; 20]) -> Option<(StreamInfo, Duration)> {
         let inner = self.0.as_ref()?;
-        if !inner.state.lock().unwrap().loaded {
+        // Load on first use, and retry a store that could not be opened (another process held
+        // its lock) once the backoff allows: an outage is exactly when the saved rows matter.
+        let load = {
+            let state = inner.state.lock().unwrap();
+            !state.disk_merged
+                && (!state.loaded
+                    || state
+                        .failed_at
+                        .is_none_or(|at| at.elapsed() >= REOPEN_BACKOFF))
+        };
+        if load {
             let loader = Arc::clone(inner);
             let tasks = Arc::clone(&inner.tasks);
             tasks.active.fetch_add(1, Ordering::SeqCst);
