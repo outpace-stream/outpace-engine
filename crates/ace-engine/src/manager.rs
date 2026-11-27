@@ -1561,6 +1561,31 @@ impl StreamManager {
             .collect()
     }
 
+    /// Active sessions as `(network, id, clients, metadata)`, each client snapshot taken
+    /// atomically so its count and list agree.
+    pub async fn list_clients(
+        &self,
+    ) -> Vec<(
+        String,
+        String,
+        crate::session::ClientSnapshot,
+        StreamMetadata,
+    )> {
+        self.sessions
+            .lock()
+            .await
+            .iter()
+            .map(|((n, i), s)| {
+                (
+                    n.clone(),
+                    i.clone(),
+                    s.client_snapshot(),
+                    s.metadata().clone(),
+                )
+            })
+            .collect()
+    }
+
     /// Retire idle entries, then wait for their cleanup to be confirmed.
     #[cfg(test)]
     async fn reap_idle_at(&self, now: Instant) {

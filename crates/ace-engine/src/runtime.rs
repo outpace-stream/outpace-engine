@@ -1324,43 +1324,47 @@ async fn serve_http_inner(
         if let Some(ready) = ready {
             ready();
         }
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                // Axum runs this future in its own task. Cancelling the outer serving future
-                // drops the runtime tasks owner, which must wake it to release its state too.
-                tokio::select! {
-                    () = shutdown => {}
-                    () = async {
-                        while !*background_cancelled.borrow_and_update() {
-                            if background_cancelled.changed().await.is_err() {
-                                break;
-                            }
+        // Connect info gives `/streams` each subscription's TCP peer address.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            // Axum runs this future in its own task. Cancelling the outer serving future
+            // drops the runtime tasks owner, which must wake it to release its state too.
+            tokio::select! {
+                () = shutdown => {}
+                () = async {
+                    while !*background_cancelled.borrow_and_update() {
+                        if background_cancelled.changed().await.is_err() {
+                            break;
                         }
-                    } => {}
-                }
-                // Close/cancel before HTTP graceful drain can wait on a live request body.
-                draining_broadcasts.close_admissions();
-                if let Some(cancel) = cancel_srt {
-                    cancel.cancel();
-                }
-                cancel_rtmp.send_replace(true);
-                cancel_background.send_replace(true);
-                if let Some(service) = draining_support {
-                    if !service.shutdown().await {
-                        crate::alog!("[support] shutdown cleanup failed");
                     }
+                } => {}
+            }
+            // Close/cancel before HTTP graceful drain can wait on a live request body.
+            draining_broadcasts.close_admissions();
+            if let Some(cancel) = cancel_srt {
+                cancel.cancel();
+            }
+            cancel_rtmp.send_replace(true);
+            cancel_background.send_replace(true);
+            if let Some(service) = draining_support {
+                if !service.shutdown().await {
+                    crate::alog!("[support] shutdown cleanup failed");
                 }
-                // Continuous stream responses end only when their source sender closes, so
-                // stop the manager before HTTP drain waits on those bodies. Otherwise any
-                // connected viewer holds shutdown open. Support is already stopped above.
-                if !draining_manager.shutdown().await {
-                    crate::alog!("[runtime] stream manager cleanup failed");
-                }
-                if let Err(error) = draining_broadcasts.shutdown().await {
-                    crate::alog!("[broadcast] shutdown: {}", error.code());
-                }
-            })
-            .await?;
+            }
+            // Continuous stream responses end only when their source sender closes, so
+            // stop the manager before HTTP drain waits on those bodies. Otherwise any
+            // connected viewer holds shutdown open. Support is already stopped above.
+            if !draining_manager.shutdown().await {
+                crate::alog!("[runtime] stream manager cleanup failed");
+            }
+            if let Err(error) = draining_broadcasts.shutdown().await {
+                crate::alog!("[broadcast] shutdown: {}", error.code());
+            }
+        })
+        .await?;
         Ok(())
     }
     .await;

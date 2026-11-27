@@ -49,12 +49,12 @@ outpace broadcast sports --public-host stream.example
 | `GET /networks` | `200 application/json`, `{"networks":["ace"]}` | Provider networks configured in this daemon. |
 | `GET /network-policy` | `200 application/json` | Peer-network mode: `{"mode":"public","allowed_peer_count":null}`, or in [private peer mode](private-peer-mode.md) `mode` `private` with `allowed_peer_count` and `inbound_peer_connections`/`public_discovery`/`public_advertising` all `false`. Always includes a `proxy` object with `mode`, current `path`, `udp_trackers`, `dht` and `inbound_advertised`; never the proxy endpoint or credentials. |
 | `GET /debug/memstats` | `200 application/json` | Allocator counters. On jemalloc builds (64-bit, non-MSVC, non-Android): `allocator` `jemalloc`, `epoch_error` (`null` on success), and `allocated`, `active`, `resident`, `retained`, `mapped` in bytes (`null` if a counter cannot be read). Other builds return only `{"allocator":"system"}`. |
-| `GET /streams` | `200 application/json`, `{"streams":[...]}` | Active shared sessions. Entries have `network`, `id`, direct-client count `clients`, and descriptor `metadata`. |
+| `GET /streams` | `200 application/json`, `{"streams":[...]}` | Active shared sessions. Entries have `network`, `id`, client count `clients`, the per-client `client_list` (see [Stream clients](#stream-clients)), and descriptor `metadata`. |
 | `GET /streams/<network>/<id>` | `200 video/mp2t` streaming body | Default live playback for dot-free provider ids; starts or joins the same shared session as the explicit `.ts` form. When the descriptor supplies a title, the response includes `Icy-Name`. Dotted ids, unknown networks, and invalid ids return `404`. An `ih:` selector without a verified descriptor returns `422` with a plain-text reason. Malformed `cid:`/`ih:` selectors return `400`. |
 | `GET /streams/<network>/<id>.ts` | `200 video/mp2t` streaming body | Explicit continuous MPEG-TS form; equivalent for dot-free ids, preserves dots within the provider id, and includes `Icy-Name` when the descriptor supplies a title. |
 | `GET /streams/<network>/<id>.m3u8` | `200 application/vnd.apple.mpegurl` | Starts or joins live HLS packaging and returns a sliding playlist. The same `422` applies. |
 | `GET /streams/<network>/<id>/seg/<n>.ts` | `200 video/mp2t` | Retained live HLS segment. Missing, expired, or not-yet-produced segments return `404`; a segment request alone never starts a stream. |
-| `GET /streams/<network>/<id>/status` | `200 application/json` | Active-session status; `404` before playback starts or after teardown. |
+| `GET /streams/<network>/<id>/status` | `200 application/json` | Active-session status, including `clients` and `client_list`; `404` before playback starts or after teardown. |
 | `DELETE /streams/<network>/<id>` | `204` | Force-stops an active session; `404` if inactive. A `.ts` or `.m3u8` suffix is also accepted. |
 | `GET /origin-hls/status` | `200 application/json`, `{"enabled":false,"active_sessions":0}` | Managed origin-HLS relay state; never contains tokens or origin URLs. See [Origin HLS](#origin-hls). |
 | `GET /origin-hls/<token>/<resource>` | `200`/`206` playlist or media | Only with `OUTPACE_MANAGED_HLS=1`; otherwise `404`. |
@@ -355,6 +355,7 @@ An active stream status response has stable field names and numeric counters:
   "network": "ace",
   "id": "<id>",
   "clients": 1,
+  "client_list": [{"address": "192.168.1.20", "since": 1763100000}],
   "peers": 4,
   "bitrate": 2450000,
   "buffer_ms": 6200,
@@ -387,7 +388,7 @@ A failed source remains observable until normal stop/idle teardown; another requ
 does not automatically start a replacement child.
 
 `clients` counts direct consumers of the shared byte stream; internal HLS packaging does not
-inflate it. The top-level `bitrate` is the measured session rate; `metadata.bitrate` is the
+inflate it. See [Stream clients](#stream-clients) for what counts and for `client_list`. The top-level `bitrate` is the measured session rate; `metadata.bitrate` is the
 descriptor's advertised rate converted from its raw bytes-per-second unit. Both JSON rates
 are bits per second (conversion saturates at the unsigned 64-bit maximum). `buffer_ms` is the
 estimated duration currently queued on the server, and `uploaded` is bytes. In particular, `buffer_ms` is not a
@@ -398,6 +399,47 @@ descriptors without metadata return `null`, `null`, and `[]` respectively.
 The descriptor title is authoritative for both `metadata.title` and `Icy-Name`; Outpace does not
 invent a title.
 Live HLS media playlists are unchanged because they have no portable stream-title field.
+
+
+## Stream clients
+
+`GET /streams` entries and active `GET /streams/<network>/<id>/status` responses carry
+`clients` and `client_list`. Both come from one per-session registry: every subscription
+adds an entry when it opens and its RAII guard removes it when the subscription is dropped,
+so the count and the list are read together and never disagree.
+
+```json
+{"network":"ace","id":"cid:0123456789abcdef0123456789abcdef01234567","clients":2,
+ "client_list":[{"address":"192.168.1.20","since":1763100000},
+                {"address":"127.0.0.1","since":1763100042}]}
+```
+
+- `address` is the IP of the TCP peer of the HTTP request that opened the subscription.
+  IPv4-mapped IPv6 peers are shown as IPv4. Forwarding headers such as `X-Forwarded-For`
+  are never read, so behind a reverse proxy every client shows the proxy's address. It is
+  `null` only when the router runs without connect info (in-process tests).
+- `since` is the Unix time, in seconds, when that subscription opened.
+- Entries are in subscription order, oldest first. The list holds at most 64 entries;
+  `clients` stays exact beyond that and only the list is truncated.
+- The start-attempt form of the status response (`resolving`, `connecting`, or a retained
+  `failed`) has `clients: 0` and `client_list: []`.
+
+What counts as one client:
+
+| Playback | One client per | Address recorded | Removed when |
+| --- | --- | --- | --- |
+| Direct MPEG-TS (`/streams/<network>/<id>`, `.ts`) | open response body | the playback request | the body is dropped (client disconnect, EOF, stop) |
+| Compat direct TS (`/ace/getstream`, `/ace/r/...`) | open response body | the playback request (not a `format=json` mint, which opens nothing) | the body is dropped or its lease ends |
+| Compat HLS (`/ace/manifest.m3u8`) | playback lease | the request that opened the lease, once | the lease stops, expires or is evicted; playlist and segment fetches do no client work |
+| Cast (`/cast/s/...`) | renderer fetch, plus a short-lived controller entry while `play` runs | the renderer, or the controller that called `play` | the fetch ends, or `play` returns |
+| Native HLS (`/streams/<network>/<id>.m3u8`) | not counted (no lease) | - | - |
+
+VOD (`/vod/...`) does not appear in `/streams`. The list costs one small registry entry
+per subscription or lease and no per-chunk work.
+
+Privacy: the list is always included. Anyone who can reach `OUTPACE_BIND` can see which IP
+addresses are watching each stream; keep the API on loopback or a trusted network, or put an
+authenticating proxy in front of it.
 
 ## Origin HLS
 

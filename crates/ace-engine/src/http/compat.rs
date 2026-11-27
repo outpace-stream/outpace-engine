@@ -6,6 +6,7 @@ use ace_swarm::resolve::HlsOrigin;
 
 pub(super) async fn ace_getstream(
     State(s): State<AppState>,
+    client: ClientAddr,
     headers: HeaderMap,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Response {
@@ -86,6 +87,7 @@ pub(super) async fn ace_getstream(
     let language = s.ace_sessions.ts_audio_language(&token);
     match opened {
         Ok(session) => {
+            client.record(&session.1);
             ace_stream_session_response(
                 session,
                 expires_at,
@@ -121,6 +123,7 @@ pub(super) async fn ace_getstream(
 /// official documented control-URL shape. Both paths use the same native `HlsPackager`.
 pub(super) async fn ace_manifest(
     State(s): State<AppState>,
+    client: ClientAddr,
     headers: HeaderMap,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Response {
@@ -182,6 +185,10 @@ pub(super) async fn ace_manifest(
         }
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
+    // The lease's pin is its one client entry: the address of the request that opened it,
+    // recorded once here and removed with the pin when the lease ends. Playlist and
+    // segment fetches do no client bookkeeping.
+    client.record(&pin);
     // A preference resolves once, against the shared session's tables, to a bounded variant.
     let variant = match preferred_audio_language(&params) {
         Some(language) => {
@@ -524,6 +531,7 @@ async fn open_for_lease(
 
 pub(super) async fn ace_playback(
     State(s): State<AppState>,
+    client: ClientAddr,
     Path((id, token)): Path<(String, String)>,
 ) -> Response {
     let Some(network) = ace_network(&s) else {
@@ -539,6 +547,7 @@ pub(super) async fn ace_playback(
     };
     match opened {
         Ok(session) => {
+            client.record(&session.1);
             ace_stream_session_response(
                 session,
                 expires_at,

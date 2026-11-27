@@ -15,6 +15,7 @@ use tower::ServiceExt;
 mod broadcast;
 mod broadcast_source;
 mod cast;
+mod client_list;
 mod compat;
 mod compat_audio;
 mod compat_catalog;

@@ -2,7 +2,11 @@ use super::*;
 #[cfg(test)]
 mod activation_tests;
 #[cfg(test)]
+mod delivery_tests;
+#[cfg(test)]
 mod drain_tests;
+#[cfg(test)]
+mod output_bench;
 #[cfg(test)]
 mod output_schedules;
 mod publication;
@@ -1139,9 +1143,12 @@ fn finish_output_step(
         #[cfg(test)]
         output_schedules::prepared_in(preparation_start.elapsed());
         continuity.pending_output.extend(segments);
+        continuity.output_piece = Some(piece.index);
         #[cfg(test)]
         output_schedules::retained(continuity);
         if continuity.pending_output.is_empty() {
+            // Nothing of this piece is left to send.
+            continuity.note_output_sent();
             continuity.output_ceiling = None;
             continuity.output_clock.end(Instant::now());
             return None;
@@ -1150,6 +1157,7 @@ fn finish_output_step(
     if let Some(output) = continuity.pending_output.pop_front() {
         let len = output.bytes.len() as u64;
         drop(permit.send(output));
+        continuity.note_output_sent();
         #[cfg(test)]
         output_schedules::enqueue();
         for credit in continuity.pending_credit.pop_front().unwrap_or_default() {
@@ -1270,5 +1278,8 @@ pub(in crate::live_session) async fn drain_retained(
         }
         tokio::task::yield_now().await;
     }
+    // The last send above ran after this turn's publication: publish the final delivery
+    // cursor now, since the reconnect wait that follows publishes nothing.
+    publish_live_stats(c, seed.metrics.as_ref(), info);
     true
 }

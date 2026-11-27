@@ -88,7 +88,7 @@ The `reason` on the `[prebuffer]` line tells you why playback started:
 | --- | --- |
 | `TargetDuration` | The full target was reached. |
 | `Deadline` | The 15-second limit expired; playback started with what was there. |
-| `BacklogExhausted` | Every piece the peers hold up to the live edge has arrived, so playback started with that shorter backlog instead of waiting for the target. |
+| `BacklogExhausted` | Every piece the peers hold up to the live edge has arrived and been handed to the player, so playback started with that shorter backlog instead of waiting for the target. |
 | `ByteLimit` | The 128 MiB cap was hit. |
 | `EndOfStream` | The source ended during startup. |
 | `Disabled` | Prebuffering is off. |
@@ -190,6 +190,9 @@ out of nodes to ask before finding any peer, it asks the bootstrap routers once 
 together with up to a few DHT nodes that answered earlier searches in the last 15 minutes
 (remembered in memory only, so a fresh process starts with none):
 `recovery_queries` counts those extra queries and `recovery_peers` the peers they led to.
+A search sends at most 256 lookup queries, plus up to 8 recovery queries if it runs dry
+before finding peers. `query_cap_reached=true` means the lookup limit stopped it, which a
+search that finds peers normally never reaches.
 
 ## No inbound peers
 
@@ -327,4 +330,6 @@ lines, IPv6 addresses or base32 magnet links.
 
 Ask in [Discussions](https://github.com/outpace-stream/outpace-engine/discussions). See the
 [FAQ](FAQ) for common questions: do you need the official engine, Docker, VLC,
-Jellyfin and Dispatcharr, broadcasting, and the differences from the official engine.
+Jellyfin and Dispatcharr, broadcasting, and the differences from the official engine. The
+[Jellyfin](Jellyfin), [Dispatcharr](Dispatcharr) and [Kodi](Kodi) guides cover problems specific
+to those clients.

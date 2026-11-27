@@ -2,8 +2,9 @@
   This wiki is generated from docs/wiki/ in the main repository
   (https://github.com/outpace-stream/outpace-engine/tree/main/docs/wiki).
   Edit the files there through a pull request. Every merge to main that
-  touches docs/wiki/ republishes the wiki (.github/workflows/wiki.yml), so
-  edits made in the GitHub wiki web UI are overwritten.
+  touches docs/wiki/ republishes the wiki (.github/workflows/wiki.yml) and the
+  documentation site (.github/workflows/site.yml), so edits made in the
+  GitHub wiki web UI are overwritten.
 -->
 
 # Outpace: the open-source P2P streaming engine
@@ -64,6 +65,7 @@ New here? Start with the [FAQ](FAQ) or [Getting Started](Getting-Started).
 | Look up a setting | [Configuration](Configuration) (by topic) · [Environment Variables](Environment-Variables) (A–Z) |
 | Use `outpace play`, `broadcast` or other commands | [Command Line](Command-Line) |
 | Point a player or app at Outpace | [Playing Streams](Playing-Streams) |
+| Add Outpace channels to Jellyfin, Dispatcharr or Kodi | [Jellyfin](Jellyfin) · [Dispatcharr](Dispatcharr) · [Kodi](Kodi) |
 | Send a live stream to a smart TV or other DLNA renderer | [Casting](Casting) |
 | Tune HLS or fix audio for a player | [HLS Output](HLS-Output) |
 | Rewind a live stream | [Timeshift](Timeshift) |

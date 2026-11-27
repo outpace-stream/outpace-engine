@@ -75,6 +75,50 @@ fn stream_metadata_json(metadata: &StreamMetadata) -> serde_json::Value {
     })
 }
 
+/// IP of the request's TCP peer, recorded once per subscription or HLS lease for the
+/// `client_list` of `/streams`. It is the socket peer only: forwarding headers such as
+/// `X-Forwarded-For` are never read, so behind a reverse proxy it is the proxy's address.
+/// `None` when the router is served without connect info (in-process tests).
+pub(super) struct ClientAddr(pub(super) Option<std::net::IpAddr>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientAddr {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::extract::connect_info::{ConnectInfo, MockConnectInfo};
+        use std::net::SocketAddr;
+        let peer = match parts.extensions.get::<ConnectInfo<SocketAddr>>() {
+            Some(ConnectInfo(peer)) => Some(*peer),
+            None => parts
+                .extensions
+                .get::<MockConnectInfo<SocketAddr>>()
+                .map(|MockConnectInfo(peer)| *peer),
+        };
+        Ok(Self(peer.map(|peer| peer.ip())))
+    }
+}
+
+impl ClientAddr {
+    /// Attach this request's address to the subscription it opened.
+    pub(super) fn record(&self, subscription: &crate::session::Subscription) {
+        if let Some(address) = self.0 {
+            subscription.set_client_address(address);
+        }
+    }
+}
+
+/// The bounded `client_list` of one session snapshot (its `count` is the `clients` field).
+fn client_list_json(snapshot: &crate::session::ClientSnapshot) -> serde_json::Value {
+    snapshot
+        .clients
+        .iter()
+        .map(|client| json!({ "address": client.address, "since": client.since }))
+        .collect()
+}
+
 /// Read readiness and render under the same media lock. A recovery between a readiness
 /// wake and the snapshot must spend only the remainder of this request's original budget.
 async fn await_hls_playlist(

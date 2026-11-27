@@ -4,18 +4,19 @@ pub(super) async fn networks(State(s): State<AppState>) -> Json<serde_json::Valu
     Json(json!({ "networks": s.networks }))
 }
 
-/// `GET /streams` — active sessions and their client counts.
+/// `GET /streams` — active sessions, their client counts and (capped) client lists.
 pub(super) async fn list_streams(State(s): State<AppState>) -> Json<serde_json::Value> {
     let streams: Vec<_> = s
         .manager
-        .list()
+        .list_clients()
         .await
         .into_iter()
         .map(|(network, id, clients, metadata)| {
             json!({
                 "network": network,
                 "id": native_public_stream_id(&network, &id),
-                "clients": clients,
+                "clients": clients.count,
+                "client_list": client_list_json(&clients),
                 "metadata": stream_metadata_json(&metadata),
             })
         })
@@ -99,12 +100,14 @@ pub(super) async fn stream_status(
         Some(session) => {
             let stats = session.stats().await;
             let (phase, error) = session_phase(&session, &stats);
+            let clients = session.client_snapshot();
             Json(json!({
                 "network": network,
                 "id": native_public_stream_id(&network, &id),
                 "phase": phase.as_str(),
                 "error": error.as_ref().map(StartError::to_json),
-                "clients": session.subscriber_count(),
+                "clients": clients.count,
+                "client_list": client_list_json(&clients),
                 "occupied_sessions": s.manager.admission_status().0,
                 "max_sessions": s.manager.admission_status().1,
                 "peers": stats.peers,
@@ -127,6 +130,7 @@ pub(super) async fn stream_status(
                 "phase": attempt.phase().as_str(),
                 "error": attempt.error().map(StartError::to_json),
                 "clients": 0,
+                "client_list": [],
                 "peers": 0,
                 "network_path": ace_swarm::proxy::path(),
             }))
@@ -227,14 +231,16 @@ pub(super) fn start_error_response(status: StatusCode, error: &StartError) -> Re
 /// playlist).
 pub(super) async fn stream_file(
     State(s): State<AppState>,
+    client: ClientAddr,
     Path((network, file)): Path<(String, String)>,
 ) -> Response {
     let timeout = s.manager.hls_startup_timeout();
-    stream_file_with_hls_timeout(State(s), Path((network, file)), timeout).await
+    stream_file_with_hls_timeout(State(s), client, Path((network, file)), timeout).await
 }
 
 pub(super) async fn stream_file_with_hls_timeout(
     State(s): State<AppState>,
+    client: ClientAddr,
     Path((network, file)): Path<(String, String)>,
     timeout: Duration,
 ) -> Response {
@@ -294,6 +300,7 @@ pub(super) async fn stream_file_with_hls_timeout(
         Ok(sess) => sess,
         Err(e) => return stream_start_error(&s, e).await,
     };
+    client.record(&session.1);
     stream_session_response(session, s.manager.hls_startup_timeout()).await
 }
 
@@ -556,6 +563,7 @@ mod buffer_contract_tests {
     fn native_completion_is_absent_from_compatibility() {
         let p = crate::provider::LivePositionStats {
             pos: Some(1),
+            delivered: None,
             last: Some(2),
             live_first: None,
             live_last: None,
