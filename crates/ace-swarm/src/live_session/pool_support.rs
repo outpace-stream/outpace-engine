@@ -20,6 +20,7 @@ pub(super) fn update_runtime_window(
     if let Some(peer) = peers.get_mut(&peer_id) {
         peer.max_piece = peer.max_piece.max(max_piece);
         continuity.update_peer_window(peer_id, peer.min_piece, peer.max_piece);
+        continuity.refresh_trusted_head();
     }
 }
 
@@ -268,10 +269,11 @@ pub(super) async fn advance_pool_requests(
             (id, slots)
         })
         .collect();
+    let request_head = continuity.request_head();
     let assignments = continuity.active_peers.assign_with_queue_slots(
         &mut continuity.scheduler,
         continuity.reasm.next_needed(),
-        continuity.head,
+        request_head,
         &queue_slots,
     );
     let now = continuity.output_clock.now(Instant::now());
@@ -421,7 +423,7 @@ pub(super) fn publish_live_stats(
         Some(LivePosition {
             pos: Some(c.reasm.next_needed()),
             delivered: c.delivered_cursor(),
-            last: Some(c.head),
+            last: Some(c.request_head()),
             live_first: bounds.map(|(first, _)| first),
             live_last: bounds.map(|(_, last)| last),
             buffer_pieces,
@@ -495,7 +497,9 @@ pub(super) async fn retransmit_stalled_requests(
             continuity.reasm.next_needed()
         );
         for &piece in &timed_out {
-            continuity.scheduler.on_drop(piece);
+            continuity
+                .active_peers
+                .reissue(&mut continuity.scheduler, piece);
             continuity.requested_at.remove(&piece);
         }
         changed = true;
@@ -515,7 +519,7 @@ pub(super) async fn retransmit_stalled_requests(
         let mut released = false;
         for piece in timed_out.into_iter().chain(silent) {
             if !continuity.requested_at.contains_key(&piece) {
-                continuity.active_peers.complete_everywhere(piece);
+                continuity.active_peers.release_everywhere(piece);
                 released = true;
             }
         }

@@ -102,9 +102,11 @@ PY
 
 TS JSON creation mints a lease without opening the media source. Content-id catalog
 resolution may already occur during that request, but successful JSON does **not**
-prove playback will start. A stat-only client stays idle unless another consumer
-holds the same source. In contrast, HLS manifest creation, including `format=json`,
-starts the source/packager **before** minting URLs. HLS clients must consume the
+prove playback will start. The lease's **first stat read** starts the source in the
+background, so clients that wait for `status: "dl"` before opening
+`playback_url` (Horus, for example) can start a stream that isn't running yet. A
+mint that is never read or opened starts nothing. In contrast, HLS manifest
+creation, including `format=json`, starts the source/packager **before** minting URLs. HLS clients must consume the
 returned playlist and its segment URLs, rather than treating the playlist as TS.
 
 ## Routes, envelopes and errors
@@ -123,7 +125,7 @@ need not be JSON.
 | `/ace/manifest.m3u8` | Missing/empty `format` or `format=redirect`: HTTP 302 to a stable playlist. `format=json`: HLS playback/stat/command URLs and session metadata. | Selector/format/no-network errors: HTTP 200, `response: null`. Source/packager-start failure: 404, including JSON mode. |
 | `/ace/m/<id>/<token>.m3u8` | Token-authenticated live media playlist; absolute segment URLs; `no-store`. | Invalid lease or removed packager: 404. Not ready, stalled/recovering or failed packager: 503 with `Retry-After: 1`; authorization/expiry takes precedence. After a committed timeshift transition: 410. |
 | `/ace/c/<token>/<seq>.ts` | Token-authenticated retained native HLS bytes, `video/mp2t`, `no-store`. Does not start a source. | Unknown/revoked token, missing packager, malformed/future/evicted segment: 404. After a committed timeshift transition: 410. |
-| `/ace/stat/<id>/<token>` | Stats and metadata under `response`, plus the Outpace `timeshift` status object; does not start a source. | Invalid lease: HTTP 200, `response: null`, `error: "invalid or expired playback session"`. No network also gives an in-band error. |
+| `/ace/stat/<id>/<token>` | Stats and metadata under `response`, plus the Outpace `timeshift` status object. `status` is `dl` while the source runs, `prebuf` while this lease's start is in progress, otherwise `idle`. When this lease's start resolves late to an HLS origin, `status` is `dl` with zero statistics and nothing held, since `/ace/r` redirects to that origin. On a TS lease whose playback URL hasn't been opened, the first read starts the source and later reads keep it, for 60 seconds after each (see [Lease ownership](#lease-ownership-and-live-hls)). | Invalid lease: HTTP 200, `response: null`, `error: "invalid or expired playback session"`. A failed start of this lease: HTTP 200, `response: null`, `error` naming the cause (for example `"no peer is sharing this stream"`). Later reads return the same error and don't retry; a new `format=json` request mints a lease that can start again. No network also gives an in-band error. |
 | `/ace/cmd/<id>/<token>?method=stop` | Revokes this lease; success is `response: "ok"`. Extra query parameters, such as the `api_version=2` the Android SDK appends, are ignored. Responses are `no-store`. | Invalid lease: same in-band error as stat. Unknown or absent method: HTTP 200 with `error: "unknown or missing method"`. A duplicated query parameter: `error: "duplicate command parameter"`, and nothing runs. |
 | `/ace/cmd/<id>/<token>?method=timeshift_status` | **Outpace extension.** Viewer generation/mode plus retained-history status (`retained_media_duration` coordinates; `persistent`, `peer_archive`, `utc_seek` all `false`). | Non-HLS lease: `supported: false`. |
 | `/ace/cmd/<id>/<token>?method=timeshift_seek&back=<s>` or `&position_ms=<ms>` | **Outpace extension.** Prepares a finite replay from an independently decodable retained boundary and commits it to this viewer only; returns a generation-specific `playback_url` and `reload_required: true`. Optional `generation=<n>` compare-and-swap. | History disabled, not ready or unavailable, a bad or ambiguous target, or a stale generation: in-band `error`; the current view is unchanged. |
@@ -255,6 +257,16 @@ that lease's active TS responses or HLS pin. A restart loses in-memory leases.
 
 A TS body holds a source subscription. Closing a direct response also removes its
 hidden lease; closing a leased TS body leaves its token usable until stop/expiry.
+A source started by a stat read is held by the lease, without counting as a viewer
+(`clients`), until its playback URL opens, the lease is stopped, expires or is
+evicted, or **60 seconds** pass without a stat read. Reaching that bound while the
+start is still pending cancels the start. Ordinary idle cleanup then retires an
+unused source. How the lease ends up depends on why the hold ended:
+- **60 s without a stat read:** the lease stays valid. Its next stat read starts the source again
+  (`prebuf`), and opening its playback URL still works.
+- **Playback opened:** the playback body's own subscription keeps the source, and later stat reads
+  never warm the lease again.
+- **Stopped, expired or evicted:** the lease is revoked like any other.
 HLS holds its subscription in the lease, since playlist requests are short-lived.
 Stopping one lease releases only its ownership, not other compatibility clients or
 native consumers of the same source. Sharing is by resolved manager source key;
@@ -378,8 +390,9 @@ Download speed measures contiguous reassembled media payload before output gatin
 speed follows existing `uploaded` byte accounting. The nominal five-second rate
 window is sampled once per second independently of requests and expires on inactivity.
 
-Valid idle leases report zero speeds and null `livepos`; reading stats neither
-starts nor retains a source. `livepos` is null until learned; otherwise `pos` is the
+Valid leases without a running source (`idle` or `prebuf`) report zero speeds and
+null `livepos`. Apart from reads of an unopened TS lease, described above, reading
+stats neither starts nor retains a source. `livepos` is null until learned; otherwise `pos` is the
 next reassembly piece, `last` the observed head, `live_first`/`live_last` the advertised
 window bounds (nullable), `buffer_pieces` the complete contiguous ready pieces, and
 `is_live` is 1. `first_ts`/`last_ts` remain null. This is provider observation, not a

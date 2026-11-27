@@ -65,6 +65,14 @@ struct ActivePeer {
 #[derive(Debug, Default, Clone)]
 pub struct ActivePeers {
     peers: BTreeMap<u64, ActivePeer>,
+    /// The two highest advertised edges as `(peer id, edge)`, highest first. Kept
+    /// incrementally so a HAVE stays O(1); rebuilt only when a tracked peer leaves or
+    /// its edge shrinks.
+    top_edges: [Option<(u64, u64)>; 2],
+    /// `(piece, silent peer)` pairs for requests that timed out, sorted. The next
+    /// assignment places such a piece on another covering peer first. Usually empty;
+    /// bounded by the request window and pruned as the cursor moves.
+    reissued: Vec<(u64, u64)>,
 }
 
 impl ActivePeers {
@@ -73,6 +81,7 @@ impl ActivePeers {
     }
 
     pub fn insert(&mut self, id: u64, _addr: SocketAddrV4, window: LivePosition) {
+        let edge = window.max_piece.max(0) as u64;
         self.peers.insert(
             id,
             ActivePeer {
@@ -86,6 +95,7 @@ impl ActivePeers {
                 in_flight: BTreeSet::new(),
             },
         );
+        self.note_edge(id, edge);
     }
 
     pub fn set_unchoked(&mut self, id: u64, unchoked: bool) {
@@ -98,7 +108,65 @@ impl ActivePeers {
         if let Some(peer) = self.peers.get_mut(&id) {
             peer.min_piece = min_piece;
             peer.max_piece = max_piece.max(min_piece);
+            let edge = peer.max_piece;
+            self.note_edge(id, edge);
         }
+    }
+
+    /// The highest and second-highest advertised window edges across active peers, or
+    /// `None` with no peers.
+    pub fn top_two_edges(&self) -> Option<(u64, Option<u64>)> {
+        let [first, second] = self.top_edges;
+        first.map(|(_, edge)| (edge, second.map(|(_, edge)| edge)))
+    }
+
+    fn note_edge(&mut self, id: u64, edge: u64) {
+        let [first, second] = &mut self.top_edges;
+        match (*first, *second) {
+            (Some((top, old)), _) if top == id => {
+                if edge < old {
+                    return self.rebuild_top_edges();
+                }
+                *first = Some((id, edge));
+            }
+            (_, Some((top, old))) if top == id => {
+                if edge < old {
+                    return self.rebuild_top_edges();
+                }
+                *second = Some((id, edge));
+            }
+            (None, _) => *first = Some((id, edge)),
+            (Some((_, high)), _) if edge > high => {
+                *second = *first;
+                *first = Some((id, edge));
+            }
+            (_, None) => *second = Some((id, edge)),
+            (_, Some((_, low))) if edge > low => *second = Some((id, edge)),
+            _ => {}
+        }
+        if let [Some((_, high)), Some((_, low))] = self.top_edges {
+            if low > high {
+                self.top_edges.swap(0, 1);
+            }
+        }
+    }
+
+    fn rebuild_top_edges(&mut self) {
+        let mut top = [None, None];
+        for (&id, peer) in &self.peers {
+            let candidate = Some((id, peer.max_piece));
+            match top {
+                [None, _] => top[0] = candidate,
+                [Some((_, high)), _] if peer.max_piece > high => {
+                    top[1] = top[0];
+                    top[0] = candidate;
+                }
+                [_, None] => top[1] = candidate,
+                [_, Some((_, low))] if peer.max_piece > low => top[1] = candidate,
+                _ => {}
+            }
+        }
+        self.top_edges = top;
     }
 
     pub fn assign(
@@ -122,6 +190,20 @@ impl ActivePeers {
     }
 
     fn assign_inner(
+        &mut self,
+        scheduler: &mut Scheduler,
+        next_needed: u64,
+        head: u64,
+        queue_slots: Option<&BTreeMap<u64, usize>>,
+    ) -> Vec<PeerAssignment> {
+        if self.reissued.is_empty() {
+            self.assign_plain(scheduler, next_needed, head, queue_slots)
+        } else {
+            self.assign_reissued(scheduler, next_needed, head, queue_slots)
+        }
+    }
+
+    fn assign_plain(
         &mut self,
         scheduler: &mut Scheduler,
         next_needed: u64,
@@ -155,6 +237,83 @@ impl ActivePeers {
         out
     }
 
+    /// Give each reissued piece to the best covering peer that has not gone silent on it,
+    /// using the scheduler's preference (most spare slots, then the earliest window end).
+    /// A piece with no such peer is left to the scheduler, which may ask a silent peer
+    /// again as a last resort. Only runs while a timed-out piece is pending, so it is
+    /// kept out of line; it copies the queue credits only when it places a piece.
+    #[cold]
+    #[inline(never)]
+    fn assign_reissued(
+        &mut self,
+        scheduler: &mut Scheduler,
+        next_needed: u64,
+        head: u64,
+        queue_slots: Option<&BTreeMap<u64, usize>>,
+    ) -> Vec<PeerAssignment> {
+        let passed = self.reissued.partition_point(|&(p, _)| p < next_needed);
+        self.reissued.drain(..passed);
+        let mut out = Vec::new();
+        let mut credited: Option<BTreeMap<u64, usize>> = None;
+        let mut at = 0;
+        while at < self.reissued.len() {
+            let piece = self.reissued[at].0;
+            let end = at + self.reissued[at..].partition_point(|&(p, _)| p == piece);
+            let placeable = piece <= head
+                && !scheduler.requested.contains(&piece)
+                && scheduler.completed.binary_search(&piece).is_err();
+            let silent = &self.reissued[at..end];
+            let slots = credited.as_ref().or(queue_slots);
+            let best = self
+                .peers
+                .iter()
+                .filter(|&(id, peer)| {
+                    placeable
+                        && peer.unchoked
+                        && peer.min_piece <= piece
+                        && piece <= peer.max_piece
+                        && peer.in_flight.len() < scheduler.max_in_flight
+                        && !silent.iter().any(|&(_, quiet)| quiet == *id)
+                        && slots.is_none_or(|slots| slots.get(id).is_some_and(|&n| n > 0))
+                })
+                .max_by_key(|(_, peer)| {
+                    (
+                        scheduler.max_in_flight - peer.in_flight.len(),
+                        std::cmp::Reverse(peer.max_piece.min(head)),
+                    )
+                })
+                .map(|(&id, _)| id);
+            let Some(id) = best else {
+                at = end;
+                continue;
+            };
+            if let Some(peer) = self.peers.get_mut(&id) {
+                peer.in_flight.insert(piece);
+            }
+            scheduler.requested.insert(piece);
+            if let Some(slots) = queue_slots {
+                let credits = credited.get_or_insert_with(|| slots.clone());
+                if let Some(n) = credits.get_mut(&id) {
+                    *n -= 1;
+                }
+            }
+            out.push(PeerAssignment { peer_id: id, piece });
+            // Placed: a later timeout records whichever peers hold it then.
+            self.reissued.drain(at..end);
+        }
+        let rest = self.assign_plain(
+            scheduler,
+            next_needed,
+            head,
+            credited.as_ref().or(queue_slots),
+        );
+        if out.is_empty() {
+            return rest;
+        }
+        out.extend(rest);
+        out
+    }
+
     /// Release only this peer's selected request when it was not enqueued.
     pub(crate) fn cancel_assignment(&mut self, id: u64, piece: u64) {
         if let Some(peer) = self.peers.get_mut(&id) {
@@ -163,10 +322,13 @@ impl ActivePeers {
     }
 
     pub fn remove(&mut self, id: u64) -> Vec<u64> {
-        self.peers
-            .remove(&id)
-            .map(|peer| peer.in_flight.into_iter().collect())
-            .unwrap_or_default()
+        let Some(peer) = self.peers.remove(&id) else {
+            return Vec::new();
+        };
+        if self.top_edges.iter().flatten().any(|&(top, _)| top == id) {
+            self.rebuild_top_edges();
+        }
+        peer.in_flight.into_iter().collect()
     }
 
     pub fn in_flight_count(&self, id: u64) -> usize {
@@ -181,8 +343,39 @@ impl ActivePeers {
     /// the piece it was asked for actually lands, so [`assign`](Self::assign) keeps steering
     /// new work to faster peers.
     pub fn complete_everywhere(&mut self, piece: u64) {
+        self.release_everywhere(piece);
+        if !self.reissued.is_empty() {
+            self.forget_reissued(piece);
+        }
+    }
+
+    /// Clear `piece` from every peer's in-flight set but keep the record of peers that
+    /// went silent on it, so a retry released for lack of capacity still avoids them.
+    pub fn release_everywhere(&mut self, piece: u64) {
         for peer in self.peers.values_mut() {
             peer.in_flight.remove(&piece);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn forget_reissued(&mut self, piece: u64) {
+        let start = self.reissued.partition_point(|&(p, _)| p < piece);
+        let end = self.reissued.partition_point(|&(p, _)| p <= piece);
+        self.reissued.drain(start..end);
+    }
+
+    /// A request for `piece` timed out: requeue it, and prefer a covering peer other than
+    /// the one still holding its stale slot. Without this, a peer that advertises a piece
+    /// but never sends it can win every retry on spare capacity and wedge the cursor.
+    pub fn reissue(&mut self, scheduler: &mut Scheduler, piece: u64) {
+        scheduler.on_drop(piece);
+        for (&id, peer) in &self.peers {
+            if peer.in_flight.contains(&piece) {
+                if let Err(at) = self.reissued.binary_search(&(piece, id)) {
+                    self.reissued.insert(at, (piece, id));
+                }
+            }
         }
     }
 
@@ -193,6 +386,8 @@ impl ActivePeers {
         for peer in self.peers.values_mut() {
             peer.in_flight.retain(|&p| p >= floor);
         }
+        let passed = self.reissued.partition_point(|&(p, _)| p < floor);
+        self.reissued.drain(..passed);
     }
 
     /// Whether any unchoked peer's advertised window currently covers `piece` (can serve it).
@@ -430,6 +625,54 @@ mod tests {
             per_turn[RUNS - 1],
             black_box(assigned_total)
         );
+    }
+
+    /// Bounded synthetic measurement of one HAVE turn on the active-peer set (#560): a
+    /// window update, the trusted-head edge query, and assignment, at the default and at
+    /// the maximum active-upstream count. Run with `cargo test --release --locked -p
+    /// ace-swarm live_head_have_measurement -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "bounded synthetic measurement; run in release with --ignored --nocapture"]
+    fn live_head_have_measurement() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        const TURNS: u64 = 200_000;
+        const RUNS: usize = 9;
+        for peer_count in [4u64, 256] {
+            let mut per_turn = Vec::with_capacity(RUNS);
+            let mut sink = 0u64;
+            for _ in 0..RUNS {
+                let mut peers = ActivePeers::new();
+                for id in 1..=peer_count {
+                    peers.insert(id, addr(), win(0, 8));
+                    peers.set_unchoked(id, true);
+                }
+                let mut scheduler = Scheduler::new(256);
+                let mut next = 0u64;
+                let start = Instant::now();
+                for turn in 0..TURNS {
+                    let edge = 8 + turn;
+                    peers.update_window(black_box(1 + turn % peer_count), 0, edge);
+                    if let Some((first, second)) = peers.top_two_edges() {
+                        sink = sink.wrapping_add(first ^ second.unwrap_or(0));
+                    }
+                    for got in peers.assign(&mut scheduler, next, edge) {
+                        scheduler.on_complete(got.piece);
+                        peers.complete_everywhere(got.piece);
+                        next = next.max(got.piece + 1);
+                    }
+                }
+                per_turn.push(start.elapsed().as_nanos() as f64 / TURNS as f64);
+            }
+            per_turn.sort_by(f64::total_cmp);
+            eprintln!(
+                "live_head_have_measurement: peers={peer_count} turns={TURNS} runs={RUNS} ns/turn min={:.1} median={:.1} max={:.1} sink={}",
+                per_turn[0],
+                per_turn[RUNS / 2],
+                per_turn[RUNS - 1],
+                black_box(sink)
+            );
+        }
     }
 
     #[test]
@@ -822,6 +1065,87 @@ mod tests {
     }
 
     #[test]
+    fn a_timed_out_piece_is_reissued_to_another_covering_peer() {
+        let mut active = ActivePeers::new();
+        // Peer 1's narrow window wins piece 10 on the tie-break; peer 2 takes 11 and 12.
+        active.insert(1, addr(), win(0, 10));
+        active.insert(2, addr(), win(0, 12));
+        active.set_unchoked(1, true);
+        active.set_unchoked(2, true);
+        let mut scheduler = Scheduler::new(4);
+        let first = active.assign(&mut scheduler, 10, 12);
+        assert!(first.contains(&PeerAssignment {
+            peer_id: 1,
+            piece: 10
+        }));
+        assert_eq!(active.in_flight_count(2), 2);
+
+        // Peer 1 never sends piece 10. It still has more spare slots than peer 2, but
+        // the retry must not go back to it while peer 2 covers the piece.
+        active.reissue(&mut scheduler, 10);
+        assert_eq!(
+            active.assign(&mut scheduler, 10, 12),
+            vec![PeerAssignment {
+                peer_id: 2,
+                piece: 10
+            }]
+        );
+
+        // With no other covering peer, the silent one is still the last resort.
+        active.remove(2);
+        active.reissue(&mut scheduler, 10);
+        assert_eq!(
+            active.assign(&mut scheduler, 10, 12),
+            vec![PeerAssignment {
+                peer_id: 1,
+                piece: 10
+            }]
+        );
+        active.complete_everywhere(10);
+        assert!(active.reissued.is_empty());
+    }
+
+    #[test]
+    fn a_released_retry_still_avoids_the_silent_peer() {
+        let mut active = ActivePeers::new();
+        active.insert(1, addr(), win(0, 10));
+        active.insert(2, addr(), win(0, 12));
+        active.set_unchoked(1, true);
+        active.set_unchoked(2, true);
+        let mut scheduler = Scheduler::new(1);
+        let first = active.assign(&mut scheduler, 10, 12);
+        assert_eq!(
+            first,
+            vec![
+                PeerAssignment {
+                    peer_id: 1,
+                    piece: 10
+                },
+                PeerAssignment {
+                    peer_id: 2,
+                    piece: 11
+                }
+            ]
+        );
+
+        // Piece 10 times out while peer 2 is full, so nothing can take it and the pool
+        // releases the stale slot. Peer 2 then frees up: the retry must go to peer 2,
+        // although the released silent peer 1 now ties with it on capacity.
+        active.reissue(&mut scheduler, 10);
+        assert!(active.assign(&mut scheduler, 10, 12).is_empty());
+        active.release_everywhere(10);
+        scheduler.on_complete(11);
+        active.complete_everywhere(11);
+        assert_eq!(
+            active.assign(&mut scheduler, 10, 12),
+            vec![PeerAssignment {
+                peer_id: 2,
+                piece: 10
+            }]
+        );
+    }
+
+    #[test]
     fn cancelling_an_unsent_retry_releases_only_the_new_peer_slot() {
         let mut active = ActivePeers::new();
         active.insert(1, addr(), win(0, 0));
@@ -871,5 +1195,51 @@ mod tests {
         assert!(scheduler
             .assign_with_queue_slots(0, 10_000, &[peer(1, 0, 10_000, true, 4)], &slots,)
             .is_empty());
+    }
+
+    #[test]
+    fn incremental_top_two_edges_match_a_full_scan() {
+        // Deterministic xorshift walk over inserts, raises, shrinks and removals.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rand = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let mut peers = ActivePeers::new();
+        for _ in 0..20_000 {
+            let id = rand(12);
+            match rand(6) {
+                0 => peers.insert(id, addr(), win(0, rand(64) as i64)),
+                1 => {
+                    peers.remove(id);
+                }
+                2 => peers.update_window(id, 0, rand(64)),
+                _ => {
+                    let edge = peers.peers.get(&id).map_or(0, |peer| peer.max_piece);
+                    peers.update_window(id, 0, edge + rand(4));
+                }
+            }
+            let mut edges: Vec<u64> = peers.peers.values().map(|peer| peer.max_piece).collect();
+            edges.sort_unstable_by(|a, b| b.cmp(a));
+            let expected = edges.first().map(|&first| (first, edges.get(1).copied()));
+            assert_eq!(peers.top_two_edges(), expected);
+        }
+    }
+
+    #[test]
+    fn top_two_edges_tracks_the_two_highest_windows_including_ties() {
+        let mut peers = ActivePeers::new();
+        assert_eq!(peers.top_two_edges(), None);
+        peers.insert(1, addr(), win(0, 50));
+        assert_eq!(peers.top_two_edges(), Some((50, None)));
+        peers.insert(2, addr(), win(0, 90));
+        peers.insert(3, addr(), win(0, 70));
+        assert_eq!(peers.top_two_edges(), Some((90, Some(70))));
+        peers.update_window(1, 0, 90);
+        assert_eq!(peers.top_two_edges(), Some((90, Some(90))));
+        peers.remove(2);
+        assert_eq!(peers.top_two_edges(), Some((90, Some(70))));
     }
 }

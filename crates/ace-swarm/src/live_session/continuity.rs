@@ -53,7 +53,7 @@ impl Continuity {
                 Some(LivePosition {
                     pos: Some(self.reasm.next_needed()),
                     delivered: self.delivered_cursor(),
-                    last: Some(self.head),
+                    last: Some(self.request_head()),
                     live_first: bounds.map(|b| b.0),
                     live_last: bounds.map(|b| b.1),
                     buffer_pieces: 0,
@@ -181,6 +181,8 @@ impl Continuity {
                 requested_at: HashMap::new(),
                 next_needed_since: EffectiveInstant(now),
                 head: max_piece,
+                advertised_head: max_piece,
+                received_edge: max_piece,
                 startup_deadline: None,
                 startup_prefetch: false,
                 request_floor: Arc::new(AtomicU64::new(start)),
@@ -216,7 +218,9 @@ impl Continuity {
         max_piece: u64,
         policy: &crate::peer_policy::PeerPolicy,
     ) -> u64 {
-        self.head = self.head.max(max_piece);
+        // The new primary becomes the sole active peer, so its claim is a lone vote.
+        self.advertised_head = self.advertised_head.max(max_piece);
+        self.advance_trusted_head(max_piece, None);
         self.scheduler.clear_in_flight();
         self.active_peers = ActivePeers::new();
         self.received_chunks.clear();
@@ -251,10 +255,63 @@ impl Continuity {
         resume
     }
 
+    /// Highest piece any request may target; each peer's own window still bounds it.
+    pub(super) fn request_head(&self) -> u64 {
+        self.head.max(self.advertised_head)
+    }
+
+    /// The trusted head, never behind a piece playback has already passed. Positions we
+    /// advertise and resume decisions use this, since requests may run ahead of `head`.
+    pub(super) fn trusted_head(&self) -> u64 {
+        self.head.max(self.reasm.next_needed().saturating_sub(1))
+    }
+
+    /// A candidate's claim before it is admitted. It always widens the request bound.
+    /// Before the first byte it also moves the trusted head, as the startup policy
+    /// (#170, #521) lets a fresher window win; afterwards it waits to be corroborated.
+    pub(super) fn note_candidate_claim(&mut self, claim: u64) {
+        self.advertised_head = self.advertised_head.max(claim);
+        if self.emitted == 0 {
+            self.head = self.head.max(claim);
+        }
+    }
+
+    /// Advance the trusted head from the active peers' advertised edges (#560).
+    ///
+    /// Once media has been emitted, two or more peers trust the second-highest edge, so
+    /// a lone outlier cannot move playback. A single peer is the only evidence there is
+    /// and is trusted, but only up to one request horizon beyond the highest piece
+    /// actually received, however many claims it sends. Requests still follow its full
+    /// claim, so received pieces keep lifting the cap behind an honest peer (and
+    /// [`skip_evicted_gap`](Self::skip_evicted_gap) still follows a lone peer whose
+    /// window has moved on). Before the first byte, the startup corroboration policy
+    /// (#170, #521) governs instead: nothing has played yet, and a fresher independent
+    /// window is exactly the evidence that a provisional first window is stale.
+    ///
+    /// The head never moves backward, and a peer's vote leaves with it from
+    /// [`ActivePeers`]. One pass over the bounded active set, without allocation.
+    pub(super) fn refresh_trusted_head(&mut self) {
+        if let Some((highest, second)) = self.active_peers.top_two_edges() {
+            self.advance_trusted_head(highest, second);
+        }
+    }
+
+    fn advance_trusted_head(&mut self, highest: u64, second: Option<u64>) {
+        let candidate = match second {
+            _ if self.emitted == 0 => highest,
+            Some(second) => second,
+            None => highest.min(
+                self.received_edge
+                    .saturating_add(self.live_recovery.max_piece_advance),
+            ),
+        };
+        self.head = self.head.max(candidate);
+    }
+
     pub(super) fn resume_cursor(&self) -> ResumeCursor {
         ResumeCursor {
             next_needed: self.reasm.next_needed(),
-            head: self.head,
+            head: self.trusted_head(),
         }
     }
 
@@ -313,6 +370,7 @@ impl Continuity {
     /// Only a piece the reassembler actually holds is remembered: a receipt count that
     /// reached the chunk total without assembling the piece must stay requestable.
     pub(super) fn complete_scheduled(&mut self, piece: u64) {
+        self.received_edge = self.received_edge.max(piece);
         if self.startup_deadline.is_some() && self.reasm.ready_piece(piece).is_some() {
             self.scheduler.on_complete_withheld(piece);
         } else {
@@ -597,6 +655,9 @@ impl Continuity {
         addr: SocketAddrV4,
         window: WireLivePosition,
     ) {
+        // An admitted peer's claim bounds requests at once; the trusted head waits for
+        // corroboration in `refresh_trusted_head` (#560).
+        self.advertised_head = self.advertised_head.max(window.max_piece.max(0) as u64);
         self.active_peers.insert(id, addr, window);
     }
 

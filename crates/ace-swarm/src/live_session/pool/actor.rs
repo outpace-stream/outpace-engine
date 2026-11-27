@@ -6,6 +6,8 @@ mod delivery_tests;
 #[cfg(test)]
 mod drain_tests;
 #[cfg(test)]
+mod live_head_tests;
+#[cfg(test)]
 mod output_bench;
 #[cfg(test)]
 mod output_schedules;
@@ -509,10 +511,10 @@ impl PoolActor<'_> {
             return WakeOutcome::Continue;
         }
         let corroborates = self.continuity.startup_deadline.is_some()
-            && upstream.window.max_piece.max(0) as u64 >= self.continuity.head;
+            && upstream.window.max_piece.max(0) as u64 >= self.continuity.request_head();
         if corroborates
             && self.peers.len() >= self.live_recovery.max_active_upstreams
-            && upstream.window.max_piece.max(0) as u64 == self.continuity.head
+            && upstream.window.max_piece.max(0) as u64 == self.continuity.request_head()
         {
             // Independent matching evidence is enough to start. Keep the sole
             // healthy provisional transport rather than churn it for capacity.
@@ -543,10 +545,10 @@ impl PoolActor<'_> {
             .learn(upstream.addr, CandidateKind::Discovered);
         let peer_id = self.next_peer_id;
         self.next_peer_id += 1;
-        self.continuity.head = self
-            .continuity
-            .head
-            .max(upstream.window.max_piece.max(0) as u64);
+        // Once output exists, the claim joins the trusted head only after admission,
+        // alongside the other peers' edges (#560).
+        self.continuity
+            .note_candidate_claim(upstream.window.max_piece.max(0) as u64);
         self.continuity
             .skip_far_behind_live(self.continuity.output_clock.now(Instant::now()));
         self.activation = Some(activation::Activation {
@@ -556,7 +558,7 @@ impl PoolActor<'_> {
             write: activation::prepare_with_policy(
                 activation::Start {
                     cursor: self.continuity.reasm.next_needed(),
-                    head: self.continuity.head,
+                    head: self.continuity.trusted_head(),
                 },
                 upstream,
                 self.identity,
@@ -588,7 +590,7 @@ impl PoolActor<'_> {
         let result = result.map(|activation::Prepared { upstream, permit }| {
             let active = self.peers.values().map(|peer| peer.addr).collect();
             let corroborates = self.continuity.startup_deadline.is_some()
-                && upstream.window.max_piece.max(0) as u64 >= self.continuity.head;
+                && upstream.window.max_piece.max(0) as u64 >= self.continuity.request_head();
             let eligible = self.continuity.window_can_resume(&upstream.window)
                 && !self.peers.values().any(|peer| peer.addr == upstream.addr)
                 && !self
@@ -602,7 +604,7 @@ impl PoolActor<'_> {
             let full = self.peers.len() == self.live_recovery.max_active_upstreams;
             if full
                 && corroborates
-                && candidate_max == self.continuity.head
+                && candidate_max == self.continuity.request_head()
                 && replacement
                     .and_then(|id| self.peers.get(&id))
                     .is_some_and(|peer| peer.max_piece == candidate_max)
@@ -727,7 +729,7 @@ impl PoolActor<'_> {
                 crate::alog!(
                     "[ace] {addr}: UNCHOKE -> scheduling from piece {} toward head {}",
                     self.continuity.reasm.next_needed(),
-                    self.continuity.head,
+                    self.continuity.request_head(),
                     addr = self.seed.peer_policy.log_endpoint(addr)
                 );
                 let newly_lost =
@@ -740,10 +742,10 @@ impl PoolActor<'_> {
                 self.continuity.set_peer_unchoked(peer_id, false);
             }
             PeerMessage::Have(p) => {
-                let old_head = self.continuity.head;
-                self.continuity.head = self.continuity.head.max(p as u64);
+                let old_head = self.continuity.request_head();
+                self.continuity.advertised_head = self.continuity.advertised_head.max(p as u64);
                 update_runtime_window(&mut self.peers, self.continuity, peer_id, p as u64);
-                made_activity |= self.continuity.head > old_head;
+                made_activity |= self.continuity.request_head() > old_head;
                 let newly_lost =
                     advance_pool_requests(&mut self.peers, self.continuity, self.chunks_per_piece)
                         .await;
@@ -755,8 +757,9 @@ impl PoolActor<'_> {
                         .peers
                         .get(&peer_id)
                         .is_some_and(|peer| max_piece > peer.max_piece);
-                    if max_piece > self.continuity.head || window_advanced {
-                        self.continuity.head = self.continuity.head.max(max_piece);
+                    if max_piece > self.continuity.request_head() || window_advanced {
+                        self.continuity.advertised_head =
+                            self.continuity.advertised_head.max(max_piece);
                         update_runtime_window(&mut self.peers, self.continuity, peer_id, max_piece);
                         made_activity = true;
                         let newly_lost = advance_pool_requests(
@@ -809,10 +812,10 @@ impl PoolActor<'_> {
                     .peers
                     .get(&peer_id)
                     .is_some_and(|peer| piece > peer.max_piece);
-                if piece > self.continuity.head || window_advanced {
+                if piece > self.continuity.request_head() || window_advanced {
                     // Another upstream can advertise the shared head first. Its gossip
                     // must not suppress this producer's independently advancing window.
-                    self.continuity.head = self.continuity.head.max(piece);
+                    self.continuity.advertised_head = self.continuity.advertised_head.max(piece);
                     update_runtime_window(&mut self.peers, self.continuity, peer_id, piece);
                     made_activity = true;
                     let newly_lost = advance_pool_requests(
@@ -861,21 +864,22 @@ impl PoolActor<'_> {
             PeerMessage::Unknown { id, ref payload } => {
                 let max_piece = read_window_max(payload);
                 let window_advanced = max_piece.is_some_and(|max_piece| {
-                    max_piece > self.continuity.head
+                    max_piece > self.continuity.request_head()
                         || self
                             .peers
                             .get(&peer_id)
                             .is_some_and(|peer| max_piece > peer.max_piece)
                 });
                 if let Some(max_piece) = max_piece.filter(|_| window_advanced) {
-                    if max_piece > self.continuity.head {
+                    if max_piece > self.continuity.request_head() {
                         crate::alog!(
                             "[ace] {addr}: live window update (msg id={id}) head {} -> {max_piece}",
-                            self.continuity.head,
+                            self.continuity.request_head(),
                             addr = self.seed.peer_policy.log_endpoint(addr)
                         );
                     }
-                    self.continuity.head = self.continuity.head.max(max_piece);
+                    self.continuity.advertised_head =
+                        self.continuity.advertised_head.max(max_piece);
                     update_runtime_window(&mut self.peers, self.continuity, peer_id, max_piece);
                     made_activity = true;
                     let newly_lost = advance_pool_requests(

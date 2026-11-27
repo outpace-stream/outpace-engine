@@ -1802,7 +1802,11 @@ async fn retained_producer_window_control(
         )
         .await;
         let continuity = continuity.unwrap();
-        (end, continuity.head, continuity.reasm.next_needed())
+        (
+            end,
+            continuity.request_head(),
+            continuity.reasm.next_needed(),
+        )
     });
     // Require both original pieces through the actual media path before advancing either head.
     let initial_output = tokio::time::timeout(Duration::from_secs(2), async {
