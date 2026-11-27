@@ -330,9 +330,12 @@ curl "http://127.0.0.1:6878/ace/getstream?content_id=0123456789abcdef0123456789a
   `dl` once it runs, so apps that wait for `dl` before opening `playback_url` work. If the stream
   turns out to be an HLS origin, `stat_url` reports `dl` and `playback_url` redirects to it. If the
   start fails, `stat_url` answers with `response: null` and an `error`, and later reads don't try
-  again: make a new `format=json` request to retry. A stream started this way
-  stays up until you open `playback_url`, stop it with `command_url`, or nothing reads `stat_url`
-  for 60 seconds. Reading `stat_url` again after that starts it again. An HLS `format=json` request starts the stream straight away.
+  again: make a new `format=json` request to retry. The hold that
+  reading `stat_url` places on the stream ends when you open `playback_url` (from then on your
+  playback keeps the stream running), when you stop it with `command_url`, when the session expires
+  or is evicted, or when nothing reads `stat_url` for 60 seconds. Only in that last case does
+  reading `stat_url` again start the stream again; once playback has opened, it doesn't. When the
+  hold ends and nobody else is watching, the stream stops after the usual idle delay. An HLS `format=json` request starts the stream straight away.
 
 ### Control API
 

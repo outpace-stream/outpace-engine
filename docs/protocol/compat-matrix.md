@@ -261,8 +261,12 @@ A source started by a stat read is held by the lease, without counting as a view
 (`clients`), until its playback URL opens, the lease is stopped, expires or is
 evicted, or **60 seconds** pass without a stat read. Reaching that bound while the
 start is still pending cancels the start. Ordinary idle cleanup then retires an
-unused source. A released lease stays valid: its next stat read starts the source
-again (`prebuf`), and opening its playback URL still works.
+unused source. How the lease ends up depends on why the hold ended:
+- **60 s without a stat read:** the lease stays valid. Its next stat read starts the source again
+  (`prebuf`), and opening its playback URL still works.
+- **Playback opened:** the playback body's own subscription keeps the source, and later stat reads
+  never warm the lease again.
+- **Stopped, expired or evicted:** the lease is revoked like any other.
 HLS holds its subscription in the lease, since playlist requests are short-lived.
 Stopping one lease releases only its ownership, not other compatibility clients or
 native consumers of the same source. Sharing is by resolved manager source key;
