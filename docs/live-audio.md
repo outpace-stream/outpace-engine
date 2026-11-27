@@ -2,7 +2,10 @@
 
 Live HLS uses its existing native selection by default: the first ADTS AAC
 track wins; without ADTS AAC, audio passes through unchanged. Live TS stays raw
-by default, and VOD byte ranges are unaffected by either audio option.
+by default, and VOD byte ranges are unaffected by either audio option. A
+compatibility request's `preferred_audio_language` can change which track that
+native selection keeps, or which track a TS viewer's PMT lists first; see the
+[compatibility contract](protocol/compat-matrix.md#preferred-audio-language).
 
 | Setting | Default | Effect |
 | --- | --- | --- |
@@ -13,12 +16,16 @@ by default, and VOD byte ranges are unaffected by either audio option.
 Both boolean settings accept `true`/`false` or `1`/`0`. The fixed conversion target
 is selected AC3 or MPEG Layer II/III to AAC-LC stereo, 48 kHz, 128 kbit/s. All
 viewers of a shared source receive the same operator-selected representation;
-there is no per-viewer codec or language override. When both switches are enabled,
+there is no per-viewer codec or language override. Normalization's selection wins
+over `preferred_audio_language`: with either switch on, compatibility HLS ignores
+the preference and starts no per-language packager or FFmpeg child; with
+`OUTPACE_LIVE_AUDIO_NORMALIZE` on, compatibility TS ignores it as well. With only
+`OUTPACE_HLS_AUDIO_NORMALIZE` on, TS is not normalized and still honors it. When both switches are enabled,
 HLS consumes the normalized TS without a second classifier or conversion child.
 With both disabled, FFmpeg is never looked up or probed. Native ADTS AAC and
 video-only streams start no conversion child; AAC passthrough does not resample.
 The TS passthrough case retains the program's other tracks; HLS keeps its native
-track selection. This is not a per-viewer track or language-selection API.
+track selection. Normalization is not a per-viewer track or language-selection API.
 
 Enabled mode requires unencrypted 188-byte TS, one program, one MPEG-2/H.264/HEVC
 video stream, valid PCR and current CRC-valid single-packet PAT/PMT sections.

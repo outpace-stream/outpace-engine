@@ -16,7 +16,7 @@ use crate::config::{HlsConfig, HlsHistoryConfig};
 use crate::history::{HistoryBudget, HistoryEntry, HistoryStore};
 pub use crate::history::{HlsHistoryError, HlsHistorySnapshot, HlsHistoryStatus};
 use crate::session::{StreamEvent, StreamSession};
-use ace_media::audio::LiveAudioSelection;
+use ace_media::audio::{AudioLanguage, AudioPreference, LiveAudioSelection};
 use ace_media::mpegts::{
     ts_pid, ts_timing, ClockObservation, SelectedPcrClock, TsTiming, VideoAccessPointState,
 };
@@ -37,6 +37,17 @@ const SDT_PID: u16 = 0x0011;
 pub struct GenerationId(pub u64);
 
 pub use crate::audio_normalize::{Failure as HlsFailure, State as HlsStatus};
+
+/// How a preferred audio language maps onto a packager's current native audio selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AudioChoice {
+    /// No usable PMT has been observed yet.
+    Pending,
+    /// The language selects the same track as the default (or nothing matches).
+    Default,
+    /// The language selects a different elementary stream.
+    Track(u16),
+}
 
 pub struct HlsPackager {
     state: Mutex<HlsState>,
@@ -188,6 +199,56 @@ impl HlsPackager {
         let media = Self::create(session, config, strict);
         media.state.lock().unwrap().history = HistoryStore::new(history, budget);
         media
+    }
+
+    /// Make this packager carry exactly the audio elementary stream `pid`, for an audio-language
+    /// variant. Call before its worker starts; the choice survives every later table reset. If
+    /// current tables stop offering `pid` as a recognized audio track, the packager fails
+    /// ([`HlsFailure::Unsupported`]) instead of carrying another track.
+    pub(crate) fn set_audio_track(&self, pid: u16) {
+        self.state.lock().unwrap().audio =
+            LiveAudioSelection::with_preference(AudioPreference::Track(pid));
+    }
+
+    /// Resolve `language` against the currently observed PMT. A stopped, failed or ended
+    /// packager will never learn tables again, so it reports [`AudioChoice::Default`].
+    pub(crate) fn audio_choice(&self, language: AudioLanguage) -> AudioChoice {
+        let st = self.state.lock().unwrap();
+        if st.ended || matches!(st.status, HlsStatus::Stopped | HlsStatus::Failed(_)) {
+            return AudioChoice::Default;
+        }
+        match (
+            st.audio.selection_for(Some(language)),
+            st.audio.selection_for(None),
+        ) {
+            (Some(Some(pid)), Some(default)) if Some(pid) != default => AudioChoice::Track(pid),
+            (Some(_), Some(_)) => AudioChoice::Default,
+            _ => AudioChoice::Pending,
+        }
+    }
+
+    /// Wait (bounded by `timeout`) until `language` resolves; a timeout means the default.
+    pub(crate) async fn wait_audio_choice(
+        &self,
+        language: AudioLanguage,
+        timeout: Duration,
+    ) -> AudioChoice {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            match self.audio_choice(language) {
+                AudioChoice::Pending => {}
+                choice => return choice,
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return match self.audio_choice(language) {
+                    AudioChoice::Pending => AudioChoice::Default,
+                    choice => choice,
+                };
+            }
+        }
     }
 
     /// Retained replay history, on this packager's media-duration timeline.
@@ -516,6 +577,12 @@ impl HlsPackager {
         st.independent_start = false;
     }
 
+    /// [`Self::feed`] for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn feed_for_test(&self, data: &[u8]) {
+        self.feed(data);
+    }
+
     /// Append contiguous TS bytes, emitting PCR-timed, preferably random-access-aligned segments.
     fn feed(&self, data: &[u8]) {
         let mut st = self.state.lock().unwrap();
@@ -557,6 +624,18 @@ impl HlsPackager {
                 continue;
             }
             let result = st.audio.observe(packet);
+            // Non-short-circuit `|`: one combined test keeps the per-packet path at base cost.
+            if result.changed | result.resolved {
+                // Rare (tables became known or changed): wakes audio-language resolution waiters.
+                self.ready.notify_waiters();
+                if st.audio.track_lost() {
+                    crate::alog!("[hls] audio variant track left the PMT; variant stopped");
+                    st.status = HlsStatus::Failed(HlsFailure::Unsupported);
+                    Self::reset_partial(st, false);
+                    self.ready.notify_waiters();
+                    return;
+                }
+            }
             if result.changed {
                 let pending = st.discontinuity_pending || !st.awaiting_access_point;
                 st.access.reset();
@@ -1074,6 +1153,11 @@ impl VodHlsLayout {
         out
     }
 }
+
+#[cfg(test)]
+mod audio_tests;
+#[cfg(test)]
+mod bench;
 
 #[cfg(test)]
 mod tests {

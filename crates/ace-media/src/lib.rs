@@ -14,6 +14,11 @@ pub mod hls;
 pub mod hls_input;
 pub mod mpegts;
 
+#[cfg(test)]
+mod gate_bench;
+#[cfg(test)]
+mod test_stream;
+
 /// Errors from media framing.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MediaError {
