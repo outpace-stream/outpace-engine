@@ -309,8 +309,10 @@ options or new compatibility response keys.
   the matched track moves to the program's first audio entry and the CRC is recomputed;
   PIDs, descriptors, version and continuity are unchanged. Players that start the first
   audio track (for example VLC and mpv) play it, and can still switch; players with
-  their own rules may not. Without a match, or for a fragmented or CRC-invalid PMT, the
-  PMT is forwarded byte for byte. Viewers without the parameter are unaffected.
+  their own rules may not. Without a match, or for a fragmented or CRC-invalid PMT, a
+  PMT whose program number is not the current PAT program (for example a delayed PMT of
+  the previous program), or a PMT whose program descriptor loop is malformed, the PMT is
+  forwarded byte for byte. Viewers without the parameter are unaffected.
 - **HLS.** The preference only changes which tracks native selection keeps:
   - With ADTS AAC in the program, the default keeps the first ADTS AAC track. A matching
     ADTS AAC track replaces it; a match in another codec is ignored, so the delivered
@@ -324,7 +326,9 @@ options or new compatibility response keys.
   for the first PMT). Before admitting a variant, the request checks that choice again
   under the admission lock; if the PMT moved the language while it waited, it resolves
   again. A language that resolves to the default selection uses the default packager;
-  any other result is served by the variant for exactly that PID.
+  any other result is served by the variant for exactly that PID. Once the source has
+  ended, a request that would need a new variant gets the default packager instead (a
+  new variant would only see the end of the stream); existing variants are still shared.
 - **A variant carries exactly its PID.** It never re-resolves the language and never
   switches tracks. If a later PMT still lists the PID, the variant keeps carrying it, even
   if its language tag changed. If a usable PMT no longer lists the PID, or PAT/PMT

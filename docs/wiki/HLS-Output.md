@@ -195,7 +195,9 @@ http://127.0.0.1:6878/ace/manifest.m3u8?id=0123456789abcdef0123456789abcdef01234
 - Viewers asking for different languages still share **one download**. Each extra track costs
   one more packager, with its own retained segment window and history. A stream session runs at
   most **four** extra language packagers; later languages get the normal audio. An extra packager
-  stops about 30 seconds after its last viewer's lease ends.
+  stops about 30 seconds after its last viewer's lease ends. Once a source has ended, a language
+  that has no packager yet gets the normal audio, because a new packager would have nothing left
+  to play.
 - A language packager keeps playing the track it started with. If that track disappears from
   the stream, the packager stops and its viewers get `404`; requesting the manifest again picks
   the language afresh. Stopping the stream also ends its language packagers, so their viewers

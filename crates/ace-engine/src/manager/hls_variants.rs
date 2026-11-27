@@ -102,6 +102,8 @@ enum Admission {
     Full,
     /// A limit is held only by a retiring worker: wait for this completion, then retry.
     Retiring(watch::Receiver<bool>),
+    /// The source has ended: a new variant would only see EOF, so serve the default packager.
+    Ended,
 }
 
 struct VariantEntry {
@@ -157,6 +159,7 @@ impl HlsVariants {
         key: &StreamKey,
         pid: u16,
         session: &Arc<StreamSession>,
+        source_ended: bool,
         create: impl FnOnce() -> HlsEntry,
     ) -> (Admission, Vec<HlsEntry>) {
         let mut sets = self.sets.lock().unwrap();
@@ -180,6 +183,9 @@ impl HlsVariants {
             });
             let id = variant.id;
             return (Admission::Pinned(HlsVariantPin { id, _pin: pin }), retired);
+        }
+        if source_ended {
+            return (Admission::Ended, retired);
         }
         let on_session = set.entries.iter().filter(|v| v.on(session)).count();
         let total = set.entries.len();
@@ -354,35 +360,37 @@ impl StreamManager {
                     _ if tokio::time::Instant::now() >= deadline => return None,
                     _ => continue,
                 }
-                let (admission, retired) = self.hls_variants.acquire(&key, pid, session, || {
-                    let media = HlsPackager::create_with_history(
-                        session,
-                        self.hls,
-                        false,
-                        self.hls_history,
-                        self.hls_history_budget.clone(),
-                    );
-                    media.set_audio_track(pid);
-                    let control = crate::hls_audio::spawn_worker(
-                        session,
-                        media.clone(),
-                        self.hls,
-                        None,
-                        &self.cleanup,
-                    );
-                    crate::alog!(
-                        "[hls] audio variant started: language={} pid={pid:#x}",
-                        language.as_str()
-                    );
-                    HlsEntry { media, control }
-                });
+                let (admission, retired) =
+                    self.hls_variants
+                        .acquire(&key, pid, session, session.source_ended(), || {
+                            let media = HlsPackager::create_with_history(
+                                session,
+                                self.hls,
+                                false,
+                                self.hls_history,
+                                self.hls_history_budget.clone(),
+                            );
+                            media.set_audio_track(pid);
+                            let control = crate::hls_audio::spawn_worker(
+                                session,
+                                media.clone(),
+                                self.hls,
+                                None,
+                                &self.cleanup,
+                            );
+                            crate::alog!(
+                                "[hls] audio variant started: language={} pid={pid:#x}",
+                                language.as_str()
+                            );
+                            HlsEntry { media, control }
+                        });
                 // Request cancellation now; dropping the controls transfers their joins.
                 drop(
                     self.retire_hls_variants(retired.into_iter().map(|entry| (key.clone(), entry))),
                 );
                 match admission {
                     Admission::Pinned(pin) => return Some(pin),
-                    Admission::Full => return None,
+                    Admission::Full | Admission::Ended => return None,
                     Admission::Retiring(done) => done,
                 }
             };
@@ -607,6 +615,62 @@ mod tests {
         manager.sweep_idle_for_test().await;
         assert!(manager.get_hls_variant("multi", "a", fresh.id()).is_some());
         assert_eq!(manager.hls_variant_count("multi", "a"), 1);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_request_after_the_source_ended_gets_the_default_not_an_empty_variant() {
+        const TRACKS: [(u16, u8, &[u8; 3]); 3] = [
+            (0x101, 0x0f, b"eng"),
+            (0x102, 0x0f, b"rus"),
+            (0x103, 0x0f, b"fra"),
+        ];
+        let manager = manager(Provider {
+            end_after: Some(100),
+            tracks: &TRACKS,
+            ..Provider::default()
+        });
+        let support = manager.acquire_support("multi", "a").await.unwrap();
+        let (pkg, session, _lease) = manager
+            .get_or_start_compatibility_hls("multi", "a")
+            .await
+            .unwrap();
+        let existing = manager
+            .compatibility_hls_audio("multi", "a", &pkg, &session, rus())
+            .await
+            .expect("a variant while the source is live");
+        let mut completed = session.completion_receiver();
+        assert!(wait_cleanup(&mut completed).await);
+        assert!(session.source_ended());
+        // A default packager that has not processed the EOF yet still resolves `fra`; a new
+        // variant would subscribe at the tail and only see EOF, so the default is served.
+        let lagging = HlsPackager::create_with_history(
+            &session,
+            manager.hls,
+            false,
+            manager.hls_history,
+            manager.hls_history_budget.clone(),
+        );
+        let mut out = Vec::new();
+        Generator::new(&TRACKS).frame(&mut out);
+        lagging.feed_for_test(&out);
+        let fra = AudioLanguage::parse("fra").unwrap();
+        assert_eq!(
+            lagging.audio_choice(fra),
+            crate::hls::AudioChoice::Track(0x103)
+        );
+        assert!(manager
+            .compatibility_hls_audio("multi", "a", &lagging, &session, fra)
+            .await
+            .is_none());
+        assert_eq!(manager.hls_variant_count("multi", "a"), 1);
+        // An existing variant is still shared, pinned to its exact entry.
+        let again = manager
+            .compatibility_hls_audio("multi", "a", &lagging, &session, rus())
+            .await
+            .expect("the existing variant");
+        assert_eq!(again.id(), existing.id());
+        drop(support);
         manager.shutdown().await;
     }
 
