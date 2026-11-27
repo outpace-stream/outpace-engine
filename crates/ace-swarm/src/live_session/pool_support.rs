@@ -581,6 +581,14 @@ pub(super) fn drop_peer_runtime(
     continuity.admitted_upstreams = peers.len() as u32;
     continuity.publish_upstreams();
     for piece in continuity.active_peers.remove(peer_id) {
+        // A former owner's held slot must not requeue a solo piece another peer now
+        // owns (#561): reassignment would displace that owner and discard its bytes.
+        if !continuity.solo.is_empty()
+            && continuity.solo.owned(piece)
+            && !continuity.solo.owned_by(piece, peer_id, peer.addr)
+        {
+            continue;
+        }
         continuity.scheduler.on_drop(piece);
     }
     if !continuity.solo.is_empty() {

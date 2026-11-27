@@ -3,6 +3,8 @@ use super::*;
 
 const PIECE: u32 = 7;
 const CHUNKS: u16 = 2;
+/// Scripted command telling a peer to close its connection without reporting it.
+const CLOSE: u16 = u16::MAX;
 
 enum Seen {
     /// The peer was asked for every chunk of a piece.
@@ -113,6 +115,9 @@ impl Swarm {
                             }
                         },
                         Some((chunk, bytes)) = chunk_rx.recv() => {
+                            if chunk == CLOSE {
+                                return;
+                            }
                             let _ = session
                                 .send(&build_piece(0, PIECE, chunk, [0; 8], &bytes))
                                 .await;
@@ -213,6 +218,10 @@ impl Swarm {
         self.send[peer].send((chunk, bytes)).unwrap();
     }
 
+    fn close(&self, peer: usize) {
+        self.send(peer, CLOSE, Vec::new());
+    }
+
     async fn output(&mut self) -> Vec<u8> {
         tokio::time::timeout(Duration::from_secs(5), self.rx.recv())
             .await
@@ -295,12 +304,17 @@ async fn single_source_bad_piece_disconnects_and_avoids_that_peer() {
     // The solo owner sends every block of the piece and it fails again: proven bad.
     swarm.send(bad, 0, piece.corrupt_chunk(0));
     swarm.send(bad, 1, piece.corrupt_chunk(1));
-    let (closed, retry) = (swarm.next().await, swarm.next().await);
-    assert!(matches!(closed, Seen::Closed(peer) if peer == bad));
-    let good = match retry {
-        Seen::Request(peer, PIECE) => peer,
-        _ => panic!("the piece must be refetched from the remaining peer"),
-    };
+    // The disconnect and the refetch are reported by different peer tasks, in any order.
+    let (mut closed, mut retry) = (None, None);
+    for _ in 0..2 {
+        match swarm.next().await {
+            Seen::Closed(peer) => closed = Some(peer),
+            Seen::Request(peer, PIECE) => retry = Some(peer),
+            Seen::Request(_, other) => panic!("unexpected request for piece {other}"),
+        }
+    }
+    assert_eq!(closed, Some(bad), "the failed solo owner is disconnected");
+    let good = retry.expect("the piece must be refetched from the remaining peer");
     assert_ne!(good, bad);
     swarm.send(good, 0, piece.authentic_chunk(0));
     swarm.send(good, 1, piece.authentic_chunk(1));
@@ -381,4 +395,36 @@ async fn silent_solo_peer_hands_the_piece_over_after_the_timeout() {
         closed.is_empty(),
         "silence alone is not punished: {closed:?}"
     );
+}
+
+#[tokio::test]
+async fn departing_former_owner_leaves_the_solo_piece_with_its_new_owner() {
+    let piece = SignedPiece::new();
+    let policy = LiveRecoveryConfig {
+        max_active_upstreams: 3,
+        ..policy()
+    };
+    let mut swarm = Swarm::start(&piece, 3, policy).await;
+    let former = swarm.mixed_source_reject(&piece).await;
+    // The owner stays silent, so the piece is handed to another peer.
+    let owner = swarm.next_request().await;
+    assert_ne!(owner, former);
+    swarm.send(owner, 1, piece.authentic_chunk(1));
+    // The former owner still holds its request slot for the piece. Its departure must not
+    // requeue the piece for the idle third peer, which would displace the new owner.
+    swarm.close(former);
+    tokio::time::sleep(policy.request_timeout() / 2).await;
+    if let Ok(seen) = swarm.seen.try_recv() {
+        match seen {
+            Seen::Request(peer, piece) => {
+                panic!("piece {piece} was requested again from peer {peer}")
+            }
+            Seen::Closed(peer) => panic!("peer {peer} was disconnected unexpectedly"),
+        }
+    }
+    swarm.send(owner, 0, piece.authentic_chunk(0));
+    assert_eq!(swarm.output().await, piece.payload[..564]);
+    assert_eq!(swarm.signature_rejects(), 1);
+    let (_, closed) = swarm.finish().await;
+    assert!(closed.is_empty(), "no peer is disconnected: {closed:?}");
 }

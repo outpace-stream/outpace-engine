@@ -11,6 +11,9 @@ const MAX_SOURCES: usize = 8;
 /// How long a peer proven to send bytes failing the source signature (#561) stays out
 /// of reconnect and refill selection.
 pub(super) const REJECTED_PEER_COOLDOWN: Duration = Duration::from_secs(120);
+/// Rejection deadlines kept apart from the evictable candidate entries. Past this many
+/// concurrently rejected peers, the one whose cooldown ends first is forgotten.
+const MAX_REJECTIONS: usize = 64;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum CandidateKind {
@@ -40,6 +43,8 @@ impl Candidate {
 #[derive(Default)]
 pub(super) struct SessionCandidates {
     entries: Vec<Candidate>,
+    /// Source-signature rejections (#561), so eviction and re-learning cannot drop them.
+    rejections: Vec<(SocketAddrV4, Instant)>,
     policy: crate::peer_policy::PeerPolicy,
 }
 
@@ -47,6 +52,7 @@ impl SessionCandidates {
     pub(super) fn with_policy(policy: crate::peer_policy::PeerPolicy) -> Self {
         Self {
             entries: Vec::new(),
+            rejections: Vec::new(),
             policy,
         }
     }
@@ -93,14 +99,20 @@ impl SessionCandidates {
             };
             self.entries.remove(index);
         }
+        let now = Instant::now();
+        let rejected_until = self
+            .rejections
+            .iter()
+            .find(|&&(rejected, until)| rejected == addr && until > now)
+            .map(|&(_, until)| until);
         self.entries.push(Candidate {
             addr,
             kind,
             failures: 0,
             admissions: 0,
             explorations: 0,
-            retry_at: Instant::now(),
-            rejected_until: None,
+            retry_at: rejected_until.unwrap_or(now),
+            rejected_until,
         });
     }
 
@@ -211,8 +223,17 @@ impl SessionCandidates {
     /// The peer was proven to send bytes failing the source signature: keep it out of
     /// selection for [`REJECTED_PEER_COOLDOWN`], whatever later bookkeeping happens.
     pub(super) fn rejected(&mut self, addr: SocketAddrV4, now: Instant) {
+        let until = now + REJECTED_PEER_COOLDOWN;
+        self.rejections
+            .retain(|&(rejected, old)| rejected != addr && old > now);
+        if self.rejections.len() >= MAX_REJECTIONS {
+            if let Some(soonest) = (0..self.rejections.len()).min_by_key(|&i| self.rejections[i].1)
+            {
+                self.rejections.swap_remove(soonest);
+            }
+        }
+        self.rejections.push((addr, until));
         if let Some(c) = self.entries.iter_mut().find(|c| c.addr == addr) {
-            let until = now + REJECTED_PEER_COOLDOWN;
             c.rejected_until = Some(c.rejected_until.map_or(until, |old| old.max(until)));
             c.retry_after(until);
         }
@@ -333,6 +354,43 @@ mod tests {
             candidates.eligible(now + REJECTED_PEER_COOLDOWN),
             vec![addr(1), addr(2)]
         );
+    }
+
+    #[test]
+    fn rejection_survives_eviction_and_applies_to_unknown_peers() {
+        let mut candidates = SessionCandidates::default();
+        let now = Instant::now();
+        let filler = |i: usize| {
+            SocketAddrV4::new(
+                std::net::Ipv4Addr::new(10, 1, (i >> 8) as u8, i as u8),
+                6881,
+            )
+        };
+        // Rejected before it was ever learned: the cooldown applies once it is.
+        let mut unknown = SessionCandidates::default();
+        unknown.rejected(addr(7), now);
+        unknown.learn(addr(7), CandidateKind::Discovered);
+        unknown.learn(addr(8), CandidateKind::Discovered);
+        assert_eq!(unknown.eligible(Instant::now()), vec![addr(8)]);
+        // Rejected, then evicted by a better announcement and re-learned later.
+        candidates.learn(addr(1), CandidateKind::Discovered);
+        candidates.rejected(addr(1), now);
+        for i in 0..MAX_CANDIDATES {
+            candidates.learn(filler(i), CandidateKind::Discovered);
+        }
+        candidates.learn(addr(2), CandidateKind::Source);
+        assert_eq!(candidates.failure_snapshot(addr(1)), None, "evicted");
+        candidates.learn(addr(1), CandidateKind::Source);
+        assert!(candidates.failure_snapshot(addr(1)).is_some(), "re-learned");
+        let eligible = candidates.eligible(Instant::now());
+        assert!(eligible.contains(&addr(2)));
+        assert!(
+            !eligible.contains(&addr(1)),
+            "a re-learned rejected peer keeps its cooldown"
+        );
+        assert!(candidates
+            .eligible(now + REJECTED_PEER_COOLDOWN)
+            .contains(&addr(1)));
     }
 
     #[test]
