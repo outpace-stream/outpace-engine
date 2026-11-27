@@ -4,8 +4,13 @@ Outpace packages live streams into HLS itself. No FFmpeg is needed for this. A p
 `/streams/ace/<id>.m3u8` (or the compatibility `/ace/manifest.m3u8`), and Outpace cuts the
 incoming MPEG-TS into segments, keeps a sliding window of them and serves a live playlist.
 
-All HLS viewers of one source share one packager, and that packager shares the download with
-any direct MPEG-TS viewers.
+HLS viewers of one source share one packager, and every packager shares the download with any
+direct MPEG-TS viewers. Compatibility viewers that ask for a different
+[audio language](#choosing-an-audio-language) can add up to four more packagers to a source,
+so one source normally runs up to five. When a source restarts or is cleaned up while viewers
+still hold language packagers, those packagers keep serving them until their leases end, so for
+a while a source can run more, but never more than nine packagers in total. A language packager
+that is being shut down still counts until it has stopped.
 
 ## When to use HLS instead of MPEG-TS
 
@@ -26,7 +31,12 @@ any direct MPEG-TS viewers.
   doesn't start on a keyframe. Raise the limit only for very high bitrates, such as 4K HEVC.
 - Streams without usable timing are cut by packet count instead.
 - The playlist keeps the last `OUTPACE_HLS_WINDOW_SEGMENTS` (default 8) segments. Older segments
-  return `404`. Worst-case memory per HLS source is about (window + 1) × the segment ceiling.
+  return `404`. Worst-case memory per packager is about (window + 1) × the segment ceiling. Each
+  audio-language packager keeps its own window and, with [timeshift](Timeshift), its own
+  retained history, so plan for up to five times that per source when compatibility clients
+  request languages, and briefly more right after a source restart. Outpace runs at most nine
+  packagers per source, but a stopped packager's segments are freed only once its cleanup ends
+  and any segment request still reading it finishes, so memory can trail that limit briefly.
 
 ## Startup
 
@@ -114,7 +124,9 @@ With both on, only the shared conversion runs. VOD is never converted, whichever
 - Video is copied, never re-encoded.
 - AAC audio passes through without conversion, and video-only streams start no converter.
 - Everyone watching a source gets the same converted audio. There is no per-viewer track or
-  language choice.
+  language choice: with either switch on, HLS ignores
+  [`preferred_audio_language`](#choosing-an-audio-language), and with
+  `OUTPACE_LIVE_AUDIO_NORMALIZE=1` MPEG-TS ignores it too.
 - Stereo downmix loses surround channels, and re-encoding costs some quality.
 - At most **four** conversions run at once across the daemon.
 
@@ -163,6 +175,38 @@ playlists are absolute and built from the request's `Host` header.
 
 Native playlists use root-relative paths (`/streams/ace/<id>/seg/<n>.ts`). They work through a
 reverse proxy on the same host name, but not under a sub-path.
+
+### Choosing an audio language
+
+Add `preferred_audio_language=<code>` to `/ace/manifest.m3u8`, with a three-letter ISO 639-2 code
+such as `rus`:
+
+```text
+http://127.0.0.1:6878/ace/manifest.m3u8?id=0123456789abcdef0123456789abcdef01234567&preferred_audio_language=rus
+```
+
+- The code is case-insensitive, and `ger`/`deu`, `fre`/`fra` and the other bibliographic and
+  terminology pairs are treated as the same language. Any other value is ignored.
+- It is matched against the language tags of the stream's audio tracks. If the stream has AAC
+  audio, only an AAC track in that language is picked, so the codec you get never changes. If
+  the stream has no AAC, a track in that language in any recognised codec is kept on its own.
+- No match, an invalid code or no parameter gives the normal audio: the first AAC track, or
+  every track when there is no AAC.
+- Viewers asking for different languages still share **one download**. Each extra track costs
+  one more packager, with its own retained segment window and history. A stream session runs at
+  most **four** extra language packagers; later languages get the normal audio. An extra packager
+  stops about 30 seconds after its last viewer's lease ends. Once a source has ended, a language
+  that has no packager yet gets the normal audio, because a new packager would have nothing left
+  to play.
+- A language packager keeps playing the track it started with. If that track disappears from
+  the stream, the packager stops and its viewers get `404`; requesting the manifest again picks
+  the language afresh. Stopping the stream also ends its language packagers, so their viewers
+  need a new manifest.
+- With [audio normalisation](#audio-normalisation) on, the parameter is ignored.
+- Native `/streams/...` playlists ignore the parameter.
+
+The full rules are in the
+[compatibility contract](https://github.com/outpace-stream/outpace-engine/blob/main/docs/protocol/compat-matrix.md#preferred-audio-language).
 
 ## Related pages
 

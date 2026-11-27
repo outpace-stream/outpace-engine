@@ -324,6 +324,12 @@ impl StreamSession {
         }
     }
 
+    /// Whether the source has ended: the pump dropped its sender, so a new receiver would only
+    /// see EOF.
+    pub(crate) fn source_ended(&self) -> bool {
+        self.tx.strong_count() == 0
+    }
+
     /// A receiver that does NOT count as a client (used by internal consumers like the HLS
     /// packager, which must not pin the session open against idle teardown).
     pub fn raw_receiver(&self) -> broadcast::Receiver<StreamEvent> {

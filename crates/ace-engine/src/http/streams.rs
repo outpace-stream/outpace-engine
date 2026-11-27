@@ -483,6 +483,7 @@ pub(super) async fn ace_stream_session_response(
     mut cancel: tokio::sync::watch::Receiver<bool>,
     direct_lease: Option<AceDirectLeaseGuard>,
     startup_timeout: std::time::Duration,
+    audio_language: Option<ace_media::audio::AudioLanguage>,
 ) -> Response {
     let state = session.playback_state();
     if let Some(state) = &state {
@@ -497,6 +498,10 @@ pub(super) async fn ace_stream_session_response(
     if state.is_some() {
         gate.enable_mpeg2();
         gate.preserve_transport_identity();
+    } else if let Some(language) = audio_language {
+        // Shared live normalization already chose this source's audio; otherwise reorder only
+        // this viewer's PMT so the requested track is the first audio entry.
+        gate.prefer_audio_language(language);
     }
     let stream = futures::stream::unfold(
         (sub, gate, cancel, expires_at, direct_lease, state, false),
@@ -773,6 +778,7 @@ mod normalization_tests {
                 cancel,
                 None,
                 Duration::from_secs(1),
+                None,
             )
             .await;
             (response, Some(owner))
@@ -832,6 +838,7 @@ mod normalization_tests {
                     cancel,
                     None,
                     Duration::from_secs(1),
+                    None,
                 )
                 .await
             } else {
@@ -903,5 +910,35 @@ mod normalization_tests {
                 crate::audio_normalize::PlaybackPhase::Failed(Failure::ChildExit)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn shared_live_normalization_ignores_a_ts_audio_language_preference() {
+        let (tx, session) = controlled();
+        tx.send(Ok(crate::test_media::stream(30).into()))
+            .await
+            .unwrap();
+        let (_owner, cancel) = watch::channel(false);
+        let response = ace_stream_session_response(
+            (session.clone(), session.subscribe()),
+            Instant::now() + Duration::from_secs(30),
+            cancel,
+            None,
+            Duration::from_secs(1),
+            ace_media::audio::AudioLanguage::parse("rus"),
+        )
+        .await;
+        let mut body = response.into_body().into_data_stream();
+        let first = timeout(Duration::from_secs(1), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        session.stop().await;
+        assert_eq!(
+            crate::test_media::first_pmt_order(&first),
+            Some(vec![0x100, 0x101, 0x102, 0x103]),
+            "the normalized source's own track order is served unchanged"
+        );
     }
 }

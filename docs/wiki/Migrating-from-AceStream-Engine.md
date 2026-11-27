@@ -15,6 +15,7 @@ before retiring the old engine; acceptance does not qualify every deployment.
 | `http://host:6878/ace/getstream?id=<id>` | Same URL, on by default. |
 | `/ace/manifest.m3u8?id=<id>` (HLS) | Same, on by default. |
 | `format=json` sessions with `playback_url`, `stat_url`, `command_url` | Same. `stat_url` reports speed, peers and downloaded bytes. |
+| `preferred_audio_language=<code>` | Accepted on `getstream` and `manifest.m3u8`. MPEG-TS lists the matching track first; HLS switches to it only when its codec is one HLS would play (an AAC track when the stream has AAC). See [Playing Streams](Playing-Streams#audio-language). |
 | `/server/api?method=get_version`, `get_status`, ... | A documented subset. See [Playing Streams](Playing-Streams#control-api). |
 | `acestream://<id>` links | `outpace play acestream://<id>`, or the native `/streams/ace/<id>`. |
 | HTTP port 6878 | Same port. |
