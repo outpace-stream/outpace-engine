@@ -420,6 +420,7 @@ async fn a_poll_after_idle_release_warms_the_lease_again() {
         let warm = idle_bounded(false);
         let lease = mint(&warm.app).await;
         poll_until(&warm.app, &lease.stat, is_dl).await;
+        wait_held(&warm.state, &lease.token).await;
         let held = session(&warm.state).await.unwrap();
         wait_for_pins(&held, 0).await;
         warm.state
