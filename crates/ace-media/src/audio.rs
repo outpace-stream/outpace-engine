@@ -85,24 +85,30 @@ impl AudioLanguage {
     }
 
     /// Whether an elementary stream's descriptor loop carries an ISO_639_language_descriptor
-    /// (tag 0x0a) entry for this language. Malformed loops never match.
+    /// (tag 0x0a) entry for this language. The whole loop is validated before a match counts:
+    /// a truncated descriptor anywhere, or an ISO 639 body that is not a whole number of 4-byte
+    /// entries, means no match. Descriptors with several language entries are supported.
     pub fn tagged(&self, mut descriptors: &[u8]) -> bool {
-        while let [tag, len, rest @ ..] = descriptors {
+        let mut matched = false;
+        while !descriptors.is_empty() {
+            let [tag, len, rest @ ..] = descriptors else {
+                return false;
+            };
             let Some(body) = rest.get(..*len as usize) else {
                 return false;
             };
-            if *tag == 0x0a
-                && body
-                    .as_chunks::<4>()
-                    .0
+            if *tag == 0x0a {
+                let (entries, extra) = body.as_chunks::<4>();
+                if !extra.is_empty() {
+                    return false;
+                }
+                matched |= entries
                     .iter()
-                    .any(|entry| Self::from_code(&entry[..3]) == Some(*self))
-            {
-                return true;
+                    .any(|entry| Self::from_code(&entry[..3]) == Some(*self));
             }
             descriptors = &rest[*len as usize..];
         }
-        false
+        matched
     }
 }
 
@@ -181,19 +187,24 @@ fn native_selection(
 /// Reorder one viewer's PMT so the best `language` audio track becomes the program's first
 /// audio entry, then recompute the CRC. Every elementary stream, descriptor, PID and the
 /// version are kept, so players that start the first audio track start the requested one and
-/// can still switch. Only a complete, CRC-valid, single-packet current PMT is rewritten; any
-/// other packet, or one already in the preferred order, is left untouched (`false`).
-/// Works in place without allocating.
-pub fn prefer_audio_track(packet: &mut [u8], language: AudioLanguage) -> bool {
+/// can still switch. Only a complete, CRC-valid, single-packet current PMT for `program` (the
+/// current PAT program) with a well-formed program descriptor loop is rewritten; any other
+/// packet, including a delayed PMT of a previous program, or one already in the preferred
+/// order, is left untouched (`false`). Works in place without allocating.
+pub fn prefer_audio_track(packet: &mut [u8], language: AudioLanguage, program: u16) -> bool {
     let Ok(packet) = <&mut [u8; N]>::try_from(packet) else {
         return false;
     };
-    let Ok(s) = section(packet, 2, 13, None) else {
+    let Ok(s) = section(packet, 2, 13, Some(program)) else {
         return false;
     };
     let len = s.len();
     let end = len - 4;
     let begin = 12 + ((((s[10] & 15) as usize) << 8) | s[11] as usize);
+    // The program descriptor loop must fit program_info_length and parse completely.
+    if begin > end || descriptors(&s[12..begin]).is_none() {
+        return false;
+    }
     let mut pos = begin;
     let mut first_audio = None;
     let mut best: Option<(u8, usize, usize)> = None;
@@ -407,6 +418,10 @@ pub struct LiveAudioSelection {
     preference: AudioPreference,
     /// The PID the current PMT's native selection kept, if any.
     selected: Option<u16>,
+    /// PAT/PMT evidence that disables native selection (several programs, unsupported PSI).
+    /// Kept apart from the stricter normalization `layout`, which other packets (scrambling,
+    /// reserved PMT PIDs) can mark unsupported without telling native selection anything.
+    native_disabled: bool,
 }
 
 impl LiveAudioSelection {
@@ -422,9 +437,9 @@ impl LiveAudioSelection {
         }
     }
 
-    /// Whether tables are known: a usable PMT, or PSI that disables selection.
+    /// Whether native selection has decided: a usable PMT, or PAT/PMT that disables it.
     fn tables_known(&self) -> bool {
-        self.source_pmt.is_some() || self.layout == LayoutDecision::Unsupported
+        self.source_pmt.is_some() || self.native_disabled
     }
 
     /// For an [`AudioPreference::Track`] selection: known tables no longer offer that PID as
@@ -452,7 +467,7 @@ impl LiveAudioSelection {
     /// passes through unchanged (no ADTS AAC and no match, or PSI that disables selection).
     pub fn selection_for(&self, language: Option<AudioLanguage>) -> Option<Option<u16>> {
         let Some(s) = self.source_pmt.as_deref() else {
-            return (self.layout == LayoutDecision::Unsupported).then_some(None);
+            return self.native_disabled.then_some(None);
         };
         let begin = 12 + ((((s[10] & 15) as usize) << 8) | s[11] as usize);
         let mut entries = Vec::new();
@@ -495,7 +510,7 @@ impl LiveAudioSelection {
         // This metadata never changes the legacy packet return value or rewrite rules.
         let mut resolved = false;
         if packet[3] & 0xc0 != 0 {
-            resolved = !self.tables_known();
+            // Normalization evidence only: native selection still waits for PAT/PMT.
             self.layout = LayoutDecision::Unsupported;
         }
         let source_pid = ts_pid(&packet);
@@ -522,6 +537,7 @@ impl LiveAudioSelection {
                     if programs.len() != 1 {
                         self.layout = LayoutDecision::Unsupported;
                         changed = self.disable();
+                        self.native_disabled = true;
                         self.mapping = None;
                         self.transport_stream_id = None;
                         self.pat = None;
@@ -532,18 +548,22 @@ impl LiveAudioSelection {
                         {
                             self.layout = LayoutDecision::Pending;
                             changed = self.disable();
+                            self.native_disabled = false;
                             self.mapping = Some(programs[0]);
                             self.transport_stream_id = Some(transport_stream_id);
                         }
                         self.pat = Some(packet);
                         if programs[0].1 < 0x20 || programs[0].1 == 0x1fff {
+                            // No usable PMT can arrive on a reserved PID: selection is off.
                             self.layout = LayoutDecision::Unsupported;
+                            self.native_disabled = true;
                         }
                     }
                 }
                 Err(PsiError::Unsupported) => {
                     self.layout = LayoutDecision::Unsupported;
                     changed = self.disable();
+                    self.native_disabled = true;
                     self.mapping = None;
                     self.transport_stream_id = None;
                     self.pat = None;
@@ -565,6 +585,7 @@ impl LiveAudioSelection {
             match self.update_pmt(&packet) {
                 Ok(different) => {
                     changed = different;
+                    self.native_disabled = false;
                     if let Some(pmt) = self.pmt {
                         packet = pmt;
                     }
@@ -572,6 +593,7 @@ impl LiveAudioSelection {
                 Err(PsiError::Unsupported) => {
                     self.layout = LayoutDecision::Unsupported;
                     changed = self.disable();
+                    self.native_disabled = true;
                 }
                 Err(PsiError::Invalid) => {
                     return AudioPacket {
@@ -1858,7 +1880,7 @@ mod tests {
     fn preferred_track_is_moved_to_the_first_audio_entry_with_a_valid_crc() {
         let source = multi_language();
         let mut packet = source;
-        assert!(prefer_audio_track(&mut packet, lang("rus")));
+        assert!(prefer_audio_track(&mut packet, lang("rus"), 1));
         assert_eq!(es_pids(&packet), vec![257, 259, 258, 260]);
         let s = section(&packet, 2, 13, None).expect("CRC-valid current PMT");
         let original = section(&source, 2, 13, None).unwrap();
@@ -1888,7 +1910,7 @@ mod tests {
                 (15, 260, RUS),
             ],
         );
-        assert!(prefer_audio_track(&mut packet, lang("rus")));
+        assert!(prefer_audio_track(&mut packet, lang("rus"), 1));
         assert_eq!(es_pids(&packet), vec![257, 260, 258, 259]);
 
         for (code, table) in [
@@ -1897,19 +1919,71 @@ mod tests {
             ("rus", pmt(0, &[(0x1b, 257, &[]), (6, 258, RUS)])), // tagged but not audio
         ] {
             let mut packet = table;
-            assert!(!prefer_audio_track(&mut packet, lang(code)), "{code}");
+            assert!(!prefer_audio_track(&mut packet, lang(code), 1), "{code}");
             assert_eq!(packet, table);
         }
         let mut corrupt = source;
         corrupt[30] ^= 1;
         let before = corrupt;
-        assert!(!prefer_audio_track(&mut corrupt, lang("rus")));
+        assert!(!prefer_audio_track(&mut corrupt, lang("rus"), 1));
         assert_eq!(
             corrupt, before,
             "CRC-invalid tables are forwarded untouched"
         );
         let mut short = [0x47; 100];
-        assert!(!prefer_audio_track(&mut short, lang("rus")));
+        assert!(!prefer_audio_track(&mut short, lang("rus"), 1));
+    }
+
+    #[test]
+    fn pmt_rewrite_requires_the_current_program_and_a_valid_program_info_loop() {
+        let source = multi_language();
+        // Another program's PMT is left untouched.
+        let mut packet = source;
+        assert!(!prefer_audio_track(&mut packet, lang("rus"), 2));
+        assert_eq!(packet, source);
+        // `multi_language` carries one well-formed program descriptor and is rewritten.
+        let mut packet = source;
+        assert!(prefer_audio_track(&mut packet, lang("rus"), 1));
+        // A CRC-valid PMT whose program descriptor overruns program_info_length, or whose
+        // descriptor header is truncated, is forwarded unchanged.
+        let entries = |info: &[u8]| {
+            let mut s = vec![
+                2,
+                0xb0,
+                0,
+                0,
+                1,
+                0xc1,
+                0,
+                0,
+                0xe1,
+                1,
+                0xf0,
+                info.len() as u8,
+            ];
+            s.extend_from_slice(info);
+            for (ty, p, d) in [(0x1b, 257u16, &[][..]), (15, 258, ENG), (15, 259, RUS)] {
+                s.extend_from_slice(&[ty, 0xe0 | (p >> 8) as u8, p as u8, 0xf0, d.len() as u8]);
+                s.extend_from_slice(d);
+            }
+            table(256, s)
+        };
+        let mut valid = entries(&[0x52, 1, 0xab]);
+        assert!(prefer_audio_track(&mut valid, lang("rus"), 1));
+        for info in [&[0x52, 2, 0xab][..], &[0x52, 1, 0xab, 0x05][..]] {
+            let table = entries(info);
+            let mut packet = table;
+            assert!(!prefer_audio_track(&mut packet, lang("rus"), 1), "{info:?}");
+            assert_eq!(packet, table);
+        }
+        let vector = include_bytes!("../../../tests/vectors/media/pmt-malformed-program-info.ts");
+        let mut packet: [u8; N] = vector[N..].try_into().unwrap();
+        assert!(
+            section(&packet, 2, 13, Some(1)).is_ok(),
+            "the vector is CRC-valid"
+        );
+        assert!(!prefer_audio_track(&mut packet, lang("rus"), 1));
+        assert_eq!(packet[..], vector[N..]);
     }
 
     #[test]
@@ -1923,7 +1997,7 @@ mod tests {
             &crate::test_stream::pmt(&crate::test_stream::AUDIO)
         );
         let mut packet: [u8; N] = source[N..].try_into().unwrap();
-        assert!(prefer_audio_track(&mut packet, lang("rus")));
+        assert!(prefer_audio_track(&mut packet, lang("rus"), 1));
         assert_eq!(&packet, &expected[N..]);
         let mut st = LiveAudioSelection::with_language(lang("rus"));
         st.observe(source[..N].try_into().unwrap());
@@ -1996,11 +2070,87 @@ mod tests {
         assert!(st.observe(multi_language()).resolved);
         assert!(!st.observe(multi_language()).resolved);
         assert!(!st.observe(elementary(258)).resolved);
-        // A scrambled packet before tables resolves (to passthrough) once.
+        // A scrambled packet is normalization evidence only: native selection stays pending.
         let mut st = LiveAudioSelection::default();
         let mut scrambled = elementary(300);
         scrambled[3] |= 0x80;
-        assert!(st.observe(scrambled).resolved);
         assert!(!st.observe(scrambled).resolved);
+        assert_eq!(st.layout(), LayoutDecision::Unsupported);
+        assert_eq!(st.selection_for(None), None, "still waiting for PAT/PMT");
+        st.observe(pat(1, 256));
+        assert!(st.observe(multi_language()).resolved);
+    }
+
+    #[test]
+    fn a_pat_mapping_the_pmt_to_a_reserved_pid_disables_native_selection_at_once() {
+        for reserved in [0x10, 0x1fff] {
+            let mut st = LiveAudioSelection::with_preference(AudioPreference::Track(259));
+            assert!(st.observe(pat(1, reserved)).resolved);
+            assert_eq!(st.selection_for(Some(lang("rus"))), Some(None));
+            assert!(st.track_lost());
+        }
+    }
+
+    #[test]
+    fn unrelated_scrambling_before_the_first_pmt_is_not_a_pinned_track_loss() {
+        let mut st = LiveAudioSelection::with_preference(AudioPreference::Track(259));
+        let mut scrambled = elementary(300);
+        scrambled[3] |= 0x80;
+        st.observe(scrambled);
+        assert!(!st.track_lost(), "no PSI has spoken about PID 259 yet");
+        st.observe(pat(1, 256));
+        assert_eq!(
+            es_pids(&st.observe(multi_language()).packet.unwrap()),
+            vec![257, 259]
+        );
+        assert!(!st.track_lost());
+        // A usable PMT without the PID, or PSI that disables native selection, still is.
+        st.observe(pmt(1, &[(0x1b, 257, &[]), (15, 258, ENG)]));
+        assert!(st.track_lost());
+        let mut st = LiveAudioSelection::with_preference(AudioPreference::Track(259));
+        st.observe(scrambled);
+        st.observe(table(
+            0,
+            vec![0, 0xb0, 0, 0, 1, 0xc1, 0, 0, 0, 1, 0xe1, 0, 0, 2, 0xe1, 1],
+        ));
+        assert!(st.track_lost());
+    }
+
+    #[test]
+    fn malformed_language_descriptors_never_match() {
+        let rus = lang("rus");
+        // Valid single and multi-entry bodies, before or after other descriptors.
+        assert!(rus.tagged(&[0x0a, 4, b'r', b'u', b's', 0]));
+        assert!(rus.tagged(&[0x0a, 8, b'e', b'n', b'g', 0, b'r', b'u', b's', 1]));
+        assert!(rus.tagged(&[0x52, 1, 7, 0x0a, 4, b'r', b'u', b's', 0, 0x6a, 1, 0]));
+        // A body that is not a whole number of 4-byte entries, even with a full match inside.
+        assert!(!rus.tagged(&[0x0a, 5, b'r', b'u', b's', 0, 9]));
+        assert!(!rus.tagged(&[0x0a, 3, b'r', b'u', b's']));
+        // A match followed by a truncated header or body is rejected: the whole loop is checked.
+        assert!(!rus.tagged(&[0x0a, 4, b'r', b'u', b's', 0, 0x52]));
+        assert!(!rus.tagged(&[0x0a, 4, b'r', b'u', b's', 0, 0x52, 3, 1]));
+        // A malformed ISO 639 descriptor elsewhere in the loop also voids an earlier match.
+        assert!(!rus.tagged(&[0x0a, 4, b'r', b'u', b's', 0, 0x0a, 2, b'e', b'n']));
+        // Native selection and the TS reorder both ignore such a track.
+        let bad: &[u8] = &[0x0a, 5, b'r', b'u', b's', 0, 0];
+        let table = pmt(0, &[(0x1b, 257, &[]), (15, 258, ENG), (15, 259, bad)]);
+        assert_eq!(selected(Some("rus"), table).0, vec![257, 258]);
+        let mut packet = table;
+        assert!(!prefer_audio_track(&mut packet, rus, 1));
+        assert_eq!(packet, table);
+    }
+
+    #[test]
+    fn malformed_language_vector_falls_back_to_the_default_track() {
+        let vector = include_bytes!("../../../tests/vectors/media/pmt-malformed-language.ts");
+        let table: [u8; N] = vector[N..].try_into().unwrap();
+        let mut st = LiveAudioSelection::with_language(lang("rus"));
+        st.observe(vector[..N].try_into().unwrap());
+        st.observe(table);
+        // The CRC-valid PMT is used, but its malformed `rus` tag is not a match.
+        assert_eq!(st.selection_for(Some(lang("rus"))), Some(Some(0x101)));
+        let mut packet = table;
+        assert!(!prefer_audio_track(&mut packet, lang("rus"), 1));
+        assert_eq!(packet, table);
     }
 }

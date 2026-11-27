@@ -7,9 +7,10 @@ incoming MPEG-TS into segments, keeps a sliding window of them and serves a live
 HLS viewers of one source share one packager, and every packager shares the download with any
 direct MPEG-TS viewers. Compatibility viewers that ask for a different
 [audio language](#choosing-an-audio-language) can add up to four more packagers to a source,
-so one source normally runs up to five. Right after a source restarts, language packagers from
-before the restart keep serving the viewers that still use them until their leases end, so for
-a short time a source can run more, but never more than nine packagers in total.
+so one source normally runs up to five. When a source restarts or is cleaned up while viewers
+still hold language packagers, those packagers keep serving them until their leases end, so for
+a while a source can run more, but never more than nine packagers in total. A language packager
+that is being shut down still counts until it has stopped.
 
 ## When to use HLS instead of MPEG-TS
 
@@ -194,7 +195,9 @@ http://127.0.0.1:6878/ace/manifest.m3u8?id=0123456789abcdef0123456789abcdef01234
 - Viewers asking for different languages still share **one download**. Each extra track costs
   one more packager, with its own retained segment window and history. A stream session runs at
   most **four** extra language packagers; later languages get the normal audio. An extra packager
-  stops about 30 seconds after its last viewer's lease ends.
+  stops about 30 seconds after its last viewer's lease ends. Once a source has ended, a language
+  that has no packager yet gets the normal audio, because a new packager would have nothing left
+  to play.
 - A language packager keeps playing the track it started with. If that track disappears from
   the stream, the packager stops and its viewers get `404`; requesting the manifest again picks
   the language afresh. Stopping the stream also ends its language packagers, so their viewers

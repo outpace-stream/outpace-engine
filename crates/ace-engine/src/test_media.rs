@@ -107,15 +107,26 @@ impl Generator {
         }
     }
 
-    /// Switch the audio layout (a new PMT version) from the next frame on.
+    /// Switch the audio layout from the next frame on. Each call advances the PMT version
+    /// (modulo 32) from the previous table's and recomputes the CRC.
     pub(crate) fn set_tracks(&mut self, tracks: &[(u16, u8, &[u8; 3])]) {
+        const VERSION: usize = 5 + 5; // section byte 5 of the PMT packet
+        let version = ((self.table[VERSION] >> 1) & 31).wrapping_add(1) & 31;
         self.tracks = tracks.iter().map(|(p, t, l)| (*p, *t, **l)).collect();
         self.table = pmt(tracks);
-        let s = 5 + 5;
-        self.table[s] = (self.table[s] & 0xc1) | 0x02; // version 1
+        self.table[VERSION] = (self.table[VERSION] & 0xc1) | (version << 1);
         let len = (((self.table[6] & 15) as usize) << 8) | self.table[7] as usize;
         let crc = mpeg_crc32(&self.table[5..5 + 3 + len - 4]);
         self.table[5 + 3 + len - 4..5 + 3 + len].copy_from_slice(&crc.to_be_bytes());
+    }
+
+    /// The PMT version and section CRC check of the current table, for tests.
+    fn table_version(&self) -> (u8, bool) {
+        let len = (((self.table[6] & 15) as usize) << 8) | self.table[7] as usize;
+        (
+            (self.table[5 + 5] >> 1) & 31,
+            mpeg_crc32(&self.table[5..5 + 3 + len]) == 0,
+        )
     }
 
     fn next_cc(&mut self, pid: u16) -> u8 {
@@ -219,4 +230,23 @@ pub(crate) fn first_pmt_order(ts: &[u8]) -> Option<Vec<u16>> {
         pos += 5 + ((((s[pos + 3] & 15) as usize) << 8) | s[pos + 4] as usize);
     }
     Some(pids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_tracks_advances_the_pmt_version_modulo_32_with_a_valid_crc() {
+        let mut generator = Generator::new(&AUDIO);
+        assert_eq!(generator.table_version(), (0, true));
+        for expected in (1..32).chain([0, 1]) {
+            generator.set_tracks(if expected % 2 == 0 {
+                &AUDIO
+            } else {
+                &AUDIO[..2]
+            });
+            assert_eq!(generator.table_version(), (expected, true));
+        }
+    }
 }

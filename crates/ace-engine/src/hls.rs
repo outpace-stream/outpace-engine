@@ -577,6 +577,12 @@ impl HlsPackager {
         st.independent_start = false;
     }
 
+    /// [`Self::feed`] for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn feed_for_test(&self, data: &[u8]) {
+        self.feed(data);
+    }
+
     /// Append contiguous TS bytes, emitting PCR-timed, preferably random-access-aligned segments.
     fn feed(&self, data: &[u8]) {
         let mut st = self.state.lock().unwrap();

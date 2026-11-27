@@ -1681,8 +1681,7 @@ impl StreamManager {
                     controls.push(entry.control);
                 }
             }
-            controls
-                .extend(self.retire_hls_variants(self.hls_variants.take_idle(&retained_sessions)));
+            controls.extend(self.retire_hls_variants(self.hls_variants.take_idle()));
             (controls, retired_sessions)
         };
         IdleRetirement {
