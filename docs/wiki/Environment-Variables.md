@@ -35,6 +35,7 @@ See [Releases and Versions](Releases-and-Versions) for publication status.
 | [`OUTPACE_CACHE_DIR`](Configuration#storage-and-cache) | `<data dir>/cache` | all | Disk-cache root. Wiped at startup. |
 | [`OUTPACE_CACHE_TYPE`](Configuration#storage-and-cache) | `memory` | all | Where seeding pieces are kept: `memory` or `disk`. |
 | [`OUTPACE_DATA_DIR`](Configuration#storage-and-cache) | platform data dir + `outpace` | all | Identity and broadcast state. The container uses `/var/lib/outpace`. |
+| [`OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES`](Configuration#last-known-good-descriptors) | `64` | edge | Content ids whose last catalog descriptor is kept to play while the catalog is unreachable. `0` turns it off. |
 | [`OUTPACE_ENABLE_CAST`](Configuration#casting) | `false` | 1.2.0 | Add the `/cast/*` routes for DLNA/UPnP renderers. Needs a LAN `OUTPACE_BIND`. |
 | [`OUTPACE_ENABLE_INBOUND`](Configuration#seeding-and-inbound-peers) | `true` | all | Accept inbound peers and announce to trackers and the DHT. |
 | [`OUTPACE_ENABLE_PORT_MAPPING`](Configuration#nat-and-port-mapping) | `false` | all | Ask the router to open the peer port with UPnP or NAT-PMP. |

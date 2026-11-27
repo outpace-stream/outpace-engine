@@ -23,6 +23,11 @@ Other environment variables parsed by the daemon include:
   resolution after catalog failure, default off. Set to `1` on the receiving daemon or
   standalone `play` process for Outpace broadcast Ace links from another daemon. Applies to
   live and VOD; peer results do not populate the catalog-provenance infohash index.
+- `OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES` - how many live content ids keep their last good
+  catalog descriptor under `<OUTPACE_DATA_DIR>/descriptors`, default `64`, `0` disables, at
+  most `512`. A saved descriptor is used only when the catalog is unreachable or every host
+  gave an unusable reply, never after a rejection or not-found, and a fresh catalog answer
+  always replaces it. It takes precedence over the BEP-9 fallback and is off in private mode.
 - `OUTPACE_BIND` - HTTP bind address, default `127.0.0.1:6878`. The API has no
   authentication, and `/streams` lists the IP address of every client watching each stream
   ([stream clients](native-api.md#stream-clients)), so anyone who can reach this address can

@@ -154,12 +154,35 @@ curl "http://127.0.0.1:6878/streams/ace/${CONTENT_ID:?set a content id}/status"
 | `phase` stays `connecting` | No peer connected yet. See [No peers, or discovery fails](#no-peers-or-discovery-fails). |
 | `phase` stays `buffering` | Peers are connected but media isn't arriving. See [Slow startup](#slow-startup). |
 | `no_peers` | Nobody is sharing the stream right now. Try a stream you know is live. |
-| `network` | The catalog couldn't be reached. Check VPNs, WARP and firewalls. The log line `[catalog] lookup failed on every host:` gives each catalog host's cause, such as `Catalog("catalog timeout")`. |
+| `network` | The catalog couldn't be reached and there was no saved descriptor for the id. Check VPNs, WARP and firewalls. The log line `[catalog] lookup failed on every host:` gives each catalog host's cause, such as `Catalog("catalog timeout")`. See [The catalog is blocked or unreachable](#the-catalog-is-blocked-or-unreachable). |
 | `unresolvable` | The id has no verified descriptor; `message` says what to try (often the `cid:` content id). |
 | `protected` | Encrypted content. Outpace doesn't play it. |
 | `capacity` | The session cap, the catalog resolver or audio conversion is at capacity. Retry shortly; see [Too many streams](#too-many-streams). |
 | `no_space` | VOD only, with the disk cache: the file won't fit on the cache disk (`507`), and `message` gives both sizes. Free space on the disk holding `OUTPACE_CACHE_DIR`, move it to a bigger disk, lower `OUTPACE_SEED_STORE_BYTES` or `OUTPACE_VOD_DISK_RESERVE_BYTES`, or use the memory cache. See [VOD free-space check](Configuration#vod-free-space-check). |
 | `internal` | Something else failed. Check the log. |
+
+## The catalog is blocked or unreachable
+
+Some networks block the AceStream catalog hosts, for example some ISPs during football
+matches. The swarm's peers are often still reachable. Outpace keeps the last good descriptor
+of each content id it has played (see
+[Last-known-good descriptors](Configuration#last-known-good-descriptors)), so a channel that
+played before can still start:
+
+- Look for `[resolve] catalog unreachable; using the last-known-good descriptor stored <N>m
+  ago` in the log. That start used the saved copy.
+- A content id that never played on this daemon, or whose saved copy is older than 30
+  days, can't fall back. It fails with `network`.
+- The saved copy only helps if the swarm still uses the same infohash. If the start then
+  stays in `connecting`, the channel has probably moved to a new swarm. Only a fresh catalog
+  answer can fix that: try a VPN or `OUTPACE_PROXY` for the catalog requests (see
+  [Outbound Proxy](Outbound-Proxy)).
+- An error status from every catalog host (such as `403` or `503`) counts as an outage and
+  falls back. A page served with status `200` that isn't a catalog reply counts as a
+  rejection, so it doesn't fall back. The `[catalog] lookup failed on every host:` line shows
+  which kind of failure each host gave.
+- Keep the data directory on persistent storage (the container's `/var/lib/outpace` volume),
+  or the saved descriptors are lost at each restart.
 
 ## No peers, or discovery fails
 

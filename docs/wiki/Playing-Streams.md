@@ -17,7 +17,7 @@ Examples use `http://127.0.0.1:6878` and the placeholder id
 
 | Input | Native form | Notes |
 | --- | --- | --- |
-| Content id (40 hex characters) | `/streams/ace/<id>` or `/streams/ace/cid:<id>` | The usual AceStream id. Resolved through the AceStream catalog. |
+| Content id (40 hex characters) | `/streams/ace/<id>` or `/streams/ace/cid:<id>` | The usual AceStream id. Resolved through the AceStream catalog. A live id that played before also starts from its [saved descriptor](Configuration#last-known-good-descriptors) when the catalog can't be reached. |
 | Infohash | `/streams/ace/ih:<infohash>` | A swarm hash. Plays only if Outpace can find a verified descriptor for it (its own broadcasts, ones seen before, or the catalog). Otherwise `422`. |
 | Transport file (`.acelive` / `.torrent` URL) | via the compat `url=` selector or `outpace play <url>` | Fetched over HTTP(S) with a 1 MiB limit, no redirects, and private addresses refused. |
 | Magnet (`magnet:?xt=urn:btih:...`) | via compat `magnet=` or `outpace play` | Reduced to its infohash, then treated like an infohash. BitTorrent v2 magnets aren't supported. |
@@ -188,7 +188,7 @@ the status route answers `404`: read the `error` from the start response itself.
 | --- | --- | --- |
 | `not_found` | `404` | Unknown network, or the start was refused. |
 | `no_peers` | `404` (`502` for VOD) | Nobody is sharing the stream right now: no metadata peer answered, or initial discovery found no peer. |
-| `network` | `404` (`502` for VOD); `422` for an `ih:` infohash | The catalog couldn't be reached. Check the network, VPN and firewall. |
+| `network` | `404` (`502` for VOD); `422` for an `ih:` infohash | The catalog couldn't be reached, and no [saved descriptor](Configuration#last-known-good-descriptors) could stand in. Check the network, VPN and firewall. |
 | `unresolvable` | `422` (`502` for public VOD) | The id has no verified descriptor. `message` explains why and what to try instead. |
 | `protected` | `422` | Encrypted or invalid-protection content, which Outpace doesn't play. |
 | `capacity` | `503` + `Retry-After: 1` (`404` when the catalog resolver is saturated) | The [session cap](Configuration#limits-and-admission), the catalog resolver or audio conversion is at capacity. Retry later. |

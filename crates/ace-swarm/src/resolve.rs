@@ -104,6 +104,10 @@ pub enum ResolveError {
     Catalog(&'static str),
     /// Catalog I/O failure, distinct from rejected response/authentication metadata.
     CatalogNetwork(&'static str),
+    /// Every catalog host replied without a usable answer (a non-`200` status, broken framing,
+    /// an oversized body). Reported like [`Self::Catalog`], but says nothing about the id, so
+    /// [`Self::is_catalog_outage`] treats it as an outage.
+    CatalogUnavailable(&'static str),
     /// A peer/network step failed during content-id resolution.
     Peer(&'static str),
     /// A transport-file `url=` fetch failed a safety check or the network step.
@@ -128,6 +132,12 @@ pub enum ResolveFailureKind {
 }
 
 impl ResolveError {
+    /// Whether the catalog gave no answer about the id: unreachable, or only unusable replies.
+    /// A rejected or not-found reply is not an outage.
+    pub fn is_catalog_outage(&self) -> bool {
+        matches!(self, Self::CatalogNetwork(_) | Self::CatalogUnavailable(_))
+    }
+
     pub fn failure_kind(&self) -> ResolveFailureKind {
         use ResolveFailureKind as Kind;
         match self {
@@ -135,7 +145,9 @@ impl ResolveError {
             Self::InvalidProtection => Kind::InvalidProtection,
             Self::BadInfohash => Kind::InvalidSelector,
             Self::HlsOrigin(_) | Self::Hls(_) | Self::Transport(_) => Kind::InvalidDescriptor,
-            Self::Catalog(_) | Self::TransportTooLarge => Kind::RejectedMetadata,
+            Self::Catalog(_) | Self::CatalogUnavailable(_) | Self::TransportTooLarge => {
+                Kind::RejectedMetadata
+            }
             Self::Peer(_) | Self::CatalogNetwork(_) => Kind::Network,
             Self::Url(_) => Kind::Unclassified,
             Self::Fetch(error) => match error {
@@ -178,9 +190,9 @@ impl std::fmt::Debug for ResolveError {
             Self::InvalidProtection => f.write_str("InvalidProtection"),
             Self::BadInfohash => f.write_str("BadInfohash"),
             Self::Transport(reason) => f.debug_tuple("Transport").field(reason).finish(),
-            Self::Catalog(reason) | Self::CatalogNetwork(reason) => {
-                f.debug_tuple("Catalog").field(reason).finish()
-            }
+            Self::Catalog(reason)
+            | Self::CatalogNetwork(reason)
+            | Self::CatalogUnavailable(reason) => f.debug_tuple("Catalog").field(reason).finish(),
             Self::Peer(reason) => f.debug_tuple("Peer").field(reason).finish(),
             Self::Url(reason) => f.debug_tuple("Url").field(reason).finish(),
             Self::Fetch(error) => f
@@ -418,7 +430,7 @@ pub fn inspect_descriptor(bytes: &[u8]) -> Result<DescriptorInspection, ResolveE
 ///   generation stays consistent with the descriptor.
 /// - `piece_length / chunk_length <= u16::MAX` — the chunks-per-piece count must fit the wire
 ///   chunk index without truncation (see [`StreamInfo::chunks_per_piece`]).
-fn validate_geometry(piece_length: u64, chunk_length: u64) -> Result<(), ResolveError> {
+pub fn validate_geometry(piece_length: u64, chunk_length: u64) -> Result<(), ResolveError> {
     if chunk_length != DEFAULT_CHUNK_LENGTH {
         return Err(ResolveError::Transport("unexpected chunk_length"));
     }
@@ -581,6 +593,9 @@ fn catalog_lookup_error(failures: Vec<CatalogHostFailure>) -> ResolveError {
             CatalogHostFailure::Rejected(error) => rejected = Some(error),
             CatalogHostFailure::Unavailable(error @ ResolveError::CatalogNetwork(_)) => {
                 network.get_or_insert(error);
+            }
+            CatalogHostFailure::Unavailable(ResolveError::Catalog(reason)) => {
+                unavailable = Some(ResolveError::CatalogUnavailable(reason));
             }
             CatalogHostFailure::Unavailable(error) => unavailable = Some(error),
         }
@@ -2542,6 +2557,12 @@ mod failure_cause_tests {
             catalog_lookup_error(Vec::new()).failure_kind(),
             ResolveFailureKind::Network
         );
+        // Outages (#562): no host said anything about the id. A rejection is never one.
+        let unusable = catalog_lookup_error(vec![status(), status()]);
+        assert_eq!(format!("{unusable:?}"), "Catalog(\"catalog http status\")");
+        assert!(unusable.is_catalog_outage());
+        assert!(catalog_lookup_error(vec![timeout(), status()]).is_catalog_outage());
+        assert!(!catalog_lookup_error(vec![status(), rejected()]).is_catalog_outage());
     }
     #[tokio::test]
     async fn catalog_connect_failure_retains_network_cause_before_formatting() {

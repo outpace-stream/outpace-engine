@@ -515,6 +515,10 @@ config_with_root_redaction! {
     pub enable_cast: bool,
     /// Allow the outpace raw-transport-hash BEP-9 content-id fallback. Defaults off.
     pub bep9_content_id_fallback: bool,
+    /// Last-known-good live descriptors kept under `<data_dir>/descriptors` and used only when
+    /// the catalog cannot be reached (#562). `0` disables the fallback; at most
+    /// [`MAX_DESCRIPTOR_FALLBACK_ENTRIES`]. `OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES`.
+    pub descriptor_fallback_entries: usize,
     /// Register each public broadcast's transport with the AceStream catalog, as the original
     /// engine does on request, so its catalog `acestream://` id plays on stock clients. Sends the
     /// transport to the catalog operator. Off by default. `OUTPACE_BROADCAST_CATALOG_REGISTER`.
@@ -537,7 +541,22 @@ config_with_root_redaction! {
     pub proxy: ace_swarm::proxy::ProxySettings,
 }
 
+/// The descriptor fallback store's directory under the data directory.
+pub(crate) const DESCRIPTOR_FALLBACK_SUBDIR: &str = "descriptors";
+/// Default `OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES`.
+pub const DEFAULT_DESCRIPTOR_FALLBACK_ENTRIES: usize =
+    crate::ace_provider::descriptor_fallback::DEFAULT_ENTRIES;
+/// Largest accepted `OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES`.
+pub const MAX_DESCRIPTOR_FALLBACK_ENTRIES: usize =
+    crate::ace_provider::descriptor_fallback::MAX_ENTRIES;
+
 impl Config {
+    /// Where the last-known-good descriptor store lives. Under the data directory, because the
+    /// disk cache is wiped at startup.
+    pub(crate) fn descriptor_fallback_dir(&self) -> PathBuf {
+        self.data_dir.join(DESCRIPTOR_FALLBACK_SUBDIR)
+    }
+
     pub(crate) fn normalization_config(&self) -> HlsAudioConfig {
         HlsAudioConfig {
             normalize: self.hls_audio.normalize || self.live_audio_normalize,
@@ -591,6 +610,7 @@ impl Default for Config {
             enable_cast: false,
             metrics: false,
             bep9_content_id_fallback: false,
+            descriptor_fallback_entries: DEFAULT_DESCRIPTOR_FALLBACK_ENTRIES,
             broadcast_catalog_register: false,
             broadcast_options: BTreeMap::new(),
             broadcast_sources: BTreeMap::new(),
