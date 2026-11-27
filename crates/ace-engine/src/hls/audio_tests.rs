@@ -51,12 +51,17 @@ fn variant_fails_instead_of_switching_when_its_pid_leaves_the_pmt() {
     let mut generator = Generator::new(&AUDIO);
     feed_frames(&pkg, &mut generator, 60);
     let before = all_segments(&pkg);
+    assert!(!before.is_empty());
     assert_eq!(audio_pids(&before), vec![0x102]);
     generator.set_tracks(&[(0x101, 0x0f, b"eng"), (0x104, 0x0f, b"rus")]);
     feed_frames(&pkg, &mut generator, 120);
     assert_eq!(pkg.status(), HlsStatus::Failed(HlsFailure::Unsupported));
-    // Nothing after the change was published: no segment carries another track.
+    // Nothing after the change was published: not even a segment with the old PMT.
     let after = all_segments(&pkg);
+    assert_eq!(
+        after, before,
+        "no segment published after the PID left the PMT"
+    );
     assert_eq!(audio_pids(&after), vec![0x102]);
     for packet in after.as_chunks::<TS_PACKET>().0 {
         if ts_pid(packet) == PMT_PID {
