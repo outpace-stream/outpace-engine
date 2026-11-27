@@ -667,7 +667,17 @@ pub(super) struct Continuity {
     /// configured request timeout and no upstream window still covers it, the piece was evicted
     /// and we skip forward rather than freeze.
     next_needed_since: EffectiveInstant,
+    /// Trusted live head: the edge used to place, skip and resume playback and to
+    /// advertise our position. It only moves forward, and only as far as corroborated
+    /// evidence allows (see [`Continuity::refresh_trusted_head`]), so one peer's claim
+    /// cannot move playback to pieces nobody else holds (#560).
     pub(super) head: u64,
+    /// Highest live head any peer has claimed. It only bounds requests, which is safe
+    /// because each peer is only asked for pieces inside its own advertised window.
+    pub(super) advertised_head: u64,
+    /// Highest piece actually received. A lone peer moves the trusted head at most one
+    /// request horizon beyond it, so repeated claims cannot ratchet the head (#560).
+    received_edge: u64,
     /// Only a fresh lone-window pool delays media; reconnect continuity stays authoritative.
     startup_deadline: Option<Instant>,
     /// Pieces may have been prefetched during the startup decision (#521). Until the

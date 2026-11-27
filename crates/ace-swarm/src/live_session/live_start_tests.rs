@@ -229,7 +229,8 @@ async fn known_live_floor_prunes_buffered_and_inflight_stale_pieces_before_reque
     let (info, seed) = fixture(1);
     let (mut c, _) = Continuity::fresh(&info, 7, 8, 1, seed.live_recovery);
     let addr = "127.0.0.1:1".parse().unwrap();
-    c.register_active_peer(1, addr, window(7, 10));
+    // The peer's window reaches the later head only once that head is learned below.
+    c.register_active_peer(1, addr, window(7, 8));
     c.set_peer_unchoked(1, true);
     let (commands, mut rx) = mpsc::channel(32);
     let worker = tokio::spawn(async {});
@@ -250,6 +251,7 @@ async fn known_live_floor_prunes_buffered_and_inflight_stale_pieces_before_reque
     while rx.try_recv().is_ok() {}
     c.reasm.add_block(8, 0, &packet_piece(0x55)).unwrap();
     c.head = 10; // Floor9 is inside the old512-piece lag allowance.
+    c.update_peer_window(1, 7, 10);
     c.reasm.add_block(7, 0, &packet_piece(0x55)).unwrap();
     advance_pool_requests(&mut peers, &mut c, 1).await;
     let mut actual = Vec::new();
