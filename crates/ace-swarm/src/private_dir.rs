@@ -81,6 +81,19 @@ mod imp {
     /// by the walk. Should resolution fail outright (for example, no `/proc` for `realpath`), the
     /// path is returned unchanged and the walk decides.
     pub fn resolve_ancestors(path: &Path) -> PathBuf {
+        // A relative path names a directory under the working directory, never under `/`.
+        let absolute;
+        let path = if path.is_relative() {
+            match std::path::absolute(path) {
+                Ok(resolved) => {
+                    absolute = resolved;
+                    absolute.as_path()
+                }
+                Err(_) => return path.to_owned(),
+            }
+        } else {
+            path
+        };
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return path.to_owned();
         };
@@ -151,6 +164,19 @@ mod imp {
             const TRAVERSE: i32 = libc::O_PATH | libc::O_DIRECTORY;
             #[cfg(not(any(target_os = "linux", target_os = "android")))]
             const TRAVERSE: i32 = libc::O_RDONLY | libc::O_DIRECTORY;
+            // The walk starts at `/` and never interprets `..`, so either would name another
+            // directory: [`resolve_ancestors`] makes paths absolute and resolves existing `..`.
+            if path.is_relative()
+                || path
+                    .components()
+                    .any(|component| component == Component::ParentDir)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "private directory path must be absolute without `..`",
+                ))
+                .stage("open cache path");
+            }
             let mut components = path
                 .components()
                 .filter_map(|component| match component {
@@ -343,6 +369,29 @@ mod imp {
         }
         pub fn write(&self, _: &str, _: &[u8], _: usize) -> Result<(), Failure> {
             unreachable!()
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_paths_resolve_against_the_working_directory() {
+        let relative = Path::new("outpace-private-dir-missing-ancestor/descriptors");
+        assert_eq!(
+            resolve_ancestors(relative),
+            std::env::current_dir().unwrap().join(relative),
+            "never rooted at /"
+        );
+    }
+
+    #[test]
+    fn open_refuses_relative_or_parent_components() {
+        for path in ["descriptors", "/tmp/outpace-private-dir/../escape"] {
+            let failure = PrivateDir::open(Path::new(path), "x.lock").err().unwrap();
+            assert_eq!(failure.error.kind(), io::ErrorKind::InvalidInput, "{path}");
         }
     }
 }

@@ -933,7 +933,8 @@ mod classified_tests {
     }
 }
 
-#[cfg(test)]
+// Restart tests need the on-disk store, which is Unix-only.
+#[cfg(all(test, unix))]
 mod descriptor_fallback_tests {
     use super::*;
     use crate::ace_provider::descriptor_fallback::tests::{info, temp_dir};

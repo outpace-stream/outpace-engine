@@ -27,6 +27,7 @@ Outpace validates all settings before it opens any listener, and names the probl
 | `... must be >= ...`, `... must be <= ...` | A value is out of range or contradicts another one. See [Configuration](Configuration). |
 | `OUTPACE_CACHE_DIR ... is not a dedicated Outpace cache` | The disk-cache directory isn't empty and has no `.outpace-cache` marker. Point it at an empty directory, or create the marker only if everything in it may be deleted. |
 | `OUTPACE_CACHE_DIR must not equal or contain OUTPACE_DATA_DIR` | Use a cache directory inside the data directory, or somewhere separate. |
+| `OUTPACE_CACHE_DIR ... must not be inside ... descriptors` | `<data dir>/descriptors` holds the [last-known-good descriptors](Configuration#last-known-good-descriptors), and the cache is wiped at startup. Move the cache to another directory, such as `<data dir>/cache`. |
 | `exceeds this target's conservative ...-byte memory-cache limit` | Lower `OUTPACE_SEED_STORE_BYTES`, or use `OUTPACE_CACHE_TYPE=disk`. Common on 32-bit. |
 | `broadcast_store_too_small` | `OUTPACE_SEED_STORE_BYTES` must hold at least one full broadcast piece. |
 | `invalid_broadcast_options`, `invalid_source_config` | Fix the JSON in `OUTPACE_BROADCAST_OPTIONS` or `OUTPACE_BROADCAST_SOURCES`. |

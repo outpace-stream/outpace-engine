@@ -176,6 +176,7 @@ fn disabled_store_is_inert() {
     assert!(!dir.exists(), "a disabled store touches no disk");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn record_persists_across_restart_and_fresh_results_replace_stored_ones() {
     let dir = temp_dir();
@@ -217,6 +218,7 @@ async fn record_persists_across_restart_and_fresh_results_replace_stored_ones() 
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn store_is_bounded_by_entry_count_on_disk_and_in_memory() {
     let dir = temp_dir();
@@ -260,7 +262,10 @@ async fn unrestorable_descriptors_are_never_stored() {
     }
     store.settled().await;
     assert_eq!(store.len_for_test(), 0);
-    assert!(!dir.join(FILE).exists());
+    // Each one evicts whatever the disk held for the id, so the file may exist, but empty.
+    if let Ok(bytes) = std::fs::read(dir.join(FILE)) {
+        assert!(parse(&bytes, now()).unwrap().is_empty());
+    }
     drop(store);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -319,6 +324,7 @@ async fn outage_marker_is_per_id_and_cleared_by_a_fresh_result() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_forget_before_load_never_erases_a_later_record() {
     let dir = temp_dir();
@@ -360,4 +366,82 @@ async fn a_store_locked_by_another_process_is_reopened_and_merged_later() {
     }
     drop(store);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fresh_result_that_cannot_be_stored_evicts_the_superseded_one() {
+    let dir = temp_dir();
+    let store = DescriptorFallback::new(&dir, 8);
+    store.record(KEY, &info(7));
+    store.settled().await;
+    let mut rotated = info(8);
+    rotated.trackers = vec!["udp://tracker.invalid:80".repeat(10); MAX_LIST_ITEMS];
+    store.record(KEY, &rotated);
+    store.settled().await;
+    assert!(store.lookup(KEY).await.is_none());
+    drop(store);
+    let store = DescriptorFallback::new(&dir, 8);
+    assert!(store.lookup(KEY).await.is_none(), "evicted on disk too");
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unchanged_result_retries_a_write_the_lock_blocked() {
+    let dir = temp_dir();
+    let holder = DescriptorFallback::new(&dir, 8);
+    holder.lookup(KEY).await; // takes the lock
+    let blocked = DescriptorFallback::new(&dir, 8);
+    blocked.record(KEY, &info(7));
+    blocked.settled().await;
+    drop(holder);
+    // Same descriptor again: nothing changed in memory, but the disk never saw it.
+    blocked.record(KEY, &info(7));
+    blocked.settled().await;
+    drop(blocked);
+    let store = DescriptorFallback::new(&dir, 8);
+    assert_eq!(store.lookup(KEY).await.unwrap().0, info(7));
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_forget_survives_a_lock_miss_until_the_disk_reflects_it() {
+    for looked_up_first in [false, true] {
+        let dir = temp_dir();
+        let store = DescriptorFallback::new(&dir, 8);
+        store.record(KEY, &info(7));
+        store.settled().await;
+        drop(store);
+        let holder = DescriptorFallback::new(&dir, 8);
+        holder.lookup([9; 20]).await; // takes the lock
+        let blocked = DescriptorFallback::new(&dir, 8);
+        if looked_up_first {
+            assert!(
+                blocked.lookup(KEY).await.is_none(),
+                "the file was not readable"
+            );
+        }
+        blocked.forget(KEY);
+        blocked.settled().await;
+        drop(holder);
+        blocked.record([2; 20], &info(2));
+        blocked.settled().await;
+        assert!(
+            blocked.lookup(KEY).await.is_none(),
+            "reopen must not resurrect it"
+        );
+        drop(blocked);
+        let store = DescriptorFallback::new(&dir, 8);
+        assert!(
+            store.lookup(KEY).await.is_none(),
+            "{looked_up_first}: evicted on disk"
+        );
+        assert!(store.lookup([2; 20]).await.is_some());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

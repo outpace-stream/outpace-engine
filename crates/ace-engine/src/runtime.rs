@@ -301,17 +301,17 @@ pub fn config_from_env() -> Result<Config, Box<dyn std::error::Error>> {
     if let Some(v) = bool_from_env("OUTPACE_BEP9_CONTENT_ID_FALLBACK")? {
         config.bep9_content_id_fallback = v;
     }
-    if let Ok(v) = std::env::var("OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES") {
-        let entries: usize = v.parse().map_err(|_| {
-            format!("OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES must be an integer from 0 to {MAX_DESCRIPTOR_FALLBACK_ENTRIES}")
-        })?;
-        if entries > MAX_DESCRIPTOR_FALLBACK_ENTRIES {
-            return Err(format!(
-                "OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES must be at most {MAX_DESCRIPTOR_FALLBACK_ENTRIES}"
-            )
-            .into());
+    match std::env::var("OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES") {
+        Ok(v) => {
+            config.descriptor_fallback_entries = v.parse().map_err(|_| {
+                format!("OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES must be an integer from 0 to {MAX_DESCRIPTOR_FALLBACK_ENTRIES}")
+            })?;
+            validate_descriptor_fallback_entries(config.descriptor_fallback_entries)?;
         }
-        config.descriptor_fallback_entries = entries;
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES must be valid UTF-8".into());
+        }
     }
     if let Some(v) = bool_from_env("OUTPACE_BROADCAST_CATALOG_REGISTER")? {
         config.broadcast_catalog_register = v;
@@ -414,6 +414,16 @@ fn inbound_admission_from_config(config: &Config) -> ace_swarm::listen::InboundA
         max_unchoked: config.max_unchoked,
     }
     .admission()
+}
+
+fn validate_descriptor_fallback_entries(entries: usize) -> Result<(), Box<dyn std::error::Error>> {
+    if entries > MAX_DESCRIPTOR_FALLBACK_ENTRIES {
+        return Err(format!(
+            "OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES must be at most {MAX_DESCRIPTOR_FALLBACK_ENTRIES}"
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn bool_from_env(name: &str) -> Result<Option<bool>, Box<dyn std::error::Error>> {
@@ -800,6 +810,7 @@ pub async fn build_runtime(
     if config.session_buffer == 0 {
         return Err("OUTPACE_SESSION_BUFFER must be >= 1".into());
     }
+    validate_descriptor_fallback_entries(config.descriptor_fallback_entries)?;
     config.startup_buffer.validate()?;
     config.live_recovery.validate()?;
     config.hls.validate()?;
@@ -2020,6 +2031,39 @@ mod tests {
             std::env::set_var(name, invalid);
             assert!(config_from_env().unwrap_err().to_string().contains(name));
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            std::env::set_var(name, std::ffi::OsStr::from_bytes(b"6\xff"));
+            assert!(config_from_env().unwrap_err().to_string().contains(name));
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_config_rejects_an_oversized_descriptor_fallback_before_any_disk_work() {
+        let root = std::env::temp_dir().join(format!(
+            "outpace-descriptor-entries-{}",
+            rand::random::<u64>()
+        ));
+        let config = Config {
+            data_dir: root.clone(),
+            descriptor_fallback_entries: MAX_DESCRIPTOR_FALLBACK_ENTRIES + 1,
+            enable_inbound: false,
+            ..Config::default()
+        };
+        let error = build_runtime(config, vec![])
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("OUTPACE_DESCRIPTOR_FALLBACK_ENTRIES"),
+            "{error}"
+        );
+        assert!(
+            !root.exists(),
+            "validation runs before any directory is created"
+        );
     }
 
     #[test]

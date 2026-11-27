@@ -177,7 +177,7 @@ See [Seeding and Peers](Seeding-and-Peers).
 | --- | --- | --- | --- | --- |
 | `OUTPACE_DATA_DIR` | platform data dir + `outpace` | directory | all | Identity, broadcast state and [last-known-good descriptors](#last-known-good-descriptors). Container: `/var/lib/outpace`. Keep it persistent and private. |
 | `OUTPACE_CACHE_TYPE` | `memory` | `memory` or `disk` | all | Where retained pieces for seeding are kept. `disk` saves RAM on small machines. |
-| `OUTPACE_CACHE_DIR` | `<data dir>/cache` | directory | all | Disk cache root, used only with `disk`. Wiped at startup. It may be inside the data directory, but it must not be the data directory or contain it. |
+| `OUTPACE_CACHE_DIR` | `<data dir>/cache` | directory | all | Disk cache root, used only with `disk`. Wiped at startup. It may be inside the data directory, but it must not be the data directory, contain it, or sit inside `<data dir>/descriptors`. A cache you kept under `descriptors/` must move elsewhere before you upgrade. |
 | `OUTPACE_SEED_STORE_BYTES` | `134217728` (128 MiB) | bytes | all | Ceiling on retained pieces **per stream** (not a total). In memory mode it is capped per platform (about 512 MiB on 32-bit, 8 GiB on 64-bit). It must hold at least one full piece of every broadcast you run. |
 | `OUTPACE_SEED_RETENTION_SECS` | `45` | seconds, `0` = byte cap only | all | For live streams, keep only about this many seconds of recent pieces, so memory follows the bitrate instead of filling the byte cap. VOD always uses the byte cap. |
 | `OUTPACE_VOD_DISK_RESERVE_BYTES` | `268435456` (256 MiB) | bytes, `0` = 5% margin only | 1.2.0 | Free space a VOD download must leave on the cache filesystem with `disk`. See [VOD free-space check](#vod-free-space-check). |

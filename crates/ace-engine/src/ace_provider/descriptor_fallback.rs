@@ -64,11 +64,17 @@ struct Stored {
 struct State {
     entries: HashMap<[u8; 20], Stored>,
     loaded: bool,
+    /// Bumped on every change; `persisted` is the revision last written to disk.
     revision: u64,
+    persisted: u64,
     writing: bool,
+    /// When opening or writing the store last failed; cleared by a successful write.
+    failed_at: Option<Instant>,
     last_failure: Option<FailureKey>,
-    /// Ids forgotten before the file was loaded: skipped when it loads, so a forget can never
-    /// erase a descriptor recorded after it.
+    /// Whether the file's rows have been merged into `entries`. False until the store opens.
+    disk_merged: bool,
+    /// Ids forgotten before the file's rows were merged: skipped when they merge, so a forget
+    /// can never erase a descriptor recorded after it, and a reopen cannot resurrect one.
     forgotten: HashSet<[u8; 20]>,
 }
 
@@ -148,6 +154,8 @@ impl DescriptorFallback {
                 .map(|(_, restored)| restored.info)
                 != Some(info.clone())
         {
+            // Still supersedes the stored descriptor: never serve one the catalog replaced.
+            self.forget(key);
             return;
         }
         {
@@ -155,6 +163,15 @@ impl DescriptorFallback {
             state.forgotten.remove(&key);
             if let Some(existing) = state.entries.get(&key) {
                 if existing.info == *info && time.saturating_sub(existing.at) < REFRESH_SECS {
+                    // Unchanged, but a blocked write may still owe the disk this snapshot.
+                    let retry = state.persisted != state.revision
+                        && state
+                            .failed_at
+                            .is_some_and(|at| at.elapsed() >= REOPEN_BACKOFF);
+                    drop(state);
+                    if retry {
+                        inner.start_writer();
+                    }
                     return;
                 }
             }
@@ -171,14 +188,12 @@ impl DescriptorFallback {
         let write = {
             let mut state = inner.state.lock().unwrap();
             let removed = state.entries.remove(&key).is_some();
-            // Not loaded yet: the entry may exist only on disk, so the load skips it. Bounded:
-            // the first forget's write loads the file and clears the set.
-            if !state.loaded && state.forgotten.len() < MAX_ENTRIES {
-                state.forgotten.insert(key);
-                true
-            } else {
-                removed
-            }
+            // The file's rows are not merged yet: the entry may exist only on disk, so the merge
+            // skips it. Bounded: the merge that opens the store clears the set.
+            let pending = !state.disk_merged
+                && state.forgotten.len() < MAX_ENTRIES
+                && state.forgotten.insert(key);
+            removed || pending
         };
         if write {
             inner.schedule_write();
@@ -285,6 +300,14 @@ impl Inner {
         {
             let mut state = self.state.lock().unwrap();
             state.revision = state.revision.wrapping_add(1);
+        }
+        self.start_writer();
+    }
+
+    /// Start the single writer unless it is already running.
+    fn start_writer(self: &Arc<Self>) {
+        {
+            let mut state = self.state.lock().unwrap();
             if state.writing {
                 return;
             }
@@ -304,7 +327,12 @@ impl Inner {
             };
             if let Io::Open(directory) = &*io {
                 match directory.write(FILE, &snapshot, MAX_FILE_BYTES) {
-                    Ok(()) => self.state.lock().unwrap().last_failure = None,
+                    Ok(()) => {
+                        let mut state = self.state.lock().unwrap();
+                        state.persisted = revision;
+                        state.failed_at = None;
+                        state.last_failure = None;
+                    }
                     Err(failure) => self.report(
                         failure.key(),
                         &format!(
@@ -355,6 +383,7 @@ impl Inner {
                 }
             };
         }
+        let from_disk = matches!(io, Io::Open(_));
         let restored = match &*io {
             Io::Open(directory) => match directory.read(FILE, MAX_FILE_BYTES) {
                 Ok(bytes) => match parse(&bytes, now()) {
@@ -375,20 +404,26 @@ impl Inner {
             _ => HashMap::new(),
         };
         let mut state = self.state.lock().unwrap();
-        let forgotten = std::mem::take(&mut state.forgotten);
-        // Entries recorded before the load are fresher than anything on disk.
-        for (key, stored) in restored {
-            if !forgotten.contains(&key) {
-                state.entries.entry(key).or_insert(stored);
+        if from_disk {
+            // Even an unreadable file counts as merged: the next write replaces it.
+            let forgotten = std::mem::take(&mut state.forgotten);
+            // Entries recorded before the load are fresher than anything on disk.
+            for (key, stored) in restored {
+                if !forgotten.contains(&key) {
+                    state.entries.entry(key).or_insert(stored);
+                }
             }
+            state.disk_merged = true;
         }
         trim(&mut state.entries, self.capacity);
         state.loaded = true;
     }
 
     /// Log each distinct failure once until a write succeeds.
+    /// Every open or write failure goes through here, which also starts the retry backoff.
     fn report(&self, key: FailureKey, message: &str) {
         let mut state = self.state.lock().unwrap();
+        state.failed_at = Some(Instant::now());
         if state.last_failure == Some(key) {
             return;
         }
