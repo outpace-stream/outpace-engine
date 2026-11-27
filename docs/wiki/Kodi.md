@@ -6,7 +6,7 @@ Kodi can play Outpace streams three ways:
 | --- | --- |
 | [PVR IPTV Simple Client](#pvr-iptv-simple-client-recommended) with an M3U playlist of native URLs | Yes. Recommended. |
 | [Opening a URL directly](#opening-a-url-directly) (native TS or HLS, or `/ace/getstream?id=`) | Yes |
-| [Horus](#horus) and other add-ons written for the Ace Stream engine | Partly: Horus plays a stream only when it's already running in Outpace. |
+| [Horus](#horus) and other add-ons written for the Ace Stream engine | Yes, including streams that aren't running yet. Outpace 1.3.0 played only a running stream; see [Horus](#horus). |
 
 Examples use the placeholder id `0123456789abcdef0123456789abcdef01234567` and an Outpace host
 called `outpace-host`. Replace both.
@@ -104,29 +104,35 @@ That step didn't run in the test (x86 Linux, not root) and wasn't tested.
 | `GET /webui/api/service?method=get_version&format=json` | Answers with Outpace's version. Horus uses it to detect the engine. |
 | `GET /ace/getstream?format=json&id=<id>&sid=<hash>` | Answers with `playback_url`, `stat_url` and `command_url`. Outpace's version is below 3.1.29, so Horus sends `sid` rather than `pid`. |
 | `GET /server/api?method=get_media_files&api_version=3&infohash=...` | Answers with one synthetic file entry. |
-| `GET <stat_url>` every second | Horus waits for `status` to become `dl`, for at most its **time limit** setting (30 seconds by default). |
+| `GET <stat_url>` every second | The first read starts the stream. Horus waits for `status` to become `dl`, for at most its **time limit** setting (30 seconds by default) while the status is anything else, and with no limit while it is `prebuf`. |
 | Opens `<playback_url>` in Kodi's player | Plays. |
 | `GET <command_url>?method=stop` | Stops this lease. |
 
-**Known gap: cold starts time out.** Outpace doesn't start a TS stream on a `format=json`
-request; it starts it when the client opens `playback_url`
-([details](Playing-Streams#json-sessions)). Until then, `stat_url` reports `idle`. Horus waits for
-`dl` before it opens `playback_url`, so for a stream that isn't already running, Horus gives up
-after its time limit with "timeout". This was reproduced both in Kodi and by running Horus's own
-engine client code against Outpace.
+**Cold starts.** Outpace doesn't start a TS stream on the `format=json` request itself, but
+the first read of `stat_url` starts it ([details](Playing-Streams#json-sessions)). `stat_url`
+then reports `prebuf` while the stream starts and `dl` once it runs, and Horus opens
+`playback_url`. Outpace 1.3.0 and earlier started the stream only when `playback_url` opened, so
+`stat_url` stayed `idle` and Horus gave up after its time limit with "timeout" for any stream that
+wasn't already running.
 
-When the stream **is** already running in Outpace (another viewer is watching, or it was opened
-less than 30 seconds ago), `stat_url` reports `dl` within a couple of seconds, and Horus plays it
-in Kodi normally.
+The fix was checked by running Horus's own engine client code (its `lib/acestream` module and the
+same wait-for-`dl` rule) against a local Outpace build on one current public live stream: `dl`
+came after about 2 seconds and the playback URL returned media. It hasn't been re-run in Kodi
+itself yet.
 
-Until this is resolved, use the [PVR IPTV Simple Client](#pvr-iptv-simple-client-recommended) or
-a [direct URL](#opening-a-url-directly) for streams that aren't already running.
+If Kodi or Horus is closed before playback opens, Outpace drops the stream once `stat_url`
+has gone unread for 60 seconds.
+
+If the stream can't start (for example, no peer is sharing it), `stat_url` answers with an
+`error`. Horus ignores stat errors and keeps showing its last status, so its dialog can stay on
+"prebuffering" until you cancel it. Later reads don't retry the start. Opening the channel again
+in Horus sends a new request, which tries again.
 
 ## Add-ons that weren't tested
 
 Other Kodi add-ons that target the Ace Stream engine weren't tested. One that uses only
-`/ace/getstream`, `/ace/manifest.m3u8` and `/server/api` has a good chance of working, with the
-same cold-start caveat as Horus if it waits for `dl` before opening the stream. Add-ons that use
+`/ace/getstream`, `/ace/manifest.m3u8` and `/server/api` has a good chance of working, including
+one that waits for `dl` on `stat_url` before opening the stream. Add-ons that use
 the engine's legacy TCP API on port 62062 instead of HTTP won't work: Outpace doesn't implement
 it.
 
