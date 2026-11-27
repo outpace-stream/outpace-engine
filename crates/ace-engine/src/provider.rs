@@ -41,6 +41,8 @@ pub struct LiveRecoveryStats {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LivePositionStats {
     pub pos: Option<u64>,
+    /// Next piece whose media has not been fully handed to the source channel.
+    pub delivered: Option<u64>,
     pub last: Option<u64>,
     pub live_first: Option<u64>,
     pub live_last: Option<u64>,

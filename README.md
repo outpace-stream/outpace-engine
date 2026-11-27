@@ -183,7 +183,8 @@ The HTTP API has no authentication, so keep it on `127.0.0.1` or behind a proxy.
 | Fix a problem | [Troubleshooting](https://github.com/outpace-stream/outpace-engine/wiki/Troubleshooting) |
 | See it running on a TV, a router, a single-board computer or a home server | [Success stories](https://github.com/outpace-stream/outpace-engine/wiki/Success-Stories) |
 
-The [user wiki](https://github.com/outpace-stream/outpace-engine/wiki) is generated from
+The [user wiki](https://github.com/outpace-stream/outpace-engine/wiki) and the
+[documentation site](https://outpace-stream.github.io/outpace-engine/) are both generated from
 [`docs/wiki/`](docs/wiki); edit it there.
 
 Technical reference:

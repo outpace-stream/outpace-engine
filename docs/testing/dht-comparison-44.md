@@ -14,8 +14,10 @@ and the limits of what was measured.
 > **Follow-up:** [#384](https://github.com/outpace-stream/outpace-engine/issues/384)
 > replaced the fixed rounds described below. The walk now keeps up to 8 queries
 > outstanding and sends the next one as soon as a correlated reply arrives or a silent
-> query's 1.5-second slot timeout passes. The measurements in this document describe
-> the walk before that change.
+> query's 1.5-second slot timeout passes. Because the walk now queries at network
+> speed, it also stops asking new nodes after 256 lookup queries, so one walk sends at
+> most 264 queries including the dead-end recovery round. The measurements in this
+> document describe the walk before that change.
 
 ## Candidates
 

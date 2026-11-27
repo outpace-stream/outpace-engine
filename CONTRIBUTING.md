@@ -103,7 +103,9 @@ cargo test --workspace --locked
 .githooks/pre-commit --all
 ```
 
-If you changed `docs/wiki/`, also run `python3 tools/wiki/check_links.py docs/wiki`. A local
+If you changed `docs/wiki/`, also run `python3 tools/wiki/check_links.py docs/wiki`. To preview
+the documentation site, install [mdBook](https://github.com/rust-lang/mdBook) at the version
+`.github/workflows/site.yml` pins and run `python3 tools/site/build.py --strict --out _site`. A local
 build can rewrite `Cargo.lock`. Revert that before committing unless you changed dependencies.
 
 ### Code conventions
@@ -174,9 +176,13 @@ it blocks the commit, as the checker always fails closed. To work fully offline,
 
 ## Documentation
 
-- **User docs** live in [`docs/wiki/`](docs/wiki) and are published to the
-  [GitHub wiki](https://github.com/outpace-stream/outpace-engine/wiki) automatically on merge. Edit them
-  there, not in the wiki web UI, which is overwritten.
+- **User docs** live in [`docs/wiki/`](docs/wiki) and are published automatically on merge, both to
+  the [GitHub wiki](https://github.com/outpace-stream/outpace-engine/wiki) and, built with mdBook by
+  [`tools/site/build.py`](tools/site/build.py), to the
+  [documentation site](https://outpace-stream.github.io/outpace-engine/). Edit them there, not in
+  the wiki web UI, which is overwritten.
+  - `_Sidebar.md` is also the site's navigation, so every page must be listed in it, and the first
+    paragraph after a page's title becomes its search-result description.
   - Pages use GitHub-wiki conventions: dashed page names, and links written `[text](Page-Name)`.
   - Mark features that aren't in a release yet as **Unreleased**.
 - **Technical references** live in `docs/` (for example the [native API](docs/native-api.md)

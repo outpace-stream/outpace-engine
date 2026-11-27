@@ -630,6 +630,11 @@ pub(super) struct Continuity {
     workers: WorkerOwnership,
     pending_output: std::collections::VecDeque<LiveOutput>,
     pending_credit: std::collections::VecDeque<Vec<Arc<OutputCredit>>>,
+    /// Piece whose prepared segments `pending_output` holds; set when a piece is taken.
+    output_piece: Option<u64>,
+    /// Delivery cursor: every piece before it has had all of its output sent to the
+    /// source channel. Lags `reasm.next_needed()` while output is still in the actor.
+    delivered: Option<u64>,
     resync_credit: Vec<(std::ops::Range<usize>, Arc<OutputCredit>)>,
     resync_tail: usize,
     output_ceiling: Option<u64>,

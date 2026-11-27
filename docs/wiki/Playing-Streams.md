@@ -359,15 +359,19 @@ through TLS termination or a sub-path, the returned URLs won't work. See
 | --- | --- | --- |
 | VLC | Native URL or `/ace/getstream?id=` | Used in the documented examples. |
 | mpv, ffmpeg, ffplay | Native TS or HLS URL | Plain HTTP TS/HLS consumers. Expected to work, but not separately tested. |
-| Jellyfin and other IPTV-style media servers | Native URL in an M3U playlist | Supported integration target. |
-| Dispatcharr | Native URL as the channel's media URL | Covered by local compatibility tests. |
+| [Jellyfin](Jellyfin) | Native URL in an M3U tuner playlist | Tested with Jellyfin 12.4 and Outpace 1.3.0: TS and HLS channels play. Prefer TS. |
+| [Dispatcharr](Dispatcharr) | Native URL as a stream or in an M3U account | Tested with Dispatcharr 0.34.1 and Outpace 1.3.0: TS and HLS play through its proxy with the Proxy and FFmpeg profiles. |
 | acexy | Compat JSON handshake, `playback_url`, stop command | Covered by local compatibility tests. |
 | Acestream-Manager | Compat health check, stats, TS/HLS proxy | Covered by local compatibility tests (search excluded). |
 | Apps built on the public AceStream Android SDK | Compat `/ace/*` and `/server/api` | SDK request quirks are handled: duplicated selectors, `stream_id=-1`, `api_version=2`. |
 | [Outpace for Android](Android-App) | Native URLs, `/status`, `/streams` | The companion app; hands the native URL to the player you pick. |
-| Kodi and other add-ons using `/ace/getstream` | Compat API | Likely to work if they stick to the supported routes. Not tested. |
+| [Kodi](Kodi) with PVR IPTV Simple Client, or a direct URL | Native TS or HLS URL, or `/ace/getstream?id=` | Tested with Kodi 21.2 (headless) and Outpace 1.3.0: plays. |
+| [Kodi](Kodi) with the Horus add-on | Compat `format=json` handshake and `stat_url` | Tested with Horus 1.3.2: plays only a stream that's already running; a cold start times out. |
+| Other Kodi add-ons using `/ace/getstream` | Compat API | Not tested. |
 
-"Covered by local tests" means the client's requests were reproduced offline. It doesn't
+"Tested" means the client was run against a local Outpace build with live public streams;
+the linked page says exactly what was checked. "Covered by local tests" means the client's
+requests were reproduced offline. It doesn't
 guarantee playback quality with every stream. For a playlist entry, prefer the plain native
 URL; it needs no handshake.
 

@@ -89,10 +89,17 @@ Put the native stream URL in your M3U playlist, one entry per channel:
 http://outpace-host:6878/streams/ace/0123456789abcdef0123456789abcdef01234567
 ```
 
-No handshake or compatibility mode is needed. If those tools run on another machine, make the
-API reachable from them, and protect it. See
+No handshake or compatibility mode is needed. If those tools run on another machine or in a
+container, make the API reachable from them, and protect it. Step-by-step guides:
+[Jellyfin](Jellyfin), [Dispatcharr](Dispatcharr) and [Kodi](Kodi). See also
 [Playing Streams](Playing-Streams#known-clients) and
 [Deployment](Deployment#exposing-the-api-safely).
+
+## Does Outpace work with Kodi?
+
+Yes, with Kodi's PVR IPTV Simple Client and an M3U playlist of native URLs, or by opening a URL
+directly. The Horus add-on works only for a stream that is already running in Outpace; a cold
+start times out. See [Kodi](Kodi).
 
 ## My app was built for the AceStream engine. Will it work?
 
