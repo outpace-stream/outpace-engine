@@ -236,13 +236,22 @@ impl DescriptorFallback {
             let loader = Arc::clone(inner);
             let tasks = Arc::clone(&inner.tasks);
             tasks.active.fetch_add(1, Ordering::SeqCst);
-            let loaded = tokio::task::spawn_blocking(move || {
+            // The blocking task signals completion itself, so a cancelled lookup still settles.
+            tokio::task::spawn_blocking(move || {
                 loader.ensure_loaded();
                 drop(loader);
+                tasks.finish();
             })
-            .await;
-            tasks.finish();
-            loaded.ok()?;
+            .await
+            .ok()?;
+            // A reopen merged the file under changes a blocked write still owes it: write them.
+            let owed = {
+                let state = inner.state.lock().unwrap();
+                state.disk_merged && state.persisted != state.revision
+            };
+            if owed {
+                inner.start_writer();
+            }
         }
         let state = inner.state.lock().unwrap();
         let stored = state.entries.get(&key)?;
@@ -542,6 +551,7 @@ fn parse(bytes: &[u8], time: u64) -> io::Result<HashMap<[u8; 20], Stored>> {
         return Err(invalid());
     }
     let mut entries = HashMap::new();
+    let mut seen = HashSet::new();
     let mut rows = 0;
     for line in bytes[HEADER.len()..].split(|byte| *byte == b'\n') {
         if line.is_empty() {
@@ -552,10 +562,13 @@ fn parse(bytes: &[u8], time: u64) -> io::Result<HashMap<[u8; 20], Stored>> {
             return Err(invalid());
         }
         let row = std::str::from_utf8(line).map_err(|_| invalid())?;
+        // The id is the first field: a duplicate is rejected even behind an expired row.
+        let key = hex20_field(row.split(' ').next().unwrap_or_default())?;
+        if !seen.insert(key) {
+            return Err(invalid());
+        }
         if let Some((key, stored)) = parse_row(row, time)? {
-            if entries.insert(key, stored).is_some() {
-                return Err(invalid());
-            }
+            entries.insert(key, stored);
         }
     }
     Ok(entries)

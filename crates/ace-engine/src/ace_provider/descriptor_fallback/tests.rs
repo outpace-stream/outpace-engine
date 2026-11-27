@@ -80,6 +80,10 @@ fn bounded_parser_rejects_corrupt_hostile_and_oversized_files() {
         ("missing header", row(time).into_bytes()),
         ("wrong header", b"OUTPACE-DESCRIPTORS-2\n".to_vec()),
         ("duplicate id", file(&[row(time), row(time)])),
+        (
+            "duplicate id behind an expired row",
+            file(&[row(time - MAX_AGE_SECS - 1), row(time)]),
+        ),
         ("extra field", file(&[format!("{} x", row(time))])),
         (
             "missing field",
@@ -521,6 +525,43 @@ async fn an_overflowing_eviction_set_never_restores_a_forgotten_row() {
     drop(blocked);
     let store = DescriptorFallback::new(&dir, 8);
     assert!(store.lookup(KEY).await.is_none(), "evicted on disk");
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_lookup_that_reopens_the_store_writes_what_it_still_owes() {
+    let dir = temp_dir();
+    let store = DescriptorFallback::new(&dir, 8);
+    store.record(KEY, &info(7));
+    store.settled().await;
+    drop(store);
+    let holder = DescriptorFallback::new(&dir, 8);
+    holder.lookup([9; 20]).await; // takes the lock
+    let blocked = DescriptorFallback::new(&dir, 8);
+    blocked.forget(KEY);
+    blocked.record([2; 20], &info(2));
+    blocked.settled().await;
+    drop(holder);
+    // An outage lookup reopens the store: the eviction and the record must reach the disk.
+    assert!(blocked.lookup(KEY).await.is_none());
+    blocked.settled().await;
+    drop(blocked);
+    let store = DescriptorFallback::new(&dir, 8);
+    assert!(store.lookup(KEY).await.is_none(), "evicted on disk");
+    assert!(store.lookup([2; 20]).await.is_some(), "recorded on disk");
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_cancelled_cold_lookup_still_settles() {
+    let dir = temp_dir();
+    let store = DescriptorFallback::new(&dir, 8);
+    // Polled once, which starts the blocking load, then dropped.
+    let _ = tokio::time::timeout(Duration::ZERO, store.lookup(KEY)).await;
+    store.settled().await;
     drop(store);
     let _ = std::fs::remove_dir_all(dir);
 }
