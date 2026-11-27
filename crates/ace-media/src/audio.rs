@@ -187,19 +187,24 @@ fn native_selection(
 /// Reorder one viewer's PMT so the best `language` audio track becomes the program's first
 /// audio entry, then recompute the CRC. Every elementary stream, descriptor, PID and the
 /// version are kept, so players that start the first audio track start the requested one and
-/// can still switch. Only a complete, CRC-valid, single-packet current PMT is rewritten; any
-/// other packet, or one already in the preferred order, is left untouched (`false`).
-/// Works in place without allocating.
-pub fn prefer_audio_track(packet: &mut [u8], language: AudioLanguage) -> bool {
+/// can still switch. Only a complete, CRC-valid, single-packet current PMT for `program` (the
+/// current PAT program) with a well-formed program descriptor loop is rewritten; any other
+/// packet, including a delayed PMT of a previous program, or one already in the preferred
+/// order, is left untouched (`false`). Works in place without allocating.
+pub fn prefer_audio_track(packet: &mut [u8], language: AudioLanguage, program: u16) -> bool {
     let Ok(packet) = <&mut [u8; N]>::try_from(packet) else {
         return false;
     };
-    let Ok(s) = section(packet, 2, 13, None) else {
+    let Ok(s) = section(packet, 2, 13, Some(program)) else {
         return false;
     };
     let len = s.len();
     let end = len - 4;
     let begin = 12 + ((((s[10] & 15) as usize) << 8) | s[11] as usize);
+    // The program descriptor loop must fit program_info_length and parse completely.
+    if begin > end || descriptors(&s[12..begin]).is_none() {
+        return false;
+    }
     let mut pos = begin;
     let mut first_audio = None;
     let mut best: Option<(u8, usize, usize)> = None;
@@ -1875,7 +1880,7 @@ mod tests {
     fn preferred_track_is_moved_to_the_first_audio_entry_with_a_valid_crc() {
         let source = multi_language();
         let mut packet = source;
-        assert!(prefer_audio_track(&mut packet, lang("rus")));
+        assert!(prefer_audio_track(&mut packet, lang("rus"), 1));
         assert_eq!(es_pids(&packet), vec![257, 259, 258, 260]);
         let s = section(&packet, 2, 13, None).expect("CRC-valid current PMT");
         let original = section(&source, 2, 13, None).unwrap();
@@ -1905,7 +1910,7 @@ mod tests {
                 (15, 260, RUS),
             ],
         );
-        assert!(prefer_audio_track(&mut packet, lang("rus")));
+        assert!(prefer_audio_track(&mut packet, lang("rus"), 1));
         assert_eq!(es_pids(&packet), vec![257, 260, 258, 259]);
 
         for (code, table) in [
@@ -1914,19 +1919,71 @@ mod tests {
             ("rus", pmt(0, &[(0x1b, 257, &[]), (6, 258, RUS)])), // tagged but not audio
         ] {
             let mut packet = table;
-            assert!(!prefer_audio_track(&mut packet, lang(code)), "{code}");
+            assert!(!prefer_audio_track(&mut packet, lang(code), 1), "{code}");
             assert_eq!(packet, table);
         }
         let mut corrupt = source;
         corrupt[30] ^= 1;
         let before = corrupt;
-        assert!(!prefer_audio_track(&mut corrupt, lang("rus")));
+        assert!(!prefer_audio_track(&mut corrupt, lang("rus"), 1));
         assert_eq!(
             corrupt, before,
             "CRC-invalid tables are forwarded untouched"
         );
         let mut short = [0x47; 100];
-        assert!(!prefer_audio_track(&mut short, lang("rus")));
+        assert!(!prefer_audio_track(&mut short, lang("rus"), 1));
+    }
+
+    #[test]
+    fn pmt_rewrite_requires_the_current_program_and_a_valid_program_info_loop() {
+        let source = multi_language();
+        // Another program's PMT is left untouched.
+        let mut packet = source;
+        assert!(!prefer_audio_track(&mut packet, lang("rus"), 2));
+        assert_eq!(packet, source);
+        // `multi_language` carries one well-formed program descriptor and is rewritten.
+        let mut packet = source;
+        assert!(prefer_audio_track(&mut packet, lang("rus"), 1));
+        // A CRC-valid PMT whose program descriptor overruns program_info_length, or whose
+        // descriptor header is truncated, is forwarded unchanged.
+        let entries = |info: &[u8]| {
+            let mut s = vec![
+                2,
+                0xb0,
+                0,
+                0,
+                1,
+                0xc1,
+                0,
+                0,
+                0xe1,
+                1,
+                0xf0,
+                info.len() as u8,
+            ];
+            s.extend_from_slice(info);
+            for (ty, p, d) in [(0x1b, 257u16, &[][..]), (15, 258, ENG), (15, 259, RUS)] {
+                s.extend_from_slice(&[ty, 0xe0 | (p >> 8) as u8, p as u8, 0xf0, d.len() as u8]);
+                s.extend_from_slice(d);
+            }
+            table(256, s)
+        };
+        let mut valid = entries(&[0x52, 1, 0xab]);
+        assert!(prefer_audio_track(&mut valid, lang("rus"), 1));
+        for info in [&[0x52, 2, 0xab][..], &[0x52, 1, 0xab, 0x05][..]] {
+            let table = entries(info);
+            let mut packet = table;
+            assert!(!prefer_audio_track(&mut packet, lang("rus"), 1), "{info:?}");
+            assert_eq!(packet, table);
+        }
+        let vector = include_bytes!("../../../tests/vectors/media/pmt-malformed-program-info.ts");
+        let mut packet: [u8; N] = vector[N..].try_into().unwrap();
+        assert!(
+            section(&packet, 2, 13, Some(1)).is_ok(),
+            "the vector is CRC-valid"
+        );
+        assert!(!prefer_audio_track(&mut packet, lang("rus"), 1));
+        assert_eq!(packet[..], vector[N..]);
     }
 
     #[test]
@@ -1940,7 +1997,7 @@ mod tests {
             &crate::test_stream::pmt(&crate::test_stream::AUDIO)
         );
         let mut packet: [u8; N] = source[N..].try_into().unwrap();
-        assert!(prefer_audio_track(&mut packet, lang("rus")));
+        assert!(prefer_audio_track(&mut packet, lang("rus"), 1));
         assert_eq!(&packet, &expected[N..]);
         let mut st = LiveAudioSelection::with_language(lang("rus"));
         st.observe(source[..N].try_into().unwrap());
@@ -2079,7 +2136,7 @@ mod tests {
         let table = pmt(0, &[(0x1b, 257, &[]), (15, 258, ENG), (15, 259, bad)]);
         assert_eq!(selected(Some("rus"), table).0, vec![257, 258]);
         let mut packet = table;
-        assert!(!prefer_audio_track(&mut packet, rus));
+        assert!(!prefer_audio_track(&mut packet, rus, 1));
         assert_eq!(packet, table);
     }
 
@@ -2093,7 +2150,7 @@ mod tests {
         // The CRC-valid PMT is used, but its malformed `rus` tag is not a match.
         assert_eq!(st.selection_for(Some(lang("rus"))), Some(Some(0x101)));
         let mut packet = table;
-        assert!(!prefer_audio_track(&mut packet, lang("rus")));
+        assert!(!prefer_audio_track(&mut packet, lang("rus"), 1));
         assert_eq!(packet, table);
     }
 }

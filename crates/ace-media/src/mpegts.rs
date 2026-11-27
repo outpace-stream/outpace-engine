@@ -393,8 +393,8 @@ impl VideoAccessPointState {
         if pid == 0 {
             self.observe_pat(packet);
         } else if Some(pid) == self.pmt_pid {
-            if let Some(language) = self.audio_language {
-                crate::audio::prefer_audio_track(packet, language);
+            if let (Some(language), Some(program)) = (self.audio_language, self.program_number) {
+                crate::audio::prefer_audio_track(packet, language, program);
             }
             self.observe_pmt(packet);
         }
@@ -2056,7 +2056,7 @@ mod tests {
         let rus = AudioLanguage::parse("rus").unwrap();
         let source = stream(60);
         let mut expected_pmt = crate::test_stream::pmt(&crate::test_stream::AUDIO);
-        assert!(prefer_audio_track(&mut expected_pmt, rus));
+        assert!(prefer_audio_track(&mut expected_pmt, rus, 1));
         let run = |gate: &mut KeyframeGate| {
             let mut out = Vec::new();
             for chunk in source.chunks(64 * 188 + 7) {
@@ -2100,6 +2100,41 @@ mod tests {
             .find(|p| ts_pid(p) == PMT_PID)
             .expect("tables after re-lock");
         assert_eq!(first_pmt[4..], expected_pmt[4..]);
+    }
+
+    #[test]
+    fn a_delayed_pmt_of_the_previous_program_is_never_rewritten() {
+        use crate::audio::{prefer_audio_track, AudioLanguage};
+        use crate::test_stream::{pat, pmt, AUDIO};
+        // Rewrite the program number (PAT entry or PMT header) and recompute the CRC.
+        fn reprogram(mut packet: [u8; 188], at: usize, program: u16) -> [u8; 188] {
+            let len = 3 + ((((packet[6] & 15) as usize) << 8) | packet[7] as usize);
+            packet[5 + at..5 + at + 2].copy_from_slice(&program.to_be_bytes());
+            let crc = mpeg_crc32(&packet[5..5 + len - 4]);
+            packet[5 + len - 4..5 + len].copy_from_slice(&crc.to_be_bytes());
+            packet
+        }
+        let rus = AudioLanguage::parse("rus").unwrap();
+        let mut state = VideoAccessPointState::new();
+        state.audio_language = Some(rus);
+        let mut packet = pat();
+        state.observe_mut(&mut packet);
+        // The PAT moves to program 2 on the same PMT PID; a program 1 PMT arrives late.
+        let mut packet = reprogram(pat(), 8, 2);
+        state.observe_mut(&mut packet);
+        let delayed = pmt(&AUDIO);
+        let mut packet = delayed;
+        state.observe_mut(&mut packet);
+        assert_eq!(packet, delayed, "forwarded byte-for-byte");
+        assert_eq!(state.table_prefix(), None, "and never cached");
+        // A valid program 2 PMT is still reordered and cached.
+        let current = reprogram(pmt(&AUDIO), 3, 2);
+        let mut expected = current;
+        assert!(prefer_audio_track(&mut expected, rus, 2));
+        let mut packet = current;
+        state.observe_mut(&mut packet);
+        assert_eq!(packet, expected);
+        assert_eq!(state.table_prefix().unwrap()[188..376], expected);
     }
 
     #[test]
