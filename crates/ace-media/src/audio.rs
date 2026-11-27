@@ -549,7 +549,9 @@ impl LiveAudioSelection {
                         }
                         self.pat = Some(packet);
                         if programs[0].1 < 0x20 || programs[0].1 == 0x1fff {
+                            // No usable PMT can arrive on a reserved PID: selection is off.
                             self.layout = LayoutDecision::Unsupported;
+                            self.native_disabled = true;
                         }
                     }
                 }
@@ -2020,6 +2022,16 @@ mod tests {
         assert_eq!(st.selection_for(None), None, "still waiting for PAT/PMT");
         st.observe(pat(1, 256));
         assert!(st.observe(multi_language()).resolved);
+    }
+
+    #[test]
+    fn a_pat_mapping_the_pmt_to_a_reserved_pid_disables_native_selection_at_once() {
+        for reserved in [0x10, 0x1fff] {
+            let mut st = LiveAudioSelection::with_preference(AudioPreference::Track(259));
+            assert!(st.observe(pat(1, reserved)).resolved);
+            assert_eq!(st.selection_for(Some(lang("rus"))), Some(None));
+            assert!(st.track_lost());
+        }
     }
 
     #[test]
