@@ -457,7 +457,10 @@ async fn a_lookup_retries_a_store_the_lock_blocked_on_first_load() {
     let holder = DescriptorFallback::new(&dir, 8);
     holder.lookup([9; 20]).await; // takes the lock
     let blocked = DescriptorFallback::new(&dir, 8);
-    assert!(blocked.lookup(KEY).await.is_none(), "locked out on first load");
+    assert!(
+        blocked.lookup(KEY).await.is_none(),
+        "locked out on first load"
+    );
     drop(holder);
     // No record or forget in between: the lookup alone reopens the store.
     assert_eq!(blocked.lookup(KEY).await.unwrap().0, info(7));
